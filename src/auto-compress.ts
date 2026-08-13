@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homeDir } from "./home.js";
 import { join } from "node:path";
-import { complete } from "@earendil-works/pi-ai/compat";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { complete } from "@oh-my-pi/pi-ai";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 import type { CoreMessage, CompressionState, CompressibleRange, Prompts } from "acp-kernel";
 import { debug, logInfo, logWarn } from "./log.js";
 
@@ -15,7 +15,7 @@ const MAX_MSG_CHARS = 4000;
 /** Reads `compressModel` from `~/.<CONFIG_DIR_NAME>/acp-omp.json as `provider:modelId`. */
 export function readCompressModel(): string | null {
   try {
-    const cfg = JSON.parse(readFileSync(join(homedir(), CONFIG_DIR_NAME, "acp-omp.json"), "utf8")) as Record<string, unknown>;
+    const cfg = JSON.parse(readFileSync(join(homeDir(), CONFIG_DIR_NAME, "acp-omp.json"), "utf8")) as Record<string, unknown>;
     return typeof cfg.compressModel === "string" && cfg.compressModel.length > 0 ? cfg.compressModel : null;
   } catch {
     return null;
@@ -181,7 +181,7 @@ export async function summarizeRange(
     const response = await complete(
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
-      { apiKey: auth.apiKey, headers: auth.headers, env: auth.env, maxTokens: MAX_OUTPUT_TOKENS, signal: ac.signal },
+      { apiKey: auth.apiKey, headers: auth.headers, maxTokens: MAX_OUTPUT_TOKENS, signal: ac.signal },
     );
     const summary = parseSummary(
       response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n"),

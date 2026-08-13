@@ -8,7 +8,7 @@ import { buildAcpSystemPrompt } from "../src/system-prompt.js";
 import { loadUserConfig, applyUserConfig } from "../src/user-config.js";
 import type { AdapterConfig } from "../src/config.js";
 
-const CONFIG_DIR_NAME = ".pi";
+const CONFIG_DIR_NAME = ".omp";
 
 test("buildAcpSystemPrompt with defaults contains the philosophy and tier rules", () => {
   const prompt = buildAcpSystemPrompt(defaultPrompts);

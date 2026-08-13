@@ -15,10 +15,5 @@ export default defineConfig({
   define: {
     CURRENT_VERSION: JSON.stringify(pkg.version),
   },
-  external: [
-    "@earendil-works/pi-coding-agent",
-    "@earendil-works/pi-ai",
-    "@earendil-works/pi-agent-core",
-  ],
-  noExternal: ["typebox"],
+  external: [/@oh-my-pi\//],
 });

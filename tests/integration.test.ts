@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 // Mock Pi's ExtensionAPI — captures the event handlers the factory registers,
 // so we can invoke them with a fake ExtensionContext and assert the wiring works.
@@ -69,9 +69,10 @@ test("before_agent_start appends the ACP system prompt", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, {});
-  assert.ok(result.systemPrompt.startsWith("BASE"));
-  assert.ok(result.systemPrompt.includes("compress"));
-  assert.ok(result.systemPrompt.includes("acp"));
+  const sp = result.systemPrompt.join("\n");
+  assert.ok(sp.startsWith("BASE"));
+  assert.ok(sp.includes("compress"));
+  assert.ok(sp.includes("acp"));
 });
 
 test("context handler tags every message with a ref even when length matches event.messages", async () => {
@@ -460,7 +461,7 @@ test("system prompt sources compression rules from acp-kernel (no hardcoded drif
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-  const sp = result.systemPrompt;
+  const sp = result.systemPrompt.join("\n");
   // kernel constants inlined (regression guard against reverting to a hardcoded copy)
   assert.ok(sp.includes("Work from summaries, not raw tool outputs"), "kernel COMPRESS_PHILOSOPHY inlined");
   assert.ok(sp.includes("HOW TO COMPRESS"), "kernel HOW_TO_COMPRESS_RULES inlined");
@@ -706,6 +707,7 @@ test("system prompt never includes the ACP_DELEGATE NOTIFICATIONS section (omp d
   const { api, handlers } = captureApi();
   createAcpExtension({ delegate: true })(api as any);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
-  assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section always omitted (omp provides its own orchestration)");
-  assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt present");
+  const sp = result.systemPrompt.join("\n");
+  assert.ok(!sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section always omitted (omp provides its own orchestration)");
+  assert.ok(sp.includes("ACP TAGS"), "core ACP prompt present");
 });

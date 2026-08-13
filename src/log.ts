@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync, statSync, renameSync, existsSync } from "node:fs";
 import * as path from "node:path";
-import { homedir } from "node:os";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { homeDir } from "./home.js";
+import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 
@@ -9,7 +9,7 @@ const ENV_DEBUG =
   process.env.ACP_DEBUG === "1" || process.env.ACP_DEBUG === "true";
 
 function resolveLogFile(): string {
-  return process.env.ACP_LOG_FILE ?? path.join(homedir(), CONFIG_DIR_NAME, "acp-omp.log");
+  return process.env.ACP_LOG_FILE ?? path.join(homeDir(), CONFIG_DIR_NAME, "acp-omp.log");
 }
 
 let runtimeDebug: boolean | null = null;

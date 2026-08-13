@@ -1,15 +1,16 @@
-import { Type, type Static } from "typebox";
-import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { type } from "@oh-my-pi/omptype";
+import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { resolve, relative, isAbsolute, join } from "node:path";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
+import { homeDir } from "./home.js";
 
 /** Directory for auto-generated decompress output files. */
-const AUTO_DIR = join(homedir() || tmpdir(), ".cache", "pi", "acp-decompress");
+const AUTO_DIR = join(homeDir() || tmpdir(), ".cache", "pi", "acp-decompress");
 
 /** Maximum chars of a head preview included in the tool result for file mode. */
 const PREVIEW_CHARS = 600;
@@ -20,14 +21,14 @@ const PREVIEW_CHARS = 600;
  *  (unlike block decompression, which defaults to file). */
 const MESSAGE_INLINE_THRESHOLD = 2000;
 
-const DecompressParams = Type.Object({
-  blockId: Type.String({ description: 'Block id to restore, e.g. "b5". Also accepts a message ref (UUID) from search_context results — resolves to the owning block automatically.' }),
-  full: Type.Optional(Type.Boolean({ description: "If true, recurse through all nested blocks to original messages. Default: false (restores one tier up — nested block summaries shown, direct messages in full)." })),
-  toFile: Type.Optional(Type.String({ description: "Write restored content to this file path (must be under /tmp, ~/.cache/opencode, or ~/.cache/pi) instead of the default auto-generated path. Block stays compressed." })),
-  inline: Type.Optional(Type.Boolean({ description: "If true, return content inline as this tool's result (appends to context). Default: false — content is written to an auto-generated file to avoid context bloat. Only set true when the content is small or you accept the context cost." })),
+const DecompressParams = type({
+  blockId: type("string").describe('Block id to restore, e.g. "b5". Also accepts a message ref (UUID) from search_context results — resolves to the owning block automatically.'),
+  "full?": type("boolean").describe("If true, recurse through all nested blocks to original messages. Default: false (restores one tier up — nested block summaries shown, direct messages in full)."),
+  "toFile?": type("string").describe("Write restored content to this file path (must be under /tmp, ~/.cache/opencode, or ~/.cache/pi) instead of the default auto-generated path. Block stays compressed."),
+  "inline?": type("boolean").describe("If true, return content inline as this tool's result (appends to context). Default: false — content is written to an auto-generated file to avoid context bloat. Only set true when the content is small or you accept the context cost."),
 });
 
-type DecompressArgs = Static<typeof DecompressParams>;
+type DecompressArgs = typeof DecompressParams.infer;
 
 export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof DecompressParams> {
   return {
@@ -35,13 +36,6 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
     label: "Decompress",
     description:
       "Restore a previously compressed block's content, or a single message by its ref. The block/message stays compressed — context and cache prefix are not disrupted. BLOCK decompress (blockId b5) defaults to writing a file (blocks can be large); use the read tool to access it, or inline:true to return inline. MESSAGE decompress (blockId = a message UUID from search_context) returns that ONE message's original text — defaults to inline since a single message is usually small; oversized messages go to a file. full:true recurses through nested block tiers (block mode only). You can pass a block id (b5) OR a message ref (UUID) from search_context results.",
-    promptSnippet: 'decompress({ blockId: "b5" }) or decompress({ blockId: "d51b6f94" }) (message ref from search) — writes to file by default; add inline: true to return inline',
-    promptGuidelines: [
-      "Decompress when you need exact details lost in compression (file contents, error messages, signatures).",
-      "Message ref (UUID) returns ONLY that one message's original text, default inline (small). Block id (b5) returns the whole block, default file.",
-      "Pass inline:true ONLY when content is small or you accept the context cost (block mode).",
-      "Use full:true to recurse through all nested tiers to original messages.",
-    ],
     parameters: DecompressParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       let result: string;
@@ -60,13 +54,13 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
  *  arbitrary filesystem locations. */
 const ALLOWED_DIRS = [
   tmpdir(),
-  join(homedir(), ".cache", "opencode"),
-  join(homedir(), ".cache", "pi"),
+  join(homeDir(), ".cache", "opencode"),
+  join(homeDir(), ".cache", "pi"),
 ];
 
 function resolveToFilePath(targetPath: string): string | { error: string } {
   const expanded = targetPath.startsWith("~/")
-    ? join(homedir(), targetPath.slice(2))
+    ? join(homeDir(), targetPath.slice(2))
     : targetPath;
   const resolved = resolve(expanded);
   const isAllowed = ALLOWED_DIRS.some((dir) => {

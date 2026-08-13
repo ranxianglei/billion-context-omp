@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 /**
  * Host compatibility layer for pi vs omp (oh-my-pi) API differences.
@@ -18,16 +18,17 @@ export function normalizeSystemPrompt(input: string | string[] | undefined): str
 }
 
 /**
- * Format systemPrompt for before_agent_start event handler.
- * Always returns string to satisfy pi's type definition, but handles
- * both string (pi) and string[] (omp) input types at runtime.
+ * Format systemPrompt for the before_agent_start event handler.
+ * omp's BeforeAgentStartEventResult.systemPrompt is string[]: each entry is a
+ * prompt segment. We normalize the incoming base (string | string[]) to one
+ * string, append the ACP block, and return it as a single-element array.
  */
 export function formatSystemPromptForEvent(
   base: string | string[],
   append: string
-): string {
+): string[] {
   const normalized = normalizeSystemPrompt(base);
-  return `${normalized}\n\n${append}`;
+  return [`${normalized}\n\n${append}`];
 }
 
 /**

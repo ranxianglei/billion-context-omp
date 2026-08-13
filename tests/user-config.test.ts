@@ -6,7 +6,7 @@ import * as os from "node:os";
 import { loadUserConfig, applyUserConfig } from "../src/user-config.js";
 import type { AdapterConfig } from "../src/config.js";
 
-const CONFIG_DIR_NAME = ".pi";
+const CONFIG_DIR_NAME = ".omp";
 
 async function writeConfig(dir: string, data: object): Promise<string> {
   const dirPath = path.join(dir, CONFIG_DIR_NAME);

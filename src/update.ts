@@ -2,8 +2,8 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { homeDir } from "./home.js";
+import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 import { debug, logInfo, logWarn } from "./log.js";
 
 declare const CURRENT_VERSION: string;
@@ -12,7 +12,7 @@ const PACKAGE_NAME = "billion-context-omp";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
-const THROTTLE_FILE = join(homedir(), CONFIG_DIR_NAME, "agent", ".billion-context-omp-update-check");
+const THROTTLE_FILE = join(homeDir(), CONFIG_DIR_NAME, "agent", ".billion-context-omp-update-check");
 
 // Guards against concurrent checks: the context event fires on every LLM call,
 // so several can race past the throttle read before any writes the timestamp.

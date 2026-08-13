@@ -15,7 +15,7 @@
  * reports ALL entries as in-context. The ACP state is the source of truth.
  */
 
-import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 import { blockDocs, messageDocs, type SearchDoc, type MessageInput, type MessageRole } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import type { CompressionState } from "acp-kernel";

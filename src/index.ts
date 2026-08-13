@@ -3,7 +3,7 @@ import type {
   ExtensionContext,
   ExtensionFactory,
   SessionMessageEntry,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig } from "./config.js";
@@ -101,9 +101,8 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
         tokens: span.tokens,
         model,
         blocksCreated: applied.result.blocksCreated,
-        reason: event.reason,
       });
-      debug.event("compact-acp", { sid, span: `${span.startRef}..${span.endRef}`, tokens: span.tokens, model, reason: event.reason });
+      debug.event("compact-acp", { sid, span: `${span.startRef}..${span.endRef}`, tokens: span.tokens, model });
 
       ctx.ui?.notify?.(`ACP: compressed ~${span.tokens} tokens via ${model}`, "info");
 

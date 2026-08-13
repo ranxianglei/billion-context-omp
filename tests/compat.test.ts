@@ -22,26 +22,26 @@ test("normalizeSystemPrompt handles single-element array", () => {
   assert.equal(normalizeSystemPrompt(["only"]), "only");
 });
 
-test("formatSystemPromptForEvent always returns string for pi type compatibility", () => {
+test("formatSystemPromptForEvent returns string[] for omp type compatibility", () => {
   const stringResult = formatSystemPromptForEvent("base", "ACP");
-  assert.equal(typeof stringResult, "string");
-  assert.equal(stringResult, "base\n\nACP");
+  assert.ok(Array.isArray(stringResult), "omp systemPrompt is string[]");
+  assert.equal(stringResult[0], "base\n\nACP");
 });
 
-test("formatSystemPromptForEvent normalizes array input to string", () => {
+test("formatSystemPromptForEvent normalizes array input into the single segment", () => {
   const arrayResult = formatSystemPromptForEvent(["line1", "line2"], "ACP");
-  assert.equal(typeof arrayResult, "string");
-  assert.equal(arrayResult, "line1\nline2\n\nACP");
+  assert.ok(Array.isArray(arrayResult));
+  assert.equal(arrayResult[0], "line1\nline2\n\nACP");
 });
 
 test("formatSystemPromptForEvent handles empty string base", () => {
   const result = formatSystemPromptForEvent("", "ACP");
-  assert.equal(result, "\n\nACP");
+  assert.equal(result[0], "\n\nACP");
 });
 
 test("formatSystemPromptForEvent handles empty array base", () => {
   const result = formatSystemPromptForEvent([], "ACP");
-  assert.equal(result, "\n\nACP");
+  assert.equal(result[0], "\n\nACP");
 });
 
 test("getSystemPromptText handles pi-style string return", () => {

@@ -1,16 +1,16 @@
-import { Type, type Static } from "typebox";
-import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { type } from "@oh-my-pi/omptype";
+import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { searchBlocks, type SearchResult } from "acp-kernel";
 import type { AcpRuntime } from "./runtime.js";
 import { buildSearchDocs } from "./search-index.js";
 import { logThrow } from "./log.js";
 
-const SearchParams = Type.Object({
-    query: Type.String({ description: "Keywords to locate detail folded into compressed summaries or historical messages." }),
-    limit: Type.Optional(Type.Number({ description: "Max results (default 10)." })),
+const SearchParams = type({
+    query: type("string").describe("Keywords to locate detail folded into compressed summaries or historical messages."),
+    "limit?": type("number").describe("Max results (default 10)."),
 });
 
-type SearchArgs = Static<typeof SearchParams>;
+type SearchArgs = typeof SearchParams.infer;
 
 export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof SearchParams> {
     return {
@@ -18,12 +18,6 @@ export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof Searc
         label: "Search Context",
         description:
             "Search compressed blocks AND historical messages by keyword. Use to cheaply locate detail before decompressing. Returns ranked results with ref, size, preview, and the decompress command to retrieve full content.",
-        promptSnippet: 'search_context({ query: "auth token" })',
-        promptGuidelines: [
-            "Search locates detail folded into summaries or past messages — cheaper than decompressing blind.",
-            "Each result shows a ref (b3 block / m00350 message), size, and the exact decompress command for full content.",
-            "Message hits link to the owning block — decompress that block to recover surrounding detail.",
-        ],
         parameters: SearchParams,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
             let result: string;

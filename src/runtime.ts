@@ -1,4 +1,4 @@
-import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 import {
   createCore,
   defaultCountTokens,

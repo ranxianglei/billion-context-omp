@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, RegisteredCommand } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";

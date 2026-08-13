@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { homedir } from "node:os";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { homeDir } from "./home.js";
+import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 import type { Prompts } from "acp-kernel";
 import type { AdapterConfig, CompressConfig, DelegateConfig } from "./config.js";
 import { debug, logWarn } from "./log.js";
@@ -25,7 +25,7 @@ export interface UserAcpConfig {
 /** Read global + project acp-omp.json, project overrides global. Returns {} on any
  *  error (missing file, bad JSON) — never throws. */
 export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
-  const home = homedir();
+  const home = homeDir();
   const merged: UserAcpConfig = {};
   for (const base of [join(home, CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
     const file = join(base, "acp-omp.json");

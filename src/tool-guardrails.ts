@@ -1,8 +1,7 @@
 import {
-  isToolCallEventType,
   type ExtensionAPI,
   type ToolResultEvent,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import { DEFAULT_TOOL_BASH_TIMEOUT, DEFAULT_TOOL_OUTPUT_MAX_BYTES } from "./config.js";
 import { debug, logInfo, logWarn } from "./log.js";
 import type { AcpRuntime } from "./runtime.js";
@@ -111,28 +110,28 @@ function formatBytes(n: number): string {
 
 export function wireToolGuardrails(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("tool_call", (event) => {
-    if (!isToolCallEventType("bash", event)) return;
-    const t = resolveBashTimeout(event.input, runtime.adapter.toolBashDefaultTimeout);
+    if (event.toolName !== "bash") return;
+    const input = event.input as { timeout?: number };
+    const t = resolveBashTimeout(input, runtime.adapter.toolBashDefaultTimeout);
     if (t !== undefined) {
-      event.input.timeout = t;
+      input.timeout = t;
       debug.event("guardrail-bash-timeout", { applied: t });
     }
   });
 
   pi.on("tool_result", (event) => {
     const isBash = isBashToolResult(event);
-    const fullPath = isBash ? event.details?.fullOutputPath : undefined;
     const timeoutSecs =
       isBash && event.isError ? detectBashTimeout(event.content) : undefined;
 
     let modified: ToolResultEvent["content"] | undefined;
     const max = runtime.adapter.toolOutputMaxBytes;
     if (max !== undefined && max > 0) {
-      const next = capToolOutput(event.content, max, fullPath);
+      const next = capToolOutput(event.content, max);
       if (next) {
         modified = next;
-        debug.event("guardrail-output-cap", { max, hadPath: !!fullPath });
-        logWarn("guardrail", { event: "output-cap", max, hadPath: !!fullPath });
+        debug.event("guardrail-output-cap", { max });
+        logWarn("guardrail", { event: "output-cap", max });
       }
     }
 

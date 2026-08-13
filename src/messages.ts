@@ -1,4 +1,4 @@
-import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 import type { CoreMessage } from "acp-kernel";
 
 type AgentMessage = SessionMessageEntry["message"];
