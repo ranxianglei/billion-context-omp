@@ -1,0 +1,67 @@
+{
+  "name": "billion-context-omp",
+  "version": "0.1.0",
+  "description": "oh-my-pi (omp) client extension for billion-context. Routes omp's model traffic through a running billion-context proxy for incremental, reversible, prefix-cache-friendly context compression — and self-disables when it detects omp is already behind bili.",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "bili-omp": "./dist/index.js"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit --project tsconfig.build.json",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "context",
+    "compression",
+    "proxy",
+    "acp",
+    "acp-kernel",
+    "ai",
+    "agent",
+    "omp",
+    "oh-my-pi",
+    "pi",
+    "coding-agent",
+    "cli",
+    "anthropic",
+    "openai"
+  ],
+  "license": "MIT",
+  "author": "ranxianglei",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ranxianglei/billion-context-omp.git"
+  },
+  "homepage": "https://github.com/ranxianglei/billion-context-omp#readme",
+  "bugs": {
+    "url": "https://github.com/ranxianglei/billion-context-omp/issues"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  }
+}
