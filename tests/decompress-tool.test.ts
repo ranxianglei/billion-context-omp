@@ -60,7 +60,7 @@ async function setupWithCompressedBlock() {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
-  const stateFile = "/tmp/pai-acp-decompress-tool-it.session.json";
+  const stateFile = "/tmp/omp-decompress-tool-it.session.json";
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -114,7 +114,7 @@ test("decompress inline:true returns the full content in the tool result", async
 
 test("decompress toFile writes to the specified path", async () => {
   const { decompressTool, ctx } = await setupWithCompressedBlock();
-  const dir = await mkdtemp(join(tmpdir(), "pai-acp-decompress-"));
+  const dir = await mkdtemp(join(tmpdir(), "omp-decompress-"));
   const target = join(dir, "custom.txt");
   const res = await decompressTool.execute("tc4", { blockId: "b1", toFile: target }, undefined, undefined, ctx);
   const text = (res.content[0] as any).text as string;
@@ -147,7 +147,7 @@ test("decompress keeps the block active after a file-mode call", async () => {
 test("decompress restores a block's original text via getEntry fallback after tree navigation (undo)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-undo.session.json";
+  const stateFile = "/tmp/omp-decompress-fallback-undo.session.json";
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -184,7 +184,7 @@ test("decompress restores a block's original text via getEntry fallback after tr
 test("decompress keeps the degraded message when the ref is gone from both branch and full tree", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-gone.session.json";
+  const stateFile = "/tmp/omp-decompress-fallback-gone.session.json";
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -213,7 +213,7 @@ test("decompress keeps the degraded message when the ref is gone from both branc
 test("decompress restores multi tool-call assistant messages (refs carry # suffix) after undo", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-tools.session.json";
+  const stateFile = "/tmp/omp-decompress-fallback-tools.session.json";
   await cleanState(stateFile);
   const filler = (n: string) => `filler ${n} `.repeat(400);
 
@@ -259,7 +259,7 @@ test("decompress restores multi tool-call assistant messages (refs carry # suffi
 test("decompress survives repeated compress → navigate → decompress cycles (state not lost)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const stateFile = "/tmp/pai-acp-decompress-fallback-cycles.session.json";
+  const stateFile = "/tmp/omp-decompress-fallback-cycles.session.json";
   await cleanState(stateFile);
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(600);

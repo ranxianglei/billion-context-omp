@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 
-const STATE_FILE = "/tmp/pai-acp-warnings-it.session.json";
+const STATE_FILE = "/tmp/omp-warnings-it.session.json";
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();

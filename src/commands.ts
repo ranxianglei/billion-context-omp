@@ -20,7 +20,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
     {
       name: "acp-status",
       options: {
-        description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
+        description: "Detailed ACP status (block tiers, token breakdown, compressible ranges).",
         handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
       },
     },

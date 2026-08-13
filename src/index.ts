@@ -123,10 +123,6 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
 }
 
-// (acp_delegate injection is best-effort: sendUserMessage is fire-and-forget
-// in pi, and interactive/rpc sessions are long-lived so their main loop
-// consumes the follow-up queue naturally — no shutdown drain needed.)
-
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
