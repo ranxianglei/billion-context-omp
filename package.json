@@ -37,7 +37,7 @@
 		"node": ">=20"
 	},
 	"scripts": {
-		"test": "bun test tests/*.test.ts",
+		"test": "bun scripts/test.ts",
 		"typecheck": "tsc --noEmit",
 		"build": "tsup && tsc --emitDeclarationOnly"
 	},

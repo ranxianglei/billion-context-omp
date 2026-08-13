@@ -210,29 +210,28 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return resolveConfig(adapterRef, liveContextLimit(ctx));
   }
 
+  let lastEntries: { sm: object; sid: string; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] } | null = null;
+
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
     const sm = ctx.sessionManager;
     const sessionFile = sm.getSessionFile() ?? undefined;
     const sessionId = sm.getSessionId();
     const state = await store.load(sessionFile, sessionId);
+    if (liveMessages === undefined && lastEntries && lastEntries.sm === sm && lastEntries.sid === sessionId) {
+      return { state, coreMessages: lastEntries.coreMessages, entries: lastEntries.entries };
+    }
     const entries = readContextEntries(sm);
-    // omp fires the context event BEFORE the current user message is persisted
-    // to the session branch (its agent-loop emits message_end only after
-    // prepareProviderCall → transformContext), so getBranch() lags one message
-    // behind and the current prompt would be dropped from the rebuilt context.
-    // pi appends user messages to the session before the LLM call, so its
-    // buildContextEntries() is always current. Merge event.messages (the exact
-    // messages about to be sent, including the not-yet-persisted tail) with the
-    // persisted branch records on the omp path only.
     if (!isPiHost(sm) && liveMessages && liveMessages.length > 0) {
       const origins = store.getLiveRefOrigins(sessionFile, sessionId);
       const merged = mergeLiveEntries(entries, liveMessages, state, origins);
       store.setLiveRefOrigins(sessionFile, sessionId, origins);
       const coreMessages = entriesToCoreMessages(merged);
+      lastEntries = { sm, sid: sessionId, coreMessages, entries: merged };
       return { state, coreMessages, entries: merged };
     }
     const coreMessages = entriesToCoreMessages(entries);
     if (liveMessages === undefined) pruneOrphanRefs(state, coreMessages);
+    lastEntries = { sm, sid: sessionId, coreMessages, entries };
     return { state, coreMessages, entries };
   }
 
