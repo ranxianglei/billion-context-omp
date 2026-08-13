@@ -2,60 +2,83 @@
 
 # billion-context-omp
 
-[oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) client extension for [billion-context](https://www.npmjs.com/package/billion-context).
+[acp-kernel](https://github.com/ranxianglei/acp-kernel)-powered, model-driven context management for the [oh-my-pi (omp)](https://github.com/acidsugarx/oh-my-pi) coding agent.
 
-`billion-context` is a Node.js proxy that sits between any AI agent and its model API, rewriting Anthropic/OpenAI streams with [acp-kernel](https://github.com/ranxianglei/acp-kernel) compression. `billion-context-omp` wires **omp** — the terminal coding agent — into that pipeline: it builds the `base_url` override that routes omp's traffic through a running `billion-context` proxy, and **self-disables when it detects omp is already behind bili** so two layers of compression never stack.
+omp is an enhancement framework that runs **on top of the [Pi CLI coding agent](https://github.com/nickthecook/pi)**. `billion-context-omp` is a Pi extension (just like [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi)) that wires acp-kernel's compression pipeline into omp's Pi runtime — giving you multi-tier, model-driven context compression with zero runtime dependencies.
 
-> ⚠️ This is a **skeleton** package. The config-building helpers are placeholders.
-> Wire them to omp's actual provider/`base_url` config shape as you build it out.
+## What it does
 
-## Why
-
-Long coding sessions blow up context. Once you pass the context window the session degrades or dies, and every provider charges per token. Compression lets a single session run for days — billions of tokens through one window.
-
-omp already supports arbitrary providers and custom `base_url`. This package is the thin glue that points those `base_url`s at a bili proxy and keeps the `/bili/` self-detection signal consistent with the rest of the billion-context client family (`billion-context-pi`, `opencode-acp`, …).
+- **Message-ref tagging** — every message gets an `<acp tokens="2.1K" type="bash">m00175</acp>` ref tag the model cites inside compress calls.
+- **Model-driven compression** — the model writes the summaries; the engine decides *when* to compress, *what range*, and tracks all state.
+- **3-tier LSM compression** — tier-1 summaries distill into tier-2, then tier-3, as the session grows.
+- **Growth-gated nudges** — a nudge is injected into context only when usage crosses a threshold *and* context has grown, so it never fires spuriously.
+- **Emergency truncation** — last-resort truncation of runaway tool outputs above the emergency threshold.
+- **Decompress + search** — restore a compressed block on demand, or keyword-search all summaries without decompressing.
+- **`/compact` interception** — Pi's native compaction is replaced by an ACP model-summarized compaction.
 
 ## Install
 
 ```bash
-npm install billion-context-omp
+pi install billion-context-omp
 ```
 
-## Quickstart
+Restart Pi. The extension auto-activates on the next session.
 
-```ts
-import { BillionContextOmp } from 'billion-context-omp';
+## Config
 
-const omp = new BillionContextOmp({ endpoint: 'http://localhost:8787' });
+Config is read from `~/.pi/acp-omp.json` (global) and `<project>/.pi/acp-omp.json` (project-local overrides global):
 
-// Route a provider through bili:
-omp.buildBaseUrl('https://api.openai.com/v1');
-// => 'http://localhost:8787/bili/https://api.openai.com/v1'
-
-// Detect an already-routed URL (use to self-disable / avoid double compression):
-omp.isBiliBaseUrl('http://localhost:8787/bili/https://api.openai.com/v1'); // => true
+```jsonc
+{
+  "debug": false,            // verbose ACP log (default ~/.pi/acp-omp.log)
+  "autoUpdate": true,        // auto-install newer versions from npm
+  "modelContextLimit": 200000,
+  "compress": {
+    "maxContextLimit": "75%",        // forced-compression threshold
+    "emergencyThresholdPercent": "95%", // emergency truncation threshold
+    "nudgeGrowthTokens": 50000
+  },
+  "compressModel": "openai:gpt-4o", // model used for /compact auto-compression
+  "toolBashDefaultTimeout": 60,
+  "toolOutputMaxBytes": 200000
+}
 ```
 
-## API
+State persists to `~/.pi/agent/sessions/<session>.acp-omp.json`.
 
-### `new BillionContextOmp(options?)`
+## Tools & commands
 
-| option     | type     | description                              |
-| ---------- | -------- | ---------------------------------------- |
-| `endpoint` | `string` | Origin of a running billion-context proxy. |
+| Tool | Purpose |
+|------|---------|
+| `compress` | Replace a conversation range with a summary you write |
+| `decompress` | Restore a compressed block (to file by default; `inline:true` to return inline) |
+| `search_context` | Keyword-search compressed summaries |
+| `acp_status` | Context usage, breakdown, compressible ranges, blocks |
 
-### `omp.buildBaseUrl(upstream): string`
+| Command | Purpose |
+|---------|---------|
+| `/acp` | Context usage + token breakdown + compression status |
+| `/acp-status` | Same as `/acp` |
+| `/acp-decompress <id>` | Restore a block's content inline |
+| `/acp-search <query>` | Search compressed blocks |
 
-Wrap an upstream `base_url` as `${endpoint}/bili/${upstream}`. Throws if no endpoint is configured. Passes through unchanged if already routed.
+## Relationship to billion-context-pi
 
-### `omp.isBiliBaseUrl(baseUrl): boolean`
+`billion-context-omp` is a close port of `billion-context-pi`. Both are Pi extensions built on acp-kernel. Differences:
 
-True when the URL already carries the `/bili/` prefix — use this to self-disable when omp's `base_url` is already pointing at bili.
+- **Package identity & paths** — `billion-context-omp` uses `~/.pi/acp-omp.json`, `~/.pi/acp-omp.log`, and `<session>.acp-omp.json` state files so it never collides with a co-installed `billion-context-pi`.
+- **Delegate subsystem deferred** — omp (oh-my-pi) already provides its own multi-agent orchestration and `delegate-task` tool. To avoid tool conflicts, this port does **not** register the `acp_delegate`/`acp_delegate_wait`/`acp_delegate_cancel` tools or the fleet status widget. Everything else (compression, decompress, search, status, nudges, `/compact` interception, tool guardrails) is identical to the Pi build.
 
-### `omp.buildConfig(providers): Record<provider, { base_url }>`
+## Build
 
-Build base_url overrides for multiple omp providers at once. _(Skeleton.)_
+```bash
+npm run build       # tsup bundle (inlines acp-kernel) + tsc --emitDeclarationOnly
+npm run typecheck   # tsc --noEmit
+npm test            # node --import tsx --test tests/*.test.ts
+```
+
+`dist/index.js` is self-contained — acp-kernel is bundled inline (zero runtime deps).
 
 ## License
 
-MIT © [ranxianglei](https://github.com/ranxianglei)
+MIT © ranxianglei

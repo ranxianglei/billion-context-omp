@@ -2,60 +2,67 @@
 
 # billion-context-omp
 
-[oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) 的 [billion-context](https://www.npmjs.com/package/billion-context) 客户端扩展。
+基于 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 的、模型驱动的上下文管理，面向 [oh-my-pi (omp)](https://github.com/acidsugarx/oh-my-pi) 编码代理。
 
-`billion-context` 是一个 Node.js 代理,架在任意 AI 助手与其模型 API 之间,用 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 压缩重写 Anthropic/OpenAI 流。`billion-context-omp` 把 **omp** —— 终端编程助手 —— 接入这条链路:它生成 `base_url` 覆盖,把 omp 的流量路由到运行中的 `billion-context` 代理,并在**检测到 omp 已经位于 bili 之后时自动停用**,避免两层压缩叠加。
+omp 是运行在 [Pi CLI 编码代理](https://github.com/nickthecook/pi) **之上**的增强框架。`billion-context-omp` 是一个 Pi 扩展（与 [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi) 一样），把 acp-kernel 的压缩管线接入 omp 的 Pi 运行时——提供多层、模型驱动的上下文压缩，零运行时依赖。
 
-> ⚠️ 这是一个**骨架**包,配置构建辅助函数目前是占位实现。
-> 请按 omp 实际的 provider / `base_url` 配置形态对接后再行扩展。
+## 功能
 
-## 为什么
-
-长编程会话会把上下文撑爆。一旦超过上下文窗口,会话质量下降甚至崩掉,而各家 provider 按 token 计费。压缩能让**一个会话连跑数天** —— 海量 token 穿过同一个窗口。
-
-omp 本就支持任意 provider 和自定义 `base_url`。本包提供薄薄一层胶水,把这些 `base_url` 指向 bili 代理,并保持 `/bili/` 自检信号与 billion-context 客户端家族(`billion-context-pi`、`opencode-acp` 等)一致。
+- **消息 ref 标签** —— 每条消息获得 `<acp tokens="2.1K" type="bash">m00175</acp>` ref 标签，模型在 compress 调用中引用。
+- **模型驱动压缩** —— 摘要由模型撰写；引擎决定*何时*压缩、*压缩哪段*，并跟踪全部状态。
+- **3 层 LSM 压缩** —— 随会话增长，tier-1 摘要蒸馏为 tier-2，再到 tier-3。
+- **增长门控提醒** —— 仅当使用率越过阈值*且*上下文有增长时才注入提醒，不会误触发。
+- **紧急截断** —— 超过紧急阈值时对失控的工具输出做最后手段的截断。
+- **解压 + 搜索** —— 按需恢复压缩块，或关键字搜索全部摘要而无需解压。
+- **拦截 `/compact`** —— 用 ACP 模型摘要式压缩替换 Pi 原生 compaction。
 
 ## 安装
 
 ```bash
-npm install billion-context-omp
+pi install billion-context-omp
 ```
 
-## 快速开始
+重启 Pi，扩展在下次会话自动激活。
 
-```ts
-import { BillionContextOmp } from 'billion-context-omp';
+## 配置
 
-const omp = new BillionContextOmp({ endpoint: 'http://localhost:8787' });
+从 `~/.pi/acp-omp.json`（全局）与 `<项目>/.pi/acp-omp.json`（项目级覆盖全局）读取：
 
-// 让某个 provider 走 bili:
-omp.buildBaseUrl('https://api.openai.com/v1');
-// => 'http://localhost:8787/bili/https://api.openai.com/v1'
-
-// 检测已路由的 URL(用于自我停用 / 避免双重压缩):
-omp.isBiliBaseUrl('http://localhost:8787/bili/https://api.openai.com/v1'); // => true
+```jsonc
+{
+  "debug": false,
+  "autoUpdate": true,
+  "modelContextLimit": 200000,
+  "compress": {
+    "maxContextLimit": "75%",
+    "emergencyThresholdPercent": "95%",
+    "nudgeGrowthTokens": 50000
+  },
+  "compressModel": "openai:gpt-4o",
+  "toolBashDefaultTimeout": 60,
+  "toolOutputMaxBytes": 200000
+}
 ```
 
-## API
+状态持久化到 `~/.pi/agent/sessions/<session>.acp-omp.json`。
 
-### `new BillionContextOmp(options?)`
+## 与 billion-context-pi 的关系
 
-| 选项       | 类型     | 说明                              |
-| ---------- | -------- | --------------------------------- |
-| `endpoint` | `string` | 运行中的 billion-context 代理地址。 |
+`billion-context-omp` 是 `billion-context-pi` 的紧密移植。两者都是基于 acp-kernel 的 Pi 扩展。差异：
 
-### `omp.buildBaseUrl(upstream): string`
+- **包标识与路径** —— 使用 `~/.pi/acp-omp.json`、`~/.pi/acp-omp.log` 和 `<session>.acp-omp.json` 状态文件，避免与共存的 `billion-context-pi` 冲突。
+- **延迟 delegate 子系统** —— omp（oh-my-pi）已自带多代理编排与 `delegate-task` 工具。为避免工具冲突，本移植**不**注册 `acp_delegate`/`acp_delegate_wait`/`acp_delegate_cancel` 工具及 fleet 状态组件。其余（压缩、解压、搜索、状态、提醒、`/compact` 拦截、工具护栏）与 Pi 版本完全一致。
 
-把上游 `base_url` 包成 `${endpoint}/bili/${upstream}`。未配置 endpoint 时抛错。若已是路由过的 URL 则原样返回。
+## 构建
 
-### `omp.isBiliBaseUrl(baseUrl): boolean`
+```bash
+npm run build       # tsup 打包（内联 acp-kernel）+ tsc --emitDeclarationOnly
+npm run typecheck   # tsc --noEmit
+npm test            # node --import tsx --test tests/*.test.ts
+```
 
-URL 含 `/bili/` 前缀时返回 true —— omp 的 `base_url` 已指向 bili 时用此方法自我停用。
+`dist/index.js` 自包含——acp-kernel 被内联打包（零运行时依赖）。
 
-### `omp.buildConfig(providers): Record<provider, { base_url }>`
+## 许可证
 
-一次性为多个 omp provider 生成 base_url 覆盖。_(骨架。)_
-
-## License
-
-MIT © [ranxianglei](https://github.com/ranxianglei)
+MIT © ranxianglei
