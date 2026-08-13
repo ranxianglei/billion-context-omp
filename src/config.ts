@@ -45,7 +45,7 @@ export interface AdapterConfig {
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
    *  network calls on startup. */
   autoUpdate?: boolean;
-  /** Enable debug-level events in the ACP log file (default ~/.pi/acp-omp.log).
+  /** Enable debug-level events in the ACP log file (default ~/.omp/acp-omp.log).
    *  Always-on events (session/turn/compress/delegate lifecycle, all errors and
    *  warnings) are written regardless; `debug` only adds verbose diagnostics.
    *  Default: false (or env ACP_DEBUG=1/true). */
@@ -78,7 +78,7 @@ export interface AdapterConfig {
   /** Override acp-kernel's load-bearing compression prompt rules (the 4
    *  Prompts fields). Each set field replaces the kernel default verbatim.
    *  Requires acknowledgePromptsRisk: true — without it, overrides are dropped
-   *  (defaults used) and a warning is logged. Set via ~/.pi/acp-omp.json. */
+   *  (defaults used) and a warning is logged. Set via ~/.omp/acp-omp.json. */
   prompts?: Partial<Prompts>;
   /** Must be true for `prompts` overrides to take effect. Acknowledges that
    *  replacing the kernel's tuned compression rules may reduce summary quality
