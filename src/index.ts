@@ -181,6 +181,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         activeBefore: state.blocks.filter((b) => b.active).length,
       });
 
+      // Re-arm the reminder cadence on a NEW user message: if the previous
+      // nudge was ignored, the kernel's per-tier stamps would otherwise
+      // silence re-nudging until +growthFloor tokens of growth. One nudge
+      // per user turn max (within-turn dedup below).
+      const turnKey = lastUserKey(input) ?? sid;
+      runtime.rearmNudgeOnNewTurn(sid, turnKey, state);
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       runtime.commitFoldState(ctx, turn.state);
 
@@ -242,7 +248,6 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // reply (streaming/tool loop), and without this gate the same nudge
       // would be appended on every event.
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
-      const turnKey = lastUserKey(event.messages ?? []) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
       if (!alreadyShown) {
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
@@ -256,6 +261,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
           ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
         if (!emergency) runtime.markNudgeShown(turnKey);
+        runtime.armNudgeWatch(sid, turnKey);
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
