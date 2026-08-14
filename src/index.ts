@@ -219,6 +219,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
     const originalById = collectOriginals(entries);
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
+    debug.event("core-out", {
+      sid,
+      coreOutMsgs: turn.messages.length,
+      originalByIdSize: originalById.size,
+      rebuiltMsgs: rebuilt.length,
+    });
     const debugOn = debug.enabled;
 
     if (turn.nudge?.shouldInject) {
