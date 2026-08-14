@@ -438,3 +438,33 @@ test("message identity ignores tag-only text blocks but preserves original empty
   assert.equal(messageIdentity(taggedImage), messageIdentity(imageOnly));
   assert.notEqual(messageIdentity(emptyText), messageIdentity(imageOnly));
 });
+test("message identity ignores omp metadata fields (attribution, usage, stopReason, etc.)", () => {
+  const baseContent = [{ type: "text", text: "hello world" }];
+
+  const liveUser = { attribution: "user", content: baseContent, role: "user", timestamp: 1 };
+  const persistedUser = { content: baseContent, role: "user", timestamp: 2 };
+  assert.equal(messageIdentity(liveUser), messageIdentity(persistedUser),
+    "user messages with/without attribution must match");
+
+  const liveAssistant = { role: "assistant", content: baseContent, timestamp: 1 };
+  const persistedAssistant = {
+    role: "assistant", content: baseContent, timestamp: 2,
+    api: "openai-completions", contextSnapshot: { promptTokens: 50000 },
+    duration: 1234, model: "glm-5.2", provider: "zhipuai",
+    responseId: "resp_123", stopReason: "end_turn", ttft: 567,
+    usage: { input: 50000, output: 1000, totalTokens: 51000 },
+  };
+  assert.equal(messageIdentity(liveAssistant), messageIdentity(persistedAssistant),
+    "assistant messages with/without provider metadata must match");
+
+  const liveTool = { role: "toolResult", content: baseContent, toolName: "bash", toolCallId: "call_1", timestamp: 1 };
+  const persistedTool = { role: "toolResult", content: baseContent, toolName: "bash", toolCallId: "call_1",
+    details: { exitCode: 0 }, isError: false, timestamp: 2 };
+  assert.equal(messageIdentity(liveTool), messageIdentity(persistedTool),
+    "tool results with/without details/isError must match");
+
+  const msgA = { role: "user", content: [{ type: "text", text: "hello" }] };
+  const msgB = { role: "user", content: [{ type: "text", text: "goodbye" }] };
+  assert.notEqual(messageIdentity(msgA), messageIdentity(msgB),
+    "different content must still produce different identities");
+});

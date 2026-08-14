@@ -139,6 +139,7 @@ export function messageRef(message: unknown): string | undefined {
   return undefined;
 }
 
+const IDENTITY_KEYS = new Set(["role", "content", "toolName", "toolCallId", "command", "output", "summary"]);
 function normalizeIdentityValue(value: unknown, message = false): unknown {
   if (Array.isArray(value)) {
     return value.flatMap((item) => {
@@ -154,7 +155,7 @@ function normalizeIdentityValue(value: unknown, message = false): unknown {
   if (value === null || typeof value !== "object") return value;
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(value).sort()) {
-    if (message && key === "timestamp") continue;
+    if (message && !IDENTITY_KEYS.has(key)) continue;
     const item = (value as Record<string, unknown>)[key];
     if (message && key === "content" && typeof item === "string") {
       out[key] = [{ text: stripRefTag(item), type: "text" }];

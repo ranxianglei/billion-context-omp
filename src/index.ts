@@ -19,6 +19,7 @@ import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
+import { dumpContextMessages } from "./dump.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { formatSystemPromptForEvent } from "./compat.js";
 
@@ -256,7 +257,11 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
     // Always return the transformed array: every message needs its [mNNNNN] ref
     // tag applied, so there is no meaningful "no change" case to short-circuit.
-    debug.event("context-out", { outMsgs: rebuilt.length, injected: turn.nudge?.shouldInject ?? false, emergency: turn.nudge?.breakdown?.emergencyOverride === 1 });
+    dumpContextMessages(rebuilt, {
+      sid,
+      injected: turn.nudge?.shouldInject ?? false,
+      emergency: turn.nudge?.breakdown?.emergencyOverride === 1,
+    });
     // Also check for updates here (not only on session_start): resuming a
     // long-running session never re-fires session_start, so an update could
     // go unnoticed for days. checkForUpdate throttles internally (3 min) and

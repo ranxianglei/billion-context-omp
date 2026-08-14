@@ -75,8 +75,10 @@ function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: 
     nextOrigins.push({ rawId: id, identity: liveIdentities[i]! });
   }
   origins.splice(0, origins.length, ...nextOrigins);
-  const unmatched = live.length - (persistedRange?.length ?? 0);
-  if (unmatched > 0) logInfo("runtime", { event: "merge-live-entries", live: live.length, unmatched });
+  const matched = persistedRange?.length ?? 0;
+  const unmatched = live.length - matched;
+  const matchRate = live.length > 0 ? Math.round((matched / live.length) * 100) : 100;
+  logInfo("runtime", { event: "merge-live-entries", live: live.length, matched, unmatched, matchRate });
   return out;
 }
 

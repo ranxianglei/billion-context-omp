@@ -763,3 +763,100 @@ test("omp keeps compression block active when live messages become persisted (bl
   assert.ok(activeBlocks[0]!.effectiveMessageIds.includes("e2"), "block IDs migrated to stable persisted ID");
   assert.ok(!activeBlocks[0]!.effectiveMessageIds.some((id: string) => id.startsWith("live-")), "no stale live-* IDs in block");
 });
+
+test("omp e2e: 100% identity match despite omp metadata fields (attribution, usage, stopReason, contextSnapshot)", async (t) => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, coreOverrides: { preserveRecentTokens: 0 } })(api as unknown as ExtensionAPI);
+  const dir = await mkdtemp(join(tmpdir(), "omp-metadata-match-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateFile = join(dir, "session.json");
+
+  const target = "This large message will be compressed while still live. ".repeat(130);
+  const filler = (n: string) => `filler ${n} `.repeat(200);
+
+  let persisted: MockEntry[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+
+  // Turn 1: omp sends live messages WITH metadata fields (attribution on user msgs)
+  const liveMsgs = [
+    { attribution: "user", role: "user", content: [{ type: "text", text: filler("first") }], timestamp: Date.now() },
+    { attribution: "user", role: "user", content: [{ type: "text", text: target }], timestamp: Date.now() },
+    ...["a", "b", "c", "d", "e"].map((n) => ({ attribution: "user", role: "user", content: [{ type: "text", text: filler(n) }], timestamp: Date.now() })),
+  ];
+  const first = await handlers.get("context")![0]!({ type: "context", messages: liveMsgs }, ctx);
+  const targetRef = first.messages[1]!.content.find((b: { type: string; text: string }) => b.type === "text")!.text.match(/m\d{5}/)![0];
+
+  // Compress target message while it's still live
+  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
+  const compressRes = await compressTool.execute!("tc1", { content: [{ startId: targetRef, endId: targetRef, summary: "Summary of the large compressed live message created before persistence." }] }, undefined, undefined, ctx);
+  assert.match(compressRes.content[0]!.text, /1 block/, compressRes.content[0]!.text);
+
+  // Turn 2: messages are persisted. Persisted entries have DIFFERENT field sets:
+  // userMsg creates { role, content: STRING } — no attribution, string content (not array)
+  persisted = [
+    userMsg("e1", filler("first")),
+    userMsg("e2", target),
+    ...["a", "b", "c", "d", "e"].map((n, i) => userMsg(`e${i + 3}`, filler(n))),
+  ];
+  // Live messages are now derived from session log (no attribution, no ref tags)
+  const liveMsgs2 = [
+    { role: "user", content: [{ type: "text", text: filler("first") }], timestamp: Date.now() },
+    { role: "user", content: [{ type: "text", text: target }], timestamp: Date.now() },
+    ...["a", "b", "c", "d", "e"].map((n) => ({ role: "user", content: [{ type: "text", text: filler(n) }], timestamp: Date.now() })),
+  ];
+  await handlers.get("context")![0]!({ type: "context", messages: liveMsgs2 }, ctx);
+
+  // Verify: compression block stays active, no live-* IDs
+  const saved = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
+  const activeBlocks = saved.blocks.filter((b: { active: boolean }) => b.active);
+  assert.equal(activeBlocks.length, 1, "block must stay active after live\u2192persisted migration with metadata fields");
+  assert.ok(activeBlocks[0]!.effectiveMessageIds.includes("e2"), "block IDs migrated to stable persisted ID");
+  assert.ok(!activeBlocks[0]!.effectiveMessageIds.some((id: string) => id.startsWith("live-")), "no stale live-* IDs in block");
+  const liveRawIds = Object.keys(saved.messageRefs?.byRaw ?? {}).filter((id: string) => id.startsWith("live-"));
+  assert.equal(liveRawIds.length, 0, `0 live-* messageRefs expected, got ${liveRawIds.length}`);
+});
+
+test("omp e2e: identity match rate is 100% across full session lifecycle with provider metadata", async (t) => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const dir = await mkdtemp(join(tmpdir(), "omp-lifecycle-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateFile = join(dir, "session.json");
+
+  // Build a realistic conversation with mixed roles + omp metadata fields
+  function buildConversation(n: number) {
+    const msgs: any[] = [];
+    for (let i = 0; i < n; i++) {
+      msgs.push({ attribution: "user", role: "user", content: [{ type: "text", text: `user msg ${i} ${"x".repeat(100)}` }], timestamp: Date.now() });
+      msgs.push({
+        role: "assistant",
+        content: [{ type: "toolCall", id: `call_${i}`, name: "read", arguments: { path: `file${i}.ts` } }],
+        api: "openai-completions", model: "glm-5.2", provider: "zhipuai",
+        stopReason: "tool_use", usage: { input: 1000, output: 100, totalTokens: 1100 },
+        contextSnapshot: { promptTokens: 1000 }, duration: 100, ttft: 50, responseId: `resp_${i}`,
+        timestamp: Date.now(),
+      });
+      msgs.push({ role: "toolResult", content: [{ type: "text", text: `result ${i} ${"y".repeat(100)}` }], toolName: "read", toolCallId: `call_${i}`, details: { exitCode: 0 }, isError: false, timestamp: Date.now() });
+    }
+    return msgs;
+  }
+
+  // Turn 1: all live
+  let persisted: MockEntry[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+  const conv = buildConversation(5);
+  const r1 = await handlers.get("context")![0]!({ type: "context", messages: conv }, ctx);
+  assert.ok(r1.messages.length > 0, "first turn produces output");
+
+  // Turn 2: all persisted (with full metadata) + 2 new live messages
+  persisted = conv.map((m, i) => ({ type: "message" as const, id: `e${i}`, parentId: null, timestamp: "", message: m }));
+  const conv2 = [...conv, ...buildConversation(1).slice(-2)]; // 2 new messages
+  const r2 = await handlers.get("context")![0]!({ type: "context", messages: conv2 }, ctx);
+  assert.ok(r2.messages.length > 0, "second turn produces output");
+
+  // Verify: all persisted messages should have stable IDs (no live-* prefix)
+  const saved = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
+  const liveRawIds = Object.keys(saved.messageRefs?.byRaw ?? {}).filter((id: string) => id.startsWith("live-"));
+  // At most 2 live-* (the 2 new messages from conv2 that haven't been persisted yet)
+  assert.ok(liveRawIds.length <= 2, `at most 2 live-* IDs expected for unpersisted messages, got ${liveRawIds.length}: ${JSON.stringify(liveRawIds)}`);
+});
