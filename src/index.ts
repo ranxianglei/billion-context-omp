@@ -13,7 +13,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, messageIdentity } from "./messages.js";
-import { summarizeRange, selectRangeSpan } from "./auto-compress.js";
+import { summarizeMessages } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
@@ -49,76 +49,56 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
 export default createAcpExtension();
 
 // ACP owns compression. On `/compact` we intercept Pi's native compaction and
-// instead run the message range through the kernel's compression pipeline:
-// pick a compressible span, summarize it with a model (explicit `compressModel`
-// or the session model), and applyCompression. We then hand the summary back
-// to Pi as the compaction result so Pi stores it. On any failure we return
-// undefined so Pi falls back to its own compaction rather than losing context.
+// summarize the FULL set of messages omp is about to discard
+// (preparation.messagesToSummarize + turnPrefixMessages) with our compression
+// prompts, then hand the summary back as the compaction result. omp stores it
+// in a compaction entry — its own durable record — and truncates everything
+// before firstKeptEntryId from the LLM view, so the summary must cover ALL of
+// the discarded content (a span-only summary would drop the gap, and prior
+// in-stream compress calls carrying older block summaries would vanish with
+// it). Kernel blocks are NOT used here: fold blocks only replay from
+// in-stream compress tool calls, which this truncation removes. On any
+// failure we return undefined so Pi falls back to its own compaction rather
+// than losing context.
 function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_before_compact", async (event, ctx) => {
-    let release: (() => void) | undefined;
     try {
       const sid = ctx.sessionManager?.getSessionId?.() ?? "";
-      release = await runtime.acquireLock(sid);
-      const { state, coreMessages } = await runtime.stateFor(ctx);
-      const config = runtime.configFor(ctx);
-      const coveredIds = collectCoveredMessageIds(state);
-      const tokenCount = estimateTokens(coreMessages, coveredIds);
+      const prep = event.preparation;
+      const toSummarize = [...(prep.messagesToSummarize ?? []), ...(prep.turnPrefixMessages ?? [])];
+      if (toSummarize.length === 0) return undefined;
 
-      const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
-      runtime.commitFoldState(ctx, turn.state);
-
-      const ranges = (turn.nudge?.compressibleRanges ?? []).filter((r) => !r.dangerous);
-      if (ranges.length === 0) return undefined;
-
-      const span = selectRangeSpan(ranges, turn.messages, turn.state, config.compress.minCompressRange ?? 5000);
-      if (!span) return undefined;
-
-      ctx.ui?.notify?.(`ACP: compressing ~${span.tokens} tokens…`, "info");
-      const result = await summarizeRange(ctx, turn.messages, turn.state, span.startRef, span.endRef, runtime.prompts, runtime.adapter.compress?.compressModel);
+      ctx.ui?.notify?.(`ACP: compacting ${toSummarize.length} messages…`, "info");
+      const result = await summarizeMessages(ctx, toSummarize, runtime.prompts, runtime.adapter.compress?.compressModel, {
+        previousSummary: prep.previousSummary,
+        customInstructions: event.customInstructions,
+        signal: event.signal,
+      });
       if (!result) {
         ctx.ui?.notify?.("ACP: compression fell back to Pi native compaction", "warning");
         return undefined;
       }
-      const { summary, model } = result;
-
-      const applied = runtime.core.applyCompression({
-        ranges: [{ startRef: span.startRef, endRef: span.endRef, summary }],
-        messages: turn.messages,
-        state: turn.state,
-        config,
-      });
-      const errors = applied.result.errors ?? [];
-      if (errors.length > 0) {
-        logWarn("compact", { sid, event: "rejected", span: `${span.startRef}..${span.endRef}`, model, errors });
-        return undefined;
-      }
-      runtime.commitFoldState(ctx, applied.state);
 
       logInfo("compact", {
         sid,
         event: "acp-compaction",
-        span: `${span.startRef}..${span.endRef}`,
-        tokens: span.tokens,
-        model,
-        blocksCreated: applied.result.blocksCreated,
+        messages: toSummarize.length,
+        model: result.model,
+        summaryLen: result.summary.length,
       });
-      debug.event("compact-acp", { sid, span: `${span.startRef}..${span.endRef}`, tokens: span.tokens, model });
-
-      ctx.ui?.notify?.(`ACP: compressed ~${span.tokens} tokens via ${model}`, "info");
+      debug.event("compact-acp", { sid, messages: toSummarize.length, model: result.model });
+      ctx.ui?.notify?.(`ACP: compacted ${toSummarize.length} messages via ${result.model}`, "info");
 
       return {
         compaction: {
-          summary,
-          firstKeptEntryId: event.preparation.firstKeptEntryId,
-          tokensBefore: event.preparation.tokensBefore,
+          summary: result.summary,
+          firstKeptEntryId: prep.firstKeptEntryId,
+          tokensBefore: prep.tokensBefore,
         },
       };
     } catch (e) {
       logThrow("compact", e, { sid: ctx.sessionManager?.getSessionId?.() ?? "" });
       return undefined;
-    } finally {
-      release?.();
     }
   });
 }

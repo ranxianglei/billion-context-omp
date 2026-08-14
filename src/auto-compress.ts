@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { complete } from "@oh-my-pi/pi-ai";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
-import type { CoreMessage, CompressionState, CompressibleRange, Prompts } from "acp-kernel";
+import { createInitialState, type CoreMessage, type CompressionState, type CompressibleRange, type Prompts } from "acp-kernel";
 import { debug, logInfo, logWarn } from "./log.js";
+import { streamToCoreMessages, type AgentMessage } from "./messages.js";
 
 const TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_TOKENS = 3000;
@@ -142,6 +143,84 @@ export function buildSummaryPrompt(prompts: Prompts): string {
     '{"summary": "..."} ' +
     "where the value is the full summary as a single string."
   );
+}
+
+/** Generate ONE summary covering the FULL set of messages omp is about to
+ *  discard on /compact (messagesToSummarize + turnPrefixMessages), matching
+ *  native compaction semantics — the compaction entry omp stores afterwards
+ *  is the durable record, and it truncates everything before firstKeptEntryId
+ *  from the LLM view, so the summary must cover all of it. Kernel blocks are
+ *  deliberately NOT used here: fold blocks only replay from in-stream
+ *  compress tool calls, which the truncation removes. `previousSummary` (an
+ *  earlier compaction's summary) is folded in so iterative compactions never
+ *  drop it. Returns null on any failure so the caller falls back to Pi's
+ *  native compaction. */
+export async function summarizeMessages(
+  ctx: ExtensionContext,
+  messages: AgentMessage[],
+  prompts: Prompts,
+  configuredModel?: string | null,
+  opts?: {
+    previousSummary?: string;
+    customInstructions?: string;
+    signal?: AbortSignal;
+    completeFn?: typeof complete;
+  },
+): Promise<{ summary: string; model: string } | null> {
+  const run = opts?.completeFn ?? complete;
+  const configured = configuredModel ?? readCompressModel();
+  const resolved = resolveCompressModel(ctx.modelRegistry, ctx.model, configured);
+  if (!resolved) return null;
+  const { model, label } = resolved;
+  const slice = streamToCoreMessages(messages);
+  const chars = slice.reduce((n, m) => n + (m.text?.length ?? 0), 0);
+  if (slice.length === 0 || chars < 1) return null;
+
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok || !auth.apiKey) {
+    logWarn("summarize-messages", { event: "auth-missing", model: label, error: auth.ok ? null : auth.error });
+    return null;
+  }
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+  const onOuterAbort = () => ac.abort();
+  opts?.signal?.addEventListener("abort", onOuterAbort);
+  try {
+    const tokens = Math.ceil(chars / 4);
+    let instructions = buildSummaryPrompt(prompts);
+    const prev = opts?.previousSummary?.trim();
+    const custom = opts?.customInstructions?.trim();
+    if (prev) {
+      instructions +=
+        "\n\nThe conversation below opens with the summary of a PREVIOUS compaction whose content is being discarded with this one — fold everything it contains into the new summary; nothing from it may be lost.";
+    }
+    if (custom) instructions += `\n\nUser instructions for this compaction: ${custom}`;
+    const userText =
+      `ENTIRE conversation to compress (${slice.length} messages, ~${tokens} tokens). Compress it:\n\n` +
+      formatSlice(slice, createInitialState());
+    const response = await run(
+      model,
+      { systemPrompt: [instructions], messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
+      { apiKey: auth.apiKey, headers: auth.headers, maxTokens: MAX_OUTPUT_TOKENS, signal: ac.signal },
+    );
+    const summary = parseSummary(
+      response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n"),
+    );
+    if (!summary) {
+      logWarn("summarize-messages", { event: "unparseable-summary", model: label, messages: slice.length });
+      return null;
+    }
+    logInfo("summarize-messages", { event: "summary", model: label, messages: slice.length, tokens, summaryLen: summary.length });
+    return { summary, model: label };
+  } catch (e) {
+    logWarn("summarize-messages", { event: "failed", model: label, error: String(e) });
+    return null;
+  } finally {
+    clearTimeout(timer);
+    opts?.signal?.removeEventListener("abort", onOuterAbort);
+    debug.event("summarize-messages-done", { model: label, messages: slice.length });
+  }
 }
 
 /** Generate a summary for a message range using the compression model. Shared
