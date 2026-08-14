@@ -121,6 +121,9 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
       runtime.setPrompts(defaultPrompts);
     }
+    // Rebuild blocks from the persisted session right away so /acp and
+    // acp_status show them immediately on resume — before the first LLM call.
+    runtime.primeFold(ctx);
     void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });

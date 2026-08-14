@@ -13,7 +13,7 @@ import {
   type Prompts,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
-import { debug, logWarn } from "./log.js";
+import { debug, logInfo, logWarn } from "./log.js";
 import { boundaryRaw, findCompressCalls, isBlockRef, messageIdentity, rawPos, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage, type BlockLike } from "./messages.js";
 
 export interface FoldResult {
@@ -26,6 +26,7 @@ export interface FoldResult {
 interface FoldSlot {
   identities: string[];
   foldedLen: number;
+  preview: boolean;
   state: CompressionState;
   coreMessages: CoreMessage[];
   appliedCallIds: Set<string>;
@@ -46,11 +47,17 @@ export interface AcpRuntime {
   stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }>;
   commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void;
   forgetSession(sid: string): void;
+  /** Rebuild blocks from the persisted session view at session_start so /acp
+ *  and acp_status show them BEFORE the first LLM call of a resumed session.
+ *  The slot is marked preview and always re-folded authoritatively at the
+ *  first context event (the live stream is the truth source, not the
+ *  persisted view). */
+  primeFold(ctx: ExtensionContext): void;
   acquireLock(sid: string): Promise<() => void>;
 }
 
 function freshSlot(): FoldSlot {
-  return { identities: [], foldedLen: 0, state: createInitialState(), coreMessages: [], appliedCallIds: new Set() };
+  return { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set() };
 }
 
 function stateHasCompressCall(state: CompressionState, callId: string): boolean {
@@ -109,6 +116,14 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function foldStream(ctx: ExtensionContext, stream: AgentMessage[]): FoldResult {
     const sid = sidOf(ctx);
     let slot = slotFor(sid);
+    if (slot.preview) {
+      // A primed slot is a disposable preview built from the persisted view —
+      // the first live context event always re-folds from scratch so the
+      // authoritative stream (not the persisted projection) rules.
+      debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp: 0, streamLen: stream.length, reason: "preview" });
+      slot = freshSlot();
+      slots.set(sid, slot);
+    }
     const ids = stream.map(messageIdentity);
     let lcp = 0;
     while (lcp < Math.min(ids.length, slot.identities.length) && ids[lcp] === slot.identities[lcp]) lcp++;
@@ -194,6 +209,26 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return Promise.resolve({ state: slot.state, coreMessages: slot.coreMessages });
   }
 
+  function primeFold(ctx: ExtensionContext): void {
+    const sid = sidOf(ctx);
+    try {
+      // ReadonlySessionManager's type omits buildSessionContext, but the
+      // runtime object has it — it builds exactly the view omp feeds the
+      // agent on resume. Purely a preview: discarded at the first context
+      // event, so a mismatching projection can never leak into live state.
+      const sm = ctx.sessionManager as unknown as {
+        buildSessionContext?: () => { messages?: AgentMessage[] };
+      };
+      const stream = sm.buildSessionContext?.().messages ?? [];
+      if (stream.length === 0) return;
+      const r = foldStream(ctx, stream);
+      slotFor(sid).preview = true;
+      logInfo("fold", { sid, event: "prime-fold", msgs: stream.length, blocks: r.state.blocks.length });
+    } catch (e) {
+      logWarn("fold", { sid, event: "prime-fold-failed", error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
   function forgetSession(sid: string): void {
     slots.delete(sid);
     locks.delete(sid);
@@ -221,6 +256,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     stateFor,
     commitFoldState,
     forgetSession,
+    primeFold,
     acquireLock,
   };
 }
