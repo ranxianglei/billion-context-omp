@@ -39,7 +39,7 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
     name: "compress",
     label: "Compress",
     description:
-      "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ topic: 'Session Opener', startId, endId, summary }] }) — a short topic label is recommended but optional. Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) — each entry gets its own summary.",
+      "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ \"topic\": \"Session Opener\", \"startId\": \"m00004\", \"endId\": \"m00022\", \"summary\": \"...\" }] }) — a short topic label is recommended but optional. Batch: one entry per range in content[]. The JSON you write must be strict: escape every double quote inside summaries.",
     parameters: CompressParams,
     async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       let result: string;
