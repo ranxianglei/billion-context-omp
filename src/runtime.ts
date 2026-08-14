@@ -40,14 +40,6 @@ export interface AcpRuntime {
   setPrompts(prompts: Prompts): void;
   markNudgeShown(turnKey: string): void;
   nudgeShownFor(turnKey: string): boolean;
-  /** Remember the user turn a nudge was injected in. */
-  armNudgeWatch(sid: string, turnKey: string): void;
-  /** One nudge per user turn: when a NEW user message arrives and the kernel's
- *  cadence stamps still hold the last (ignored) nudge, clear them so the
- *  reminder can re-fire. Without this, a single ignored nudge silences
- *  reminders until +growthFloor tokens of growth — slow agentic sessions
- *  never compress. */
-  rearmNudgeOnNewTurn(sid: string, turnKey: string, state: CompressionState): void;
   clearNudgeTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
@@ -79,7 +71,6 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let adapterRef = adapter;
   let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
-  const nudgeWatch = new Map<string, string>();
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
@@ -241,7 +232,6 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function forgetSession(sid: string): void {
     slots.delete(sid);
     locks.delete(sid);
-    nudgeWatch.delete(sid);
   }
 
   function commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void {
@@ -259,19 +249,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     setPrompts: (p) => { promptsRef = p; },
     markNudgeShown: (k) => { nudgeShownTurns.add(k); },
     nudgeShownFor: (k) => nudgeShownTurns.has(k),
-    armNudgeWatch: (sid, turnKey) => { nudgeWatch.set(sid, turnKey); },
-    rearmNudgeOnNewTurn: (sid, turnKey, state) => {
-      const armed = nudgeWatch.get(sid);
-      if (!armed || armed === turnKey) return;
-      nudgeWatch.delete(sid);
-      // Clearing both stamps restores the kernel's fallback semantics:
-      // growth falls back to the session baseline (already exceeded) and the
-      // per-tier cadence treats this as a first-time fire.
-      state.nudge.lastShownByTier = {};
-      state.nudge.lastNudgeShownTokens = 0;
-      debug.event("nudge-rearmed", { sid });
-    },
-    clearNudgeTracking: () => { nudgeShownTurns.clear(); nudgeWatch.clear(); },
+    clearNudgeTracking: () => { nudgeShownTurns.clear(); },
     liveContextLimit,
     configFor,
     foldStream,
