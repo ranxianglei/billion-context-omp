@@ -38,9 +38,6 @@ export interface AcpRuntime {
   setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
   setPrompts(prompts: Prompts): void;
-  markNudgeShown(turnKey: string): void;
-  nudgeShownFor(turnKey: string): boolean;
-  clearNudgeTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
   foldStream(ctx: ExtensionContext, stream: AgentMessage[]): FoldResult;
@@ -70,7 +67,6 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const slots = new Map<string, FoldSlot>();
   let adapterRef = adapter;
   let promptsRef: Prompts = defaultPrompts;
-  const nudgeShownTurns = new Set<string>();
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
@@ -247,9 +243,6 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     setAdapter: (a) => { adapterRef = a; },
     get prompts() { return promptsRef; },
     setPrompts: (p) => { promptsRef = p; },
-    markNudgeShown: (k) => { nudgeShownTurns.add(k); },
-    nudgeShownFor: (k) => nudgeShownTurns.has(k),
-    clearNudgeTracking: () => { nudgeShownTurns.clear(); },
     liveContextLimit,
     configFor,
     foldStream,

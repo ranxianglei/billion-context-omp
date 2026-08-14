@@ -12,7 +12,7 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages, messageIdentity } from "./messages.js";
+import { coreOutToAgentMessages } from "./messages.js";
 import { summarizeMessages } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -105,7 +105,6 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
-    runtime.clearNudgeTracking();
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
@@ -236,15 +235,17 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       //  2. TERMINAL echo (debug only): when debug is on, also print the exact
       //     text via ctx.ui.notify so the user can observe what is being
       //     injected while debugging. The model never sees terminal output.
-      // Emergency nudges (usage >= 80%) bypass the per-turn dedup so the
-      // overflow warning always reaches the model. Other nudges inject at most
-      // once per turn: pi fires the context event multiple times per assistant
-      // reply (streaming/tool loop), and without this gate the same nudge
-      // would be appended on every event.
+      // Dedup is the KERNEL's job, not ours: its cadence stamps
+      // (lastShownByTier / lastNudgeShownTokens, written by processTurn on
+      // every shouldInject) guarantee the same tokenCount cannot fire twice,
+      // and allow a re-fire exactly after +growthFloor of growth. A per-turn
+      // dedup here would only ever swallow LEGAL re-nudges of a long agentic
+      // turn (an ignored nudge re-firing after another +20K) while the stamp
+      // is still consumed — silencing the model exactly when it should be
+      // reminded again (observed live: one 3h turn, nudge at 45K, kernel
+      // re-fired at 65.7K and 86.4K, both swallowed, nothing until 106K+).
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
-      const turnKey = lastUserKey(event.messages ?? []) ?? sid;
-      const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
-      if (!alreadyShown) {
+      {
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
@@ -255,10 +256,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         if (debugOn && ctx.hasUI) {
           ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
-        if (!emergency) runtime.markNudgeShown(turnKey);
-        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
-      } else {
-        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
+        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, text: rendered.text + example });
       }
     }
 
@@ -322,14 +320,6 @@ function wireProviderDebug(pi: ExtensionAPI): void {
       cache,
     });
   });
-}
-
-function lastUserKey(stream: AgentMessage[]): string | undefined {
-  for (let i = stream.length - 1; i >= 0; i--) {
-    const m = stream[i]! as { role?: string };
-    if (m.role === "user") return `p${i + 1}:${messageIdentity(m).slice(0, 64)}`;
-  }
-  return undefined;
 }
 
 function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts, example: string): AgentMessage {
