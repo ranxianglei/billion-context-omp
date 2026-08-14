@@ -456,16 +456,21 @@ export function rawPos(rawId: string): number {
  *  fields. Written into the compress tool's success result (which lives in
  *  the stream) and re-verified on fold replay — if a host-side rewrite
  *  (compaction, edit) shifted positions, the fingerprint mismatches and the
- *  call is skipped instead of silently compressing the wrong messages. */
-export function spanFingerprint(coreMessages: CoreMessage[], startPos: number, endPos: number): string {
+ *  call is skipped instead of silently compressing the wrong messages.
+ *  Boundaries bind to the EXACT piece the ref names (parallel tool calls
+ *  split one stream message into several pieces sharing a position —
+ *  hashing "whatever is at that position" is position-collision-fragile). */
+export function spanFingerprint(coreMessages: CoreMessage[], startId: string, endId: string): string {
   const key = (cm: CoreMessage): string => `${cm.role}|${cm.contentType}|${cm.toolName ?? ""}|${(cm.text ?? "").slice(0, 4096)}`;
-  let first: CoreMessage | undefined;
-  let last: CoreMessage | undefined;
-  for (const cm of coreMessages) {
-    const p = rawPos(cm.id ?? "");
-    if (p === startPos) first = cm;
-    if (p === endPos) last = cm;
-  }
+  const find = (id: string): CoreMessage | undefined => {
+    const exact = coreMessages.find((cm) => cm.id === id);
+    if (exact) return exact;
+    const pos = rawPos(id);
+    if (pos === 0) return undefined;
+    return coreMessages.find((cm) => rawPos(cm.id ?? "") === pos);
+  };
+  const first = find(startId);
+  const last = find(endId);
   if (!first || !last) return "";
   return createHash("sha1").update(`${key(first)}\u0000${key(last)}`).digest("hex").slice(0, 8);
 }
@@ -479,19 +484,20 @@ export function isBlockRef(ref: string): boolean {
   return /^b\d+$/i.test(ref.trim());
 }
 
-/** Resolve a range boundary ref to a 1-based stream position. Message refs
- *  (mNNNNN) go through byRef; block refs (bN) resolve to the earliest (min)
- *  or latest (max) position of the block's covered messages. 0 = unresolved. */
-export function boundaryPos(ref: string, byRef: Record<string, string>, blocks: BlockLike[], pick: "min" | "max"): number {
+/** Resolve a range boundary ref to the EXACT raw id of the piece it names.
+ *  Message refs (mNNNNN) go through byRef; block refs (bN) resolve to the
+ *  earliest (min) or latest (max) covered message's raw id. "" = unresolved. */
+export function boundaryRaw(ref: string, byRef: Record<string, string>, blocks: BlockLike[], pick: "min" | "max"): string {
   const raw = byRef[ref];
-  if (raw) return rawPos(raw);
+  if (raw) return raw;
   const m = /^b(\d+)$/i.exec(ref.trim());
-  if (!m) return 0;
+  if (!m) return "";
   const block = blocks.find((b) => b.blockId.toLowerCase() === `b${m[1]}`);
-  if (!block) return 0;
-  const positions = block.effectiveMessageIds.map((id) => rawPos(byRef[id] ?? id)).filter((p) => p > 0);
-  if (positions.length === 0) return 0;
-  return pick === "min" ? Math.min(...positions) : Math.max(...positions);
+  if (!block) return "";
+  const ids = block.effectiveMessageIds.filter((id) => rawPos(byRef[id] ?? id) > 0);
+  if (ids.length === 0) return "";
+  const pos = (id: string): number => rawPos(byRef[id] ?? id);
+  return pick === "min" ? ids.reduce((a, b) => (pos(a) <= pos(b) ? a : b)) : ids.reduce((a, b) => (pos(a) >= pos(b) ? a : b));
 }
 
 /** One fingerprint per range (never filtered, "-" for unresolvable
@@ -504,9 +510,9 @@ export function rangeFingerprints(
   blocks: BlockLike[],
 ): string[] {
   return ranges.map((r) => {
-    const start = boundaryPos(r.startRef, byRef, blocks, "min");
-    const end = start > 0 ? boundaryPos(r.endRef, byRef, blocks, "max") : 0;
-    if (start > 0 && end > 0) {
+    const start = boundaryRaw(r.startRef, byRef, blocks, "min");
+    const end = start ? boundaryRaw(r.endRef, byRef, blocks, "max") : "";
+    if (start && end) {
       const fp = spanFingerprint(coreMessages, start, end);
       if (fp.length > 0) return fp;
     }

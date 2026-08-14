@@ -596,3 +596,30 @@ test("findCompressCalls accepts already-object arguments and skips empty ranges"
   const none = findCompressCalls({ role: "user", content: [{ type: "text", text: "hi" }] } as SessionMessageEntry["message"]);
   assert.equal(none.length, 0);
 });
+import { rangeFingerprints, spanFingerprint } from "../src/messages.js";
+
+test("spanFingerprint binds the exact split piece at a parallel-toolcall boundary", async () => {
+  const big = "x".repeat(600);
+  const stream = [
+    user("task " + big),
+    assistantParallelToolCalls([
+      { id: "callAAA", name: "read", args: { path: "a.ts" } },
+      { id: "callBBB", name: "read", args: { path: "b.ts" } },
+    ]),
+    toolResult("callAAA", "read", "result-a " + big),
+    toolResult("callBBB", "read", "result-b " + big),
+  ];
+  const core = streamToCoreMessages(stream as never);
+  // position of the parallel message's split pieces
+  const pieceA = core.find((c) => c.id === "p2#callAAA");
+  const pieceB = core.find((c) => c.id === "p2#callBBB");
+  assert.ok(pieceA && pieceB, "split pieces expected");
+  const byRef: Record<string, string> = { m00002: "p2#callAAA", m00003: "p2#callBBB", m00004: "p3" };
+  // fingerprint starting at m00002 must hash pieceA's text (exact id), not
+  // whatever piece lands last at position 2
+  const fpA = spanFingerprint(core, "p2#callAAA", "p3");
+  const fpB = spanFingerprint(core, "p2#callBBB", "p3");
+  assert.notEqual(fpA, fpB, "two different pieces must fingerprint differently");
+  const fps = rangeFingerprints([{ startRef: "m00002", endRef: "m00004" }], core, byRef, []);
+  assert.equal(fps[0], fpA, `range starting at m00002 must bind pieceA exactly (got ${fps[0]} want ${fpA})`);
+});

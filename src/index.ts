@@ -151,6 +151,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       debug.event("empty-stream-bypass", { sid });
       return undefined;
     }
+    debug.event("context-in-raw", { sid, msgs: input.length });
     const { state, coreMessages, originalById, streamLen } = runtime.foldStream(ctx, input);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);

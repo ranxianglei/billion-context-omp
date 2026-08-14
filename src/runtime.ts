@@ -14,7 +14,7 @@ import {
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { debug, logWarn } from "./log.js";
-import { boundaryPos, findCompressCalls, isBlockRef, messageIdentity, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage, type BlockLike } from "./messages.js";
+import { boundaryRaw, findCompressCalls, isBlockRef, messageIdentity, rawPos, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage, type BlockLike } from "./messages.js";
 
 export interface FoldResult {
   state: CompressionState;
@@ -156,9 +156,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
         // itself in the stream, and the span fingerprint recorded in the
         // success result must still match — otherwise skip rather than
         // silently compress the wrong messages with a stale summary.
-        const stale = call.ranges.some((r, ri) => staleRange(r, ri, resultText, coreMessages, i, slot.state.messageRefs.byRef, slot.state.blocks));
+        const stale = call.ranges.map((r, ri) => staleRange(r, ri, resultText, coreMessages, i, slot.state.messageRefs.byRef, slot.state.blocks)).find((s) => s !== false);
         if (stale) {
-          debug.event("fold-replay-stale", { sid, callId: call.id });
+          debug.event("fold-replay-stale", { sid, callId: call.id, reason: stale });
           continue;
         }
         if (slot.appliedCallIds.has(call.id) || stateHasCompressCall(slot.state, call.id)) continue;
@@ -233,23 +233,27 @@ function staleRange(
   callIndex: number,
   byRef: Record<string, string>,
   blocks: BlockLike[],
-): boolean {
-  const start = boundaryPos(r.startRef, byRef, blocks, "min");
-  const end = boundaryPos(r.endRef, byRef, blocks, "max");
-  if (start === 0 || end === 0) {
+): string | false {
+  const start = boundaryRaw(r.startRef, byRef, blocks, "min");
+  const end = boundaryRaw(r.endRef, byRef, blocks, "max");
+  if (start === "" || end === "") {
     // A vanished MESSAGE ref means the prefix was rewritten → stale. A block
     // ref we cannot resolve is left to the kernel's BoundaryNotFoundError —
     // nested blocks rebuild in replay order and may legitimately be missing
     // only if the call list itself is inconsistent.
-    return !isBlockRef(r.startRef) && !isBlockRef(r.endRef);
+    if (!isBlockRef(r.startRef) && !isBlockRef(r.endRef))
+      return `unresolved ${r.startRef}..${r.endRef} -> ${start}..${end}`;
+    return false;
   }
   // Ranges always cover messages BEFORE the call that issued them — a call
   // resolving to positions at/after itself means the prefix was rewritten.
-  if (end > callIndex) return true;
+  if (rawPos(end) > callIndex) return `end ${rawPos(end)} > callIndex ${callIndex}`;
   const m = resultText.match(/\[fp=([0-9a-f,-]+)\]/);
   if (!m) return false;
   const expected = m[1]!.split(",");
   const want = expected[rangeIndex];
   if (want === undefined || want === "-") return false;
-  return want !== spanFingerprint(coreMessages, start, end);
+  const got = spanFingerprint(coreMessages, start, end);
+  if (want !== got) return `fp ${r.startRef}..${r.endRef} want ${want} got ${got} @${start}..${end}`;
+  return false;
 }
