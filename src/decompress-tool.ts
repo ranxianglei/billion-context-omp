@@ -100,6 +100,15 @@ function findMessageContent(ref: string, ctx: ExtensionContext): { text: string;
       }
     }
   }
+  const baseId = ref.split("#")[0]!;
+  if (baseId && baseId !== ref) {
+    const entry = ctx.sessionManager.getEntry(baseId);
+    if (entry) {
+      for (const cm of entriesToCoreMessages([entry])) {
+        if (cm.id === ref) return { text: cm.text ?? "", role: cm.role };
+      }
+    }
+  }
   return null;
 }
 
@@ -161,7 +170,7 @@ async function handleMessageRef(
     return targetPath.error;
   }
 
-  await mkdir(AUTO_DIR, { recursive: true }).catch(() => {});
+  await mkdir(AUTO_DIR, { recursive: true }).catch((e) => logError("decompress", { event: "mkdir-failed", dir: AUTO_DIR, error: e instanceof Error ? e.message : String(e) }));
   await writeFile(targetPath, text, "utf8");
 
   debug.event("decompress-message", { ref, ownerBlockId, mode: "file", path: targetPath, chars: text.length });
@@ -221,7 +230,7 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
     return targetPath.error;
   }
 
-  await mkdir(AUTO_DIR, { recursive: true }).catch(() => {});
+  await mkdir(AUTO_DIR, { recursive: true }).catch((e) => logError("decompress", { event: "mkdir-failed", dir: AUTO_DIR, error: e instanceof Error ? e.message : String(e) }));
   await writeFile(targetPath, text, "utf8");
 
   debug.event("decompress", { blockId, full, count, mode: "file", path: targetPath, chars: text.length });

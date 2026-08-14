@@ -3,10 +3,22 @@ import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { formatCompactTokens } from "./footer-status.js";
+import { logThrow } from "./log.js";
 
 declare const CURRENT_VERSION: string;
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
+
+function safeHandler(handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>): (args: string, ctx: ExtensionCommandContext) => Promise<void> {
+  return async (args, ctx) => {
+    try {
+      await handler(args, ctx);
+    } catch (e) {
+      logThrow("command", e, { args });
+      ctx.ui.notify(`ACP command error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+}
 
 export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options: CommandOptions }> {
   return [
@@ -14,21 +26,21 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
       name: "acp",
       options: {
         description: "Show ACP context usage, token breakdown, and compression status.",
-        handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
+        handler: safeHandler(async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx))),
       },
     },
     {
       name: "acp-status",
       options: {
         description: "Detailed ACP status (block tiers, token breakdown, compressible ranges).",
-        handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
+        handler: safeHandler(async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx))),
       },
     },
     {
       name: "acp-decompress",
       options: {
         description: "Restore a compressed block's content (shown here, block stays folded). Usage: /acp-decompress b3",
-        handler: async (args, ctx) => {
+        handler: safeHandler(async (args, ctx) => {
           const blockId = parseBlockIdArg(args);
           if (!blockId) {
             ctx.ui.notify('Usage: /acp-decompress <blockId> (e.g. "b3")');
@@ -46,14 +58,14 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
             return;
           }
           ctx.ui.notify(`Block ${blockId} (${count} items):\n\n${text}`);
-        },
+        }),
       },
     },
     {
       name: "acp-search",
       options: {
         description: "Search compressed block summaries. Usage: /acp-search auth token",
-        handler: async (args, ctx) => {
+        handler: safeHandler(async (args, ctx) => {
           const query = args.trim();
           if (!query) {
             ctx.ui.notify("Usage: /acp-search <query>");
@@ -67,7 +79,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
           }
           const lines = hits.map((b) => `[${b.blockId}] (t${b.tier}) ${b.topic ?? ""}`.trim());
           ctx.ui.notify(lines.join("\n"));
-        },
+        }),
       },
     },
   ];

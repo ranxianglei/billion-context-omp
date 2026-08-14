@@ -13,6 +13,7 @@ function resolveLogFile(): string {
 }
 
 let runtimeDebug: boolean | null = null;
+let lastRotationCheck = 0;
 
 export function setDebugEnabled(enabled: boolean): void {
   runtimeDebug = enabled;
@@ -38,16 +39,20 @@ function ts(): string {
 
 function writeLine(level: string, scope: string, fields: Record<string, unknown>): void {
   const file = resolveLogFile();
-  try {
-    if (existsSync(file) && statSync(file).size >= MAX_BYTES) {
-      renameSync(file, file + ".old");
+  const now = Date.now();
+  if (now - lastRotationCheck > 1000) {
+    lastRotationCheck = now;
+    try {
+      if (existsSync(file) && statSync(file).size >= MAX_BYTES) {
+        renameSync(file, file + ".old");
+      }
+    } catch {
     }
-  } catch {
   }
   const body = Object.keys(fields)
     .map((k) => `${k}=${fmt(fields[k])}`)
     .join(" ");
-  const line = `${ts()} [${level}] [${scope}] ${body}\n`;
+  const line = `${ts()} [${level}] [${scope}] pid=${process.pid} ${body}\n`;
   try {
     mkdirSync(path.dirname(file), { recursive: true });
     appendFileSync(file, line);

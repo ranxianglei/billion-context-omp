@@ -74,7 +74,7 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
       if (!span) return undefined;
 
       ctx.ui?.notify?.(`ACP: compressing ~${span.tokens} tokens…`, "info");
-      const result = await summarizeRange(ctx, turn.messages, turn.state, span.startRef, span.endRef, runtime.prompts);
+      const result = await summarizeRange(ctx, turn.messages, turn.state, span.startRef, span.endRef, runtime.prompts, runtime.adapter.compress?.compressModel);
       if (!result) {
         ctx.ui?.notify?.("ACP: compression fell back to Pi native compaction", "warning");
         return undefined;

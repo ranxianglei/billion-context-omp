@@ -18,18 +18,12 @@ export interface DelegateConfig {
 /** Compression tuning. All fields accept a ratio (0.75) or percent string
  *  ("75%") where noted. */
 export interface CompressConfig {
-  /** Context usage percentage that triggers forced compression nudges
-   *  (bypasses growth-gate + cadence). Accepts a ratio (0.75) or percent
-   *  string ("75%"). Default: 0.75. Maps to kernel nudge.maxContextLimitPct. */
   maxContextLimit?: number | string;
-  /** Context usage percentage that triggers emergency truncation of large
-   *  tool outputs. Accepts a ratio (0.95) or percent string ("95%").
-   *  Default: 0.95. Must be >= maxContextLimit. Maps to kernel
-   *  nudge.emergencyThresholdPct + truncate.threshold. */
   emergencyThresholdPercent?: number | string;
-  /** Token growth threshold for soft compression nudges. Default: 50000.
-   *  Maps to kernel nudge.growthFloor + nudge.growthCap. */
   nudgeGrowthTokens?: number;
+  /** Model for /compact summaries, as "provider:modelId" (e.g.
+   *  "zhipuai:glm-5.2"). Omit to use the current session model. */
+  compressModel?: string;
 }
 
 /**

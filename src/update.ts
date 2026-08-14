@@ -68,6 +68,7 @@ async function readPackageJson(path: string): Promise<PackageJson | undefined> {
 export function findNpmRoot(extDir: string): string | undefined {
   let dir = dirname(extDir);
   for (;;) {
+    if (dir.includes(".pnpm")) return undefined;
     if (dir.endsWith("node_modules")) return dirname(dir);
     const parent = dirname(dir);
     if (parent === dir) return undefined;

@@ -18,6 +18,7 @@
 import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 import { blockDocs, messageDocs, type SearchDoc, type MessageInput, type MessageRole } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
+import { estimateTextTokens } from "./tokens.js";
 import type { CompressionState } from "acp-kernel";
 
 /** All message refs covered by any block (active or inactive). */
@@ -40,13 +41,6 @@ function buildMessageOwnerMap(state: CompressionState): Map<string, string> {
     return m;
 }
 
-function estimateTokens(text: string): number {
-    if (typeof text !== "string" || !text) return 0;
-    const cjk = text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g);
-    const cjkCount = cjk?.length ?? 0;
-    return cjkCount + Math.ceil((text.length - cjkCount) / 4);
-}
-
 function toRole(entry: SessionMessageEntry): MessageRole | null {
     const role = entry.message.role;
     if (role === "user") return "user";
@@ -64,18 +58,17 @@ export function buildSearchDocs(ctx: ExtensionContext, state: CompressionState):
     const blockTier = new Map<string, number>();
     for (const b of state.blocks) blockTier.set(b.blockId, b.tier ?? 1);
 
+    const seenRefs = new Set<string>();
     const msgs: MessageInput[] = [];
-    for (const entry of allEntries) {
-        if (entry.type !== "message") continue;
-        const role = toRole(entry);
-        if (!role) continue;
-
+    const processEntry = (entry: SessionEntry): void => {
+        if (entry.type !== "message") return;
+        const role = toRole(entry as SessionMessageEntry);
+        if (!role) return;
         const cores = entriesToCoreMessages([entry]);
         for (const cm of cores) {
-            if (!cm.id) continue;
-            // Only include messages that were compressed into a block.
-            // Still-live messages are visible to the model — no need to search them.
+            if (!cm.id || seenRefs.has(cm.id)) continue;
             if (!covered.has(cm.id)) continue;
+            seenRefs.add(cm.id);
             const text = cm.text ?? "";
             if (!text || text.length < 2) continue;
             const ownerBlock = ownerMap.get(cm.id);
@@ -83,11 +76,18 @@ export function buildSearchDocs(ctx: ExtensionContext, state: CompressionState):
                 ref: cm.id,
                 role,
                 text,
-                tokens: estimateTokens(text),
+                tokens: estimateTextTokens(text),
                 blockId: ownerBlock,
                 tier: ownerBlock ? blockTier.get(ownerBlock) : undefined,
             });
         }
+    };
+    for (const entry of allEntries) processEntry(entry);
+    for (const id of covered) {
+        if (seenRefs.has(id)) continue;
+        const baseId = id.split("#")[0]!;
+        const entry = sm.getEntry(baseId);
+        if (entry) processEntry(entry);
     }
 
     return [...blockDocs(state), ...messageDocs(msgs)];

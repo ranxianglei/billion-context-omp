@@ -126,8 +126,10 @@ export function wireToolGuardrails(pi: ExtensionAPI, runtime: AcpRuntime): void 
 
     let modified: ToolResultEvent["content"] | undefined;
     const max = runtime.adapter.toolOutputMaxBytes;
-    if (max !== undefined && max > 0) {
-      const next = capToolOutput(event.content, max);
+    if (max !== undefined) {
+      const details = event.details as Record<string, unknown> | undefined;
+      const fullPath = details && typeof details.fullOutputPath === "string" ? details.fullOutputPath : undefined;
+      const next = capToolOutput(event.content, max, fullPath);
       if (next) {
         modified = next;
         debug.event("guardrail-output-cap", { max });

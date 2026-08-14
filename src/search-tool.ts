@@ -3,6 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-p
 import { searchBlocks, type SearchResult } from "acp-kernel";
 import type { AcpRuntime } from "./runtime.js";
 import { buildSearchDocs } from "./search-index.js";
+import { formatTokens } from "./tokens.js";
 import { logThrow } from "./log.js";
 
 const SearchParams = type({
@@ -50,7 +51,7 @@ async function handleSearch(args: SearchArgs, runtime: AcpRuntime, ctx: Extensio
 }
 
 function formatResult(r: SearchResult): string {
-    const sizeStr = r.tokens != null ? formatSize(r.tokens) : "";
+    const sizeStr = r.tokens != null ? formatTokens(r.tokens) : "";
     const meta = [
         r.kind === "message" ? `message ${r.ref}` : `block ${r.ref}`,
         r.role ? `(${r.role})` : "",
@@ -73,10 +74,4 @@ function formatResult(r: SearchResult): string {
 function truncate(s: string, n: number): string {
     if (s.length <= n) return s;
     return s.slice(0, n - 1) + "…";
-}
-
-function formatSize(tokens: number): string {
-    if (tokens < 1000) return `${tokens}tok`;
-    if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(1)}K`;
-    return `${(tokens / 1_000_000).toFixed(1)}M`;
 }

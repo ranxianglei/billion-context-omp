@@ -156,8 +156,9 @@ export async function summarizeRange(
   startRef: string,
   endRef: string,
   prompts: Prompts,
+  configuredModel?: string | null,
 ): Promise<{ summary: string; model: string } | null> {
-  const configured = readCompressModel();
+  const configured = configuredModel ?? readCompressModel();
   const resolved = resolveCompressModel(ctx.modelRegistry, ctx.model, configured);
   if (!resolved) return null;
   const { model, label } = resolved;
@@ -174,13 +175,13 @@ export async function summarizeRange(
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
   try {
+    const instructions = buildSummaryPrompt(prompts);
     const userText =
-      `${buildSummaryPrompt(prompts)}\n\n` +
       `Message range [${startRef}..${endRef}] (${tokens} tokens, ${slice.length} messages). Compress it:\n\n` +
       formatSlice(slice, state);
     const response = await complete(
       model,
-      { messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
+      { systemPrompt: [instructions], messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
       { apiKey: auth.apiKey, headers: auth.headers, maxTokens: MAX_OUTPUT_TOKENS, signal: ac.signal },
     );
     const summary = parseSummary(

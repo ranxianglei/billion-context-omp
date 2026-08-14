@@ -6,11 +6,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
-import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
-
-function formatK(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
-}
+import { estimateTokens, collectCoveredMessageIds, formatTokens } from "./tokens.js";
 
 const RangeSpec = type({
   startId: type("string").describe('Message ref, e.g. "m00005" (from the acp tag), or a block id "b3".'),
@@ -50,6 +46,8 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const ranges = args.content ?? [];
   if (ranges.length === 0) return "No ranges provided.";
+  const releaseLock = await runtime.acquireLock(ctx.sessionManager.getSessionId());
+  try {
   const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
   const estimatedTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState));
@@ -121,8 +119,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
   }
 
-  const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  const lines = [`▣ ACP | ${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens (~${formatTokens(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   return lines.join("\n");
+  } finally { releaseLock(); }
 }

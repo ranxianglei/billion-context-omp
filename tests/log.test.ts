@@ -25,9 +25,9 @@ test("error/warn/info are written when debug is OFF (always-on)", async () => {
   log.logInfo("scope-c", { event: "started", sid: "s1" });
   log.closeLogStream();
   const content = await readFile(file, "utf8");
-  assert.match(content, /\[error\] \[scope-a\] event=boom detail=x/);
-  assert.match(content, /\[warn\] \[scope-b\] event=careful/);
-  assert.match(content, /\[info\] \[scope-c\] event=started sid=s1/);
+  assert.match(content, /\[error\] \[scope-a\] pid=\d+ event=boom detail=x/);
+  assert.match(content, /\[warn\] \[scope-b\] pid=\d+ event=careful/);
+  assert.match(content, /\[info\] \[scope-c\] pid=\d+ event=started sid=s1/);
   await rm(path.dirname(file), { recursive: true, force: true });
 });
 
@@ -52,7 +52,7 @@ test("debug.event IS written when debug is ON", async () => {
   log.debug.event("verbose", { k: "v" });
   log.closeLogStream();
   const content = await readFile(file, "utf8");
-  assert.match(content, /\[debug\] \[verbose\] k=v/);
+  assert.match(content, /\[debug\] \[verbose\] pid=\d+ k=v/);
   await rm(path.dirname(file), { recursive: true, force: true });
 });
 
@@ -64,7 +64,7 @@ test("logThrow records message and stack as error", async () => {
   log.logThrow("transform", err, { sid: "s9", phase: "ctx" });
   log.closeLogStream();
   const content = await readFile(file, "utf8");
-  assert.match(content, /\[error\] \[transform\] sid=s9 phase=ctx error=kaboom stack=/);
+  assert.match(content, /\[error\] \[transform\] pid=\d+ sid=s9 phase=ctx error=kaboom stack=/);
   assert.match(content, /kaboom/);
   await rm(path.dirname(file), { recursive: true, force: true });
 });
