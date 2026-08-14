@@ -1,3 +1,4 @@
+import type { ApplyCompressionResult, CompressRangeSpec } from "acp-kernel";
 import { type } from "@oh-my-pi/omptype";
 import type {
   AgentToolResult,
@@ -73,15 +74,32 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
       beforeMsgCount: messages.length,
       beforeTokens,
     });
+    const rangeSpecs: CompressRangeSpec[] = ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId }));
 
-    const applied = runtime.core.applyCompression({
-      ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
-      messages,
-      state,
-      config,
-    });
+    const invalidRanges = rangeSpecs.filter((r) => !r.startRef || !r.endRef || typeof r.startRef !== "string" || typeof r.endRef !== "string");
+    if (invalidRanges.length > 0) {
+      logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "invalid-ranges", count: invalidRanges.length, ranges: invalidRanges.map((r) => `${r.startRef}..${r.endRef}`) });
+      return `Rejected: ${invalidRanges.length} range(s) have invalid startId or endId (missing or non-string). All ranges must have valid message refs (e.g. "m00005") or block IDs (e.g. "b3"). No changes applied — run acp_status for current refs.`;
+    }
+
+    let applied: ApplyCompressionResult;
+    try {
+      applied = runtime.core.applyCompression({
+        ranges: rangeSpecs,
+        messages,
+        state,
+        config,
+      });
+    } catch (e) {
+      logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), phase: "applyCompression", ranges: rangeSpecs.length });
+      return `Compression failed: ${e instanceof Error ? e.message : String(e)}. No changes applied — state is unchanged.`;
+    }
+    if (applied.result.errors.length > 0) {
+      logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "apply-errors", count: applied.result.errors.length, errors: applied.result.errors.slice(0, 5) });
+      return `Compression rejected: ${applied.result.errors.join("; ")}. No changes applied — run acp_status to verify current state.`;
+    }
     await runtime.save(applied.state, ctx);
-    const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
+    const { blocksCreated, tokensCompressed, warnings } = applied.result;
 
     const afterTokens = Math.max(0, beforeTokens - tokensCompressed);
 
@@ -93,8 +111,8 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
       beforeTokens,
       afterTokens,
       afterMsgCount: applied.state.blocks.length,
-      errors: errors.length,
-      errorDetails: errors.slice(0, 3),
+      errors: 0,
+      errorDetails: [],
       blocksAfter: applied.state.blocks.length,
       activeAfter: applied.state.blocks.filter((b) => b.active).length,
       newBlocks: newBlocks.map((b) => ({ blockId: b.blockId, tier: b.tier, summaryLen: b.summary.length, directMsgCount: b.directMessageIds.length, effectiveMsgCount: b.effectiveMessageIds.length, summary: b.summary })),
@@ -109,19 +127,14 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
       beforeTokens,
       afterTokens,
       warnings: warnings.length,
-      errors: errors.length,
       newBlockIds: newBlocks.map((b) => b.blockId),
     });
-    if (errors.length > 0) {
-      logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
-    }
     if (warnings.length > 0) {
       logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
     }
 
     const lines = [`▣ ACP | ${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens (~${formatTokens(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
     if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
-    if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
     return lines.join("\n");
   } finally { releaseLock(); }
 }
