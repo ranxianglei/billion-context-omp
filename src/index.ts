@@ -19,7 +19,7 @@ import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
-import { dumpContextMessages } from "./dump.js";
+import { dumpContextMessages, dumpProviderRequest, summarizeProviderPayload } from "./dump.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { formatSystemPromptForEvent } from "./compat.js";
 
@@ -34,6 +34,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
+    wireProviderDebug(pi);
     wireToolGuardrails(pi, runtime);
     pi.registerTool(makeCompressTool(runtime));
     pi.registerTool(makeDecompressTool(runtime));
@@ -283,6 +284,30 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_agent_start", (event) => {
     const acp = buildAcpSystemPrompt(runtime.prompts);
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, acp) };
+  });
+}
+// Debug hooks at the actual LLM provider boundary. `before_provider_request`
+// fires after ALL message processing (ACP tags, omp system-reminders, tool
+// definitions) — this is the true payload sent to the model. Comparing these
+// dumps against the context-event dumps (NNNN.json) reveals exactly what omp
+// changes after our return, which is where cache-prefix instability hides.
+function wireProviderDebug(pi: ExtensionAPI): void {
+  pi.on("before_provider_request", (event, ctx) => {
+    if (!debug.enabled) return;
+    const sid = ctx.sessionManager.getSessionId();
+    const dumpPath = dumpProviderRequest(event.payload, { sid });
+    const summary = summarizeProviderPayload(event.payload);
+    debug.event("provider-request", { sid, dumpPath, ...summary });
+  });
+
+  pi.on("after_provider_response", (event, ctx) => {
+    if (!debug.enabled) return;
+    debug.event("provider-response", {
+      sid: ctx.sessionManager.getSessionId(),
+      status: event.status,
+      requestId: event.requestId ?? null,
+      headers: event.headers,
+    });
   });
 }
 
