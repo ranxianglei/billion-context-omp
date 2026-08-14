@@ -67,6 +67,18 @@ function resolveToFilePath(targetPath: string): string | { error: string } {
     ? join(homeDir(), targetPath.slice(2))
     : targetPath;
   const resolved = resolve(expanded);
+  const under = (dir: string, path: string): boolean => {
+    const rel = relative(dir, path);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  };
+  // Lexical pre-check: a path not even lexically under an allowed root is
+  // rejected with a stable message before any filesystem probing — on
+  // Windows "/etc/passwd" resolves to a nonexistent drive-root dir and the
+  // realpath probe below would otherwise surface an existence error instead
+  // of the security rejection.
+  if (!ALLOWED_DIRS.some((dir) => under(dir, resolved))) {
+    return { error: `Error: toFile path must be under ${tmpdir()} or ~/.cache/omp. Got: ${targetPath}` };
+  }
   // Resolve the real path (following symlinks) so a symlink chain like
   // /tmp/evil -> /etc cannot escape the allowed roots.
   let realResolved: string;
@@ -80,10 +92,7 @@ function resolveToFilePath(targetPath: string): string | { error: string } {
       return { error: `Error: toFile directory does not exist or is inaccessible. Got: ${targetPath}` };
     }
   }
-  const isAllowed = ALLOWED_DIRS.some((dir) => {
-    const rel = relative(dir, realResolved);
-    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-  });
+  const isAllowed = ALLOWED_DIRS.some((dir) => under(dir, realResolved));
   if (!isAllowed) {
     return { error: `Error: toFile path must be under ${tmpdir()} or ~/.cache/omp. Got: ${targetPath}` };
   }

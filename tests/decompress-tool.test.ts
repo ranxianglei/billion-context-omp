@@ -108,6 +108,13 @@ test("decompress toFile rejects paths outside allowed roots", async () => {
   const res = await decompressTool.execute("tc5", { blockId: "b1", toFile: "/etc/passwd" }, undefined, undefined, ctx);
   const text = (res.content[0] as any).text as string;
   assert.match(text, /must be under/i, "rejects arbitrary filesystem path");
+
+  // Windows CI shape: "/etc/passwd" resolves to a NONEXISTENT drive-root dir
+  // (<drive>:\\etc). The rejection must still be the security message, not an
+  // existence error from the realpath probe.
+  const res2 = await decompressTool.execute("tc5b", { blockId: "b1", toFile: "/nonexistent-root-xyz/sub/passwd" }, undefined, undefined, ctx);
+  const text2 = (res2.content[0] as any).text as string;
+  assert.match(text2, /must be under/i, "rejects path whose parent dir does not exist");
 });
 
 test("decompress keeps the block active after a file-mode call", async () => {
