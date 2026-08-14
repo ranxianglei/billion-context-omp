@@ -91,23 +91,46 @@ async function autoInstallLatest(latest: string): Promise<boolean> {
   // Defense against a poisoned/MITM registry: only accept a strict semver,
   // then pass args as an array to execFile (never via a shell string) so the
   // version can never be interpreted as a command even if it slipped through.
-  if (!SEMVER_RE.test(latest)) return false;
+  if (!SEMVER_RE.test(latest)) {
+    logWarn("update", { event: "install-abort", reason: "semver", latest });
+    return false;
+  }
   const extDir = await findExtensionDir();
-  if (!extDir) return false;
+  if (!extDir) {
+    logWarn("update", { event: "install-abort", reason: "extdir-not-found", moduleUrl: import.meta.url });
+    return false;
+  }
   const npmDir = findNpmRoot(extDir);
-  if (!npmDir) return false;
+  if (!npmDir) {
+    logWarn("update", { event: "install-abort", reason: "npmroot-not-found", extDir });
+    return false;
+  }
 
   try {
-    const code = await new Promise<number>((resolve) => {
-      execFile(
-        "npm",
-        ["install", `${PACKAGE_NAME}@${latest}`, "--silent", "--no-audit", "--no-fund"],
-        { cwd: npmDir, timeout: 60_000, shell: process.platform === "win32" },
-        (err) => resolve(err ? 1 : 0),
-      );
-    });
-    return code === 0;
-  } catch {
+    // Hold the event loop while npm runs: short-lived hosts (print/JSON
+    // mode) exit as soon as the single turn completes, which killed the
+    // fire-and-forget install mid-flight (observed live: hasUpdate=true
+    // logged, then nothing — process gone). A ref'd interval defers exit
+    // until the install finishes.
+    const keepAlive = setInterval(() => {}, 500);
+    try {
+      const code = await new Promise<number>((resolve) => {
+        execFile(
+          "npm",
+          ["install", `${PACKAGE_NAME}@${latest}`, "--silent", "--no-audit", "--no-fund"],
+          { cwd: npmDir, timeout: 60_000, shell: process.platform === "win32" },
+          (err, _stdout, stderr) => {
+            if (err) logWarn("update", { event: "install-exec-failed", error: err.message, stderr: String(stderr).slice(0, 300) });
+            resolve(err ? 1 : 0);
+          },
+        );
+      });
+      return code === 0;
+    } finally {
+      clearInterval(keepAlive);
+    }
+  } catch (e) {
+    logWarn("update", { event: "install-throw", error: e instanceof Error ? e.message : String(e) });
     return false;
   }
 }
