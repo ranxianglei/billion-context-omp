@@ -185,6 +185,21 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         activeBefore: state.blocks.filter((b) => b.active).length,
       });
 
+      // On the first context event after session restart/resume, omp's
+      // getBranch() may return only metadata entries (title, session) before
+      // the actual message entries are loaded. This produces coreMessages=[]
+      // while event.messages has real content. If we replace event.messages
+      // with our empty rebuild, the LLM sees nothing — user's first message
+      // is silently lost until the next context event.
+      if (coreMessages.length === 0 && (event.messages?.length ?? 0) > 0) {
+        debug.event("getbranch-stale-fallback", {
+          sid,
+          eventMsgs: event.messages?.length ?? 0,
+          entries: entries.length,
+        });
+        return;
+      }
+
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
 
