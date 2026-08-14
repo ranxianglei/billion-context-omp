@@ -145,7 +145,12 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
+    try {
+      runtime.forgetSession(ctx.sessionManager.getSessionId());
+    } catch {
+      // session id unavailable — nothing to evict
+    }
     closeLogStream();
   });
 }
@@ -158,7 +163,15 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
-      const { state, coreMessages, originalById, streamLen } = runtime.foldStream(ctx, event.messages ?? []);
+      // A transient empty message list must not wipe a non-empty fold — bypass
+    // instead of rebuilding (an empty {messages} return would clear the LLM
+    // context).
+    const input = event.messages ?? [];
+    if (input.length === 0) {
+      debug.event("empty-stream-bypass", { sid });
+      return undefined;
+    }
+    const { state, coreMessages, originalById, streamLen } = runtime.foldStream(ctx, input);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
       // Prefer pi's real token count (anchored on provider usage) over our

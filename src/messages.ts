@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 import type { CoreMessage } from "acp-kernel";
 import { debug } from "./log.js";
@@ -70,9 +71,10 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
     if (!call.id) continue;
     const args = compressToolArgs(call);
     if (!args) continue;
-    const content = (args as { content?: unknown }).content;
+    const content = args.content;
     if (!Array.isArray(content)) continue;
     const ranges: StreamCompressCall["ranges"] = [];
+    const callTopic = typeof args.topic === "string" ? args.topic : undefined;
     for (const item of content) {
       const r = item as { startId?: unknown; endId?: unknown; summary?: unknown; topic?: unknown };
       if (typeof r.startId !== "string" || typeof r.endId !== "string" || typeof r.summary !== "string" || r.summary.length === 0) continue;
@@ -80,8 +82,8 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
         startRef: r.startId,
         endRef: r.endId,
         summary: r.summary,
-        topic: typeof r.topic === "string" ? r.topic : undefined,
-        summaryMaxChars: typeof (args as { summaryMaxChars?: unknown }).summaryMaxChars === "number" ? (args as { summaryMaxChars?: number }).summaryMaxChars : undefined,
+        topic: typeof r.topic === "string" ? r.topic : callTopic,
+        summaryMaxChars: typeof args.summaryMaxChars === "number" ? args.summaryMaxChars : undefined,
         compressCallId: call.id,
       });
     }
@@ -95,15 +97,18 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
  *  tool with path "xd://compress" and the tool args JSON-encoded in the
  *  content field — the session stream never shows a name:"compress" call.
  *  Sessions without a granted write tool expose compress top-level instead,
- *  so both shapes must replay. */
-function compressToolArgs(call: { name: string; arguments?: unknown }): Record<string, unknown> | null {
+ *  so both shapes must replay. Returns normalized compress args (content array
+ *  plus optional topic / summaryMaxChars from wherever they live). */
+function compressToolArgs(call: { name: string; arguments?: unknown }): { content: unknown[]; topic?: unknown; summaryMaxChars?: unknown } | null {
   let args = call.arguments;
   if (typeof args === "string") {
     try { args = JSON.parse(args); } catch { return null; }
   }
   if (!args || typeof args !== "object" || Array.isArray(args)) return null;
   const a = args as Record<string, unknown>;
-  if (call.name === "compress") return a;
+  if (call.name === "compress") {
+    return Array.isArray(a.content) ? { content: a.content, topic: a.topic, summaryMaxChars: a.summaryMaxChars } : null;
+  }
   if (call.name !== "write") return null;
   const path = typeof a.path === "string" ? a.path.split("?")[0]!.replace(/\/+$/, "") : "";
   if (path !== "xd://compress") return null;
@@ -114,7 +119,7 @@ function compressToolArgs(call: { name: string; arguments?: unknown }): Record<s
   if (!inner || typeof inner !== "object") return null;
   if (Array.isArray(inner)) return { content: inner };
   const ia = inner as Record<string, unknown>;
-  return Array.isArray(ia.content) ? ia : { content: [ia] };
+  return Array.isArray(ia.content) ? { content: ia.content, topic: ia.topic, summaryMaxChars: ia.summaryMaxChars } : { content: [ia] };
 }
 
 function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
@@ -438,4 +443,28 @@ function peelRefTagBlocks(blocks: unknown[]): unknown[] {
     }
   }
   return out;
+}
+
+/** 1-based stream position encoded in a p-id ("p7" | "p7#tc1" → 7). */
+export function rawPos(rawId: string): number {
+  const n = Number.parseInt(rawId.replace(/^p/, "").split("#")[0]!, 10);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+/** Stable fingerprint of a covered span, computed from the deterministic core
+ *  projection: hash of the first and last covered CoreMessages' content
+ *  fields. Written into the compress tool's success result (which lives in
+ *  the stream) and re-verified on fold replay — if a host-side rewrite
+ *  (compaction, edit) shifted positions, the fingerprint mismatches and the
+ *  call is skipped instead of silently compressing the wrong messages. */
+export function spanFingerprint(coreMessages: CoreMessage[], startRaw: string, endRaw: string): string {
+  const key = (cm: CoreMessage): string => `${cm.role}|${cm.contentType}|${cm.toolName ?? ""}|${(cm.text ?? "").slice(0, 4096)}`;
+  let first: CoreMessage | undefined;
+  let last: CoreMessage | undefined;
+  for (const cm of coreMessages) {
+    if (cm.id === startRaw) first = cm;
+    if (cm.id === endRaw) last = cm;
+  }
+  if (!first || !last) return "";
+  return createHash("sha1").update(`${key(first)}\u0000${key(last)}`).digest("hex").slice(0, 8);
 }

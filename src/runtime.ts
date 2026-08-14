@@ -14,7 +14,7 @@ import {
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { debug, logWarn } from "./log.js";
-import { findCompressCalls, messageIdentity, streamToCoreMessages, toolResultTexts, type AgentMessage } from "./messages.js";
+import { findCompressCalls, messageIdentity, rawPos, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage } from "./messages.js";
 
 export interface FoldResult {
   state: CompressionState;
@@ -45,6 +45,7 @@ export interface AcpRuntime {
   foldStream(ctx: ExtensionContext, stream: AgentMessage[]): FoldResult;
   stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }>;
   commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void;
+  forgetSession(sid: string): void;
   acquireLock(sid: string): Promise<() => void>;
 }
 
@@ -53,7 +54,7 @@ function freshSlot(): FoldSlot {
 }
 
 function stateHasCompressCall(state: CompressionState, callId: string): boolean {
-  return state.blocks.some((b) => (b as { compressCallId?: string }).compressCallId === callId);
+  return state.blocks.some((b) => b.compressCallId === callId);
 }
 
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
@@ -123,23 +124,41 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
 
     // Prime refs for the current stream before replaying calls —
     // applyCompression resolves start/end refs through state.messageRefs.
+    // isProtected mirrors the kernel's assign-refs node so protected-tool
+    // messages (compress results, protectedTools config) keep BLOCKED_REF.
     const assigned = assignRefs(coreMessages, {
       existing: slot.state.messageRefs,
       nextIndex: highestUsedIndex(slot.state.messageRefs) + 1,
+      isProtected: (m) => {
+        if (m.role !== "tool" || !m.toolName) return false;
+        if (m.toolName === "compress") return true;
+        return (config.protectedTools ?? []).includes(m.toolName);
+      },
     });
     slot.state = { ...slot.state, messageRefs: assigned.map };
 
-    // Fresh fold (session start / restart / refold): replay only compress
-    // calls whose live tool result actually applied a block — rejected
-    // calls ("No changes applied") must not resurrect later. Incremental
-    // folds only scan NEW stream positions for unseen calls.
+    // Replay compress calls found in the stream (fresh folds scan everything,
+    // incremental folds only NEW positions). Calls whose live tool result said
+    // "No changes applied" must never resurrect — checked on every fold, since
+    // a live rejection can also be followed by an incremental context event.
     const isFreshFold = slot.foldedLen === 0;
-    const resultTexts = isFreshFold ? toolResultTexts(stream) : null;
+    const resultTexts = toolResultTexts(stream);
     let replayed = 0;
     for (let i = isFreshFold ? 0 : slot.foldedLen; i < stream.length; i++) {
       for (const call of findCompressCalls(stream[i]!)) {
-        if (resultTexts?.get(call.id)?.includes("No changes applied")) {
+        const resultText = resultTexts.get(call.id) ?? "";
+        if (resultText.includes("No changes applied")) {
           debug.event("fold-replay-skipped", { sid, callId: call.id });
+          continue;
+        }
+        // Guard against host-side prefix rewrites (native compaction, edits):
+        // the call's ranges must resolve to messages that precede the call
+        // itself in the stream, and the span fingerprint recorded in the
+        // success result must still match — otherwise skip rather than
+        // silently compress the wrong messages with a stale summary.
+        const stale = call.ranges.some((r, ri) => staleRange(r, ri, resultText, coreMessages, i, slot.state.messageRefs.byRef));
+        if (stale) {
+          debug.event("fold-replay-stale", { sid, callId: call.id });
           continue;
         }
         if (slot.appliedCallIds.has(call.id) || stateHasCompressCall(slot.state, call.id)) continue;
@@ -175,6 +194,11 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return Promise.resolve({ state: slot.state, coreMessages: slot.coreMessages });
   }
 
+  function forgetSession(sid: string): void {
+    slots.delete(sid);
+    locks.delete(sid);
+  }
+
   function commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void {
     const sid = sidOf(ctx);
     const slot = slotFor(sid);
@@ -196,6 +220,31 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     foldStream,
     stateFor,
     commitFoldState,
+    forgetSession,
     acquireLock,
   };
+}
+
+function staleRange(
+  r: { startRef: string; endRef: string },
+  rangeIndex: number,
+  resultText: string,
+  coreMessages: CoreMessage[],
+  callIndex: number,
+  byRef: Record<string, string>,
+): boolean {
+  const startRaw = byRef[r.startRef];
+  const endRaw = byRef[r.endRef];
+  if (!startRaw || !endRaw) return true;
+  const start = rawPos(startRaw);
+  const end = rawPos(endRaw);
+  // Ranges always cover messages BEFORE the call that issued them — a call
+  // resolving to positions at/after itself means the prefix was rewritten.
+  if (start === 0 || end === 0 || end > callIndex) return true;
+  const m = resultText.match(/\[fp=([0-9a-f,]+)\]/);
+  if (!m) return false;
+  const expected = m[1]!.split(",");
+  const fp = spanFingerprint(coreMessages, startRaw, endRaw);
+  if (expected[rangeIndex] === undefined) return !expected.includes(fp);
+  return expected[rangeIndex] !== fp;
 }

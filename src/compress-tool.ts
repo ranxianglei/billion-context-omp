@@ -7,6 +7,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
+import { spanFingerprint } from "./messages.js";
 import { estimateTokens, collectCoveredMessageIds, formatTokens } from "./tokens.js";
 
 const RangeSpec = type({
@@ -133,8 +134,15 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
       logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
     }
 
+    // Span fingerprints: replay-time identity check written into the result
+    // text (which persists in the stream). If a host-side rewrite later shifts
+    // positions, fold replay re-computes and mismatches → call skipped.
+    const byRef = applied.state.messageRefs.byRef;
+    const fps = rangeSpecs.map((r) => spanFingerprint(coreMessages, byRef[r.startRef] ?? "", byRef[r.endRef] ?? "")).filter((fp) => fp.length > 0);
+
     const lines = [`▣ ACP | ${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens (~${formatTokens(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
     if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
+    if (fps.length > 0) lines.push(`[fp=${fps.join(",")}]`);
     return lines.join("\n");
   } finally { releaseLock(); }
 }

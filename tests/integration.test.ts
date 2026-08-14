@@ -263,6 +263,72 @@ test("restart replay skips compress calls that were rejected live", async () => 
   assert.ok(JSON.stringify(r2.messages).includes("rejected target"), "target stays visible (never compressed)");
 });
 
+test("host compaction rewriting the prefix must NOT replay stale compress calls onto shifted positions", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+
+  // 40 large user messages, model compresses m00005..m00035 (call at pos 36..37).
+  const filler = (n: number) => `message number ${n} `.repeat(120);
+  const stream: any[] = [];
+  for (let i = 1; i <= 40; i++) stream.push(userMsg(filler(i)));
+  const r1 = await handlers.get("context")![0]!({ type: "context", messages: [...stream] }, ctx);
+  const startRef = refOf(r1.messages[4]);
+  const endRef = refOf(r1.messages[34]);
+
+  const successResult = await api.tools.find((t) => t.name === "compress")!.execute("tc_fp1", { content: [{ startId: startRef, endId: endRef, summary: "A sufficiently long summary that passes the fifty character minimum validation gate." }] }, undefined, undefined, ctx);
+  assert.match((successResult as any).content[0].text, /\[fp=[0-9a-f,]+\]/, "success result must carry span fingerprints");
+
+  const compacted = [
+    ...stream,
+    assistantCompressCall("tc_fp1", [{ startId: startRef, endId: endRef, summary: "A sufficiently long summary that passes the fifty character minimum validation gate." }]),
+    toolResult("tc_fp1", (successResult as any).content[0].text),
+    userMsg(filler(41)),
+  ];
+  // Host compaction folds the first 5 messages into one summary — every
+  // later position shifts back by 4. The stale refs m00005..m00035 still
+  // RESOLVE (the stream is long enough) but now point at shifted messages,
+  // so only the fingerprint guard (not an out-of-range reject) can catch it.
+  const rewritten = [userMsg(bigText("host compaction summary")), ...compacted.slice(5)];
+
+  const second = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  await second.handlers.get("context")![0]!({ type: "context", messages: rewritten }, ctx);
+  const statusTool = second.api.tools.find((t) => t.name === "acp_status")!;
+  const status = await statusTool.execute("tc_fp2", {}, undefined, undefined, ctx);
+  assert.doesNotMatch(status.content[0].text, /\d+ active/, "stale call must NOT replay onto shifted positions");
+});
+
+test("live-rejected compress call stays rejected on the next INCREMENTAL context event", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+
+  const filler = (n: number) => `content ${n} `.repeat(600);
+  const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), userMsg(filler(1)), userMsg(filler(2)), userMsg(filler(3)), userMsg(filler(4)), userMsg(filler(5)), userMsg(filler(6))];
+  const r1 = await handlers.get("context")![0]!({ type: "context", messages: [...stream] }, ctx);
+  const ref1 = refOf(r1.messages[0]);
+  const ref2 = refOf(r1.messages[1]);
+  const compress = api.tools.find((t) => t.name === "compress")!;
+  const ok = await compress.execute("tc_ok", { content: [{ startId: ref1, endId: ref2, summary: "First target compressed with a summary that is definitely long enough to pass." }] }, undefined, undefined, ctx);
+  assert.match((ok as any).content[0].text, /reclaimed/, "setup: first compression succeeds");
+  // Same SPAN again: live execution works on the pruned turn view where the
+  // covered messages no longer exist → rejected. Replay on the full stream
+  // projection would resolve them again — this is exactly the resurrection
+  // asymmetry the guard must close.
+  const rejected = await compress.execute("tc_dup", { content: [{ startId: ref1, endId: ref2, summary: "Duplicate attempt with a summary that is definitely long enough to pass." }] }, undefined, undefined, ctx);
+  assert.match((rejected as any).content[0].text, /No changes applied/, "setup: duplicate is rejected live");
+
+  // Next context event: the stream now carries the call + rejection result.
+  const stream2 = [...stream, assistantCompressCall("tc_ok", [{ startId: ref1, endId: ref2, summary: "First target compressed with a summary that is definitely long enough to pass." }]), toolResult("tc_ok", (ok as any).content[0].text), assistantCompressCall("tc_dup", [{ startId: ref1, endId: ref2, summary: "Duplicate attempt with a summary that is definitely long enough to pass." }]), toolResult("tc_dup", (rejected as any).content[0].text), userMsg(filler(7))];
+  await handlers.get("context")![0]!({ type: "context", messages: stream2 }, ctx);
+
+  const statusTool = api.tools.find((t) => t.name === "acp_status")!;
+  const status = await statusTool.execute("tc_inc", {}, undefined, undefined, ctx);
+  assert.match(status.content[0].text, /\u2014 1 active/, `rejected call must not resurrect on incremental fold:\n${status.content[0].text}`);
+  assert.doesNotMatch(status.content[0].text, /\bb2\b/, "no resurrection block");
+});
+
 test("tail rewind (retry) re-folds deterministically without losing prefix refs", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);

@@ -3,7 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-p
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent } from "acp-kernel";
-import { entriesToCoreMessages } from "./messages.js";
+import type { CoreMessage } from "acp-kernel";
 import { writeFile, mkdir } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { resolve, relative, isAbsolute, join, dirname, basename } from "node:path";
@@ -23,7 +23,7 @@ const PREVIEW_CHARS = 600;
 const MESSAGE_INLINE_THRESHOLD = 2000;
 
 const DecompressParams = type({
-  blockId: type("string").describe('Block id to restore, e.g. "b5". Also accepts a message ref (UUID) from search_context results — resolves to the owning block automatically.'),
+  blockId: type("string").describe('Block id to restore, e.g. "b5". Also accepts a message ref (e.g. m00123, p42#tc1) from search_context results — resolves to the owning block automatically.'),
   "full?": type("boolean").describe("If true, recurse through all nested blocks to original messages. Default: false (restores one tier up — nested block summaries shown, direct messages in full)."),
   "toFile?": type("string").describe("Write restored content to this file path (must be under /tmp or ~/.cache/omp) instead of the default auto-generated path. Block stays compressed."),
   "inline?": type("boolean").describe("If true, return content inline as this tool's result (appends to context). Default: false — content is written to an auto-generated file to avoid context bloat. Only set true when the content is small or you accept the context cost."),
@@ -36,7 +36,7 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
     name: "decompress",
     label: "Decompress",
     description:
-      "Restore a previously compressed block's content, or a single message by its ref. The block/message stays compressed — context and cache prefix are not disrupted. BLOCK decompress (blockId b5) defaults to writing a file (blocks can be large); use the read tool to access it, or inline:true to return inline. MESSAGE decompress (blockId = a message UUID from search_context) returns that ONE message's original text — defaults to inline since a single message is usually small; oversized messages go to a file. full:true recurses through nested block tiers (block mode only). You can pass a block id (b5) OR a message ref (UUID) from search_context results.",
+      "Restore a previously compressed block's content, or a single message by its ref. The block/message stays compressed — context and cache prefix are not disrupted. BLOCK decompress (blockId b5) defaults to writing a file (blocks can be large); use the read tool to access it, or inline:true to return inline. MESSAGE decompress (blockId = a message ref from search_context) returns that ONE message's original text — defaults to inline since a single message is usually small; oversized messages go to a file. full:true recurses through nested block tiers (block mode only). You can pass a block id (b5) OR a message ref (e.g. m00123) from search_context results.",
     parameters: DecompressParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       let result: string;
@@ -107,7 +107,7 @@ function headPreview(text: string): string {
  *  The fold slot's coreMessages is the full projected input stream — the
  *  stream never shrinks within a session, so compressed-away messages are
  *  still there for restoration. */
-function findMessageContent(ref: string, coreMessages: ReturnType<typeof entriesToCoreMessages>): { text: string; role: string } | null {
+function findMessageContent(ref: string, coreMessages: CoreMessage[]): { text: string; role: string } | null {
   for (const cm of coreMessages) {
     if (cm.id === ref) return { text: cm.text ?? "", role: cm.role };
   }
@@ -118,8 +118,8 @@ function findMessageContent(ref: string, coreMessages: ReturnType<typeof entries
  *  tree fallback is needed — messages missing from the stream (e.g. after an
  *  omp compaction rewrote history) simply have no restorable content. */
 function resolveBlockMessages(
-  coreMessages: ReturnType<typeof entriesToCoreMessages>,
-): ReturnType<typeof entriesToCoreMessages> {
+  coreMessages: CoreMessage[],
+): CoreMessage[] {
   return coreMessages;
 }
 
@@ -131,7 +131,7 @@ async function handleMessageRef(
   ownerBlockId: string,
   args: DecompressArgs,
   ctx: ExtensionContext,
-  coreMessages: ReturnType<typeof entriesToCoreMessages>,
+  coreMessages: CoreMessage[],
 ): Promise<string> {
   const found = findMessageContent(ref, coreMessages);
   if (!found || !found.text) {
@@ -183,7 +183,7 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
 
   // Otherwise treat as a block id.
   const blockId = parseBlockIdArg(arg);
-  if (!blockId) return `Invalid blockId: ${args.blockId}. Expected format like "b5", "5", or a message ref (UUID) from search_context results.`;
+  if (!blockId) return `Invalid blockId: ${args.blockId}. Expected format like "b5", "5", or a message ref (e.g. m00123) from search_context results.`;
   const block = state.blocks.find((b) => b.blockId === blockId);
   if (!block) {
     const active = state.blocks.filter((b) => b.active).map((b) => b.blockId).join(", ");
