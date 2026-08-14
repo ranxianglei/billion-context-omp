@@ -2,6 +2,7 @@ import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agen
 import type { CoreMessage } from "acp-kernel";
 import { debug } from "./log.js";
 type AgentMessage = SessionMessageEntry["message"];
+export type { AgentMessage };
 
 type AnyMessage = {
   role?: string;
@@ -33,6 +34,46 @@ export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
     }
     const cores = projectMessage(entry.message, entry.id);
     out.push(...cores);
+  }
+  return out;
+}
+
+export function streamToCoreMessages(stream: AgentMessage[]): CoreMessage[] {
+  const out: CoreMessage[] = [];
+  stream.forEach((message, i) => out.push(...projectMessage(message, `p${i + 1}`)));
+  return out;
+}
+
+export interface StreamCompressCall {
+  id: string;
+  ranges: { startRef: string; endRef: string; summary: string; topic?: string; summaryMaxChars?: number; compressCallId: string }[];
+}
+
+export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
+  const out: StreamCompressCall[] = [];
+  for (const call of allToolCalls((message as AnyMessage).content)) {
+    if (call.name !== "compress" || !call.id) continue;
+    let args = call.arguments;
+    if (typeof args === "string") {
+      try { args = JSON.parse(args); } catch { continue; }
+    }
+    if (!args || typeof args !== "object") continue;
+    const content = (args as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    const ranges: StreamCompressCall["ranges"] = [];
+    for (const item of content) {
+      const r = item as { startId?: unknown; endId?: unknown; summary?: unknown; topic?: unknown };
+      if (typeof r.startId !== "string" || typeof r.endId !== "string" || typeof r.summary !== "string" || r.summary.length === 0) continue;
+      ranges.push({
+        startRef: r.startId,
+        endRef: r.endId,
+        summary: r.summary,
+        topic: typeof r.topic === "string" ? r.topic : undefined,
+        summaryMaxChars: typeof (args as { summaryMaxChars?: unknown }).summaryMaxChars === "number" ? (args as { summaryMaxChars?: number }).summaryMaxChars : undefined,
+        compressCallId: call.id,
+      });
+    }
+    if (ranges.length > 0) out.push({ id: call.id, ranges });
   }
   return out;
 }
@@ -179,34 +220,6 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-const SYSTEM_REMINDER_PREFIX = "\x3csystem-reminder";
-
-function liveIdentity(message: AgentMessage): string {
-  const m = message as AnyMessage;
-  return [m.role ?? "", m.toolName ?? "", m.toolCallId ?? "", safeStringify(m.content)].join("|");
-}
-
-export function salvageLiveTail(
-  eventMessages: AgentMessage[],
-  originalById: Map<string, AgentMessage>,
-): AgentMessage[] {
-  if (eventMessages.length === 0 || originalById.size === 0) return [];
-  const lastEntry = [...originalById.values()][originalById.size - 1]!;
-  const lastIdentity = liveIdentity(lastEntry);
-  let anchor = -1;
-  for (let i = eventMessages.length - 1; i >= 0; i--) {
-    if (liveIdentity(eventMessages[i]!) === lastIdentity) { anchor = i; break; }
-  }
-  if (anchor < 0) return [];
-  const out: AgentMessage[] = [];
-  for (const message of eventMessages.slice(anchor + 1)) {
-    const m = message as AnyMessage;
-    if (m.role === "user" && extractText(m.content).startsWith(SYSTEM_REMINDER_PREFIX)) continue;
-    out.push(message);
-  }
-  return out;
 }
 
 export function coreOutToAgentMessages(

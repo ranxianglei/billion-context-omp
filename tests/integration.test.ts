@@ -2,9 +2,6 @@
 // approximate the ExtensionAPI shape. Verified at runtime (bun test), not by tsc.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
@@ -38,26 +35,47 @@ function captureApi(): { api: MockApi; handlers: HandlerMap } {
   return { api, handlers };
 }
 
-
-function fakeCtx(entries: any[], stateFile: string) {
+// The fold architecture only needs a session id and a model context window —
+// no getBranch, no getEntries, no session file. The input stream IS the truth.
+function fakeCtx() {
   return {
     mode: "rpc",
     hasUI: false,
+    cwd: "/tmp",
     ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
     model: { contextWindow: 200_000 },
     sessionManager: {
-      getBranch: () => entries,
       getSessionId: () => "test-session",
-      getSessionFile: () => stateFile,
+      getSessionFile: () => "/tmp/nonexistent-omp-it.session.json",
     },
   };
 }
 
-function userMsg(id: string, text: string) {
-  return { type: "message", id, parentId: null, timestamp: "", message: { role: "user", content: text, timestamp: Date.now() } };
+function userMsg(text: string) {
+  return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
 }
 
-type MockEntry = { type: string; id: string; parentId: null; timestamp: string; message: object };
+function assistantCompressCall(callId: string, ranges: Array<{ startId: string; endId: string; summary: string }>) {
+  return {
+    role: "assistant",
+    content: [{ type: "toolCall", id: callId, name: "compress", arguments: JSON.stringify({ content: ranges }) }],
+    timestamp: Date.now(),
+  };
+}
+
+function toolResult(callId: string, text: string) {
+  return { role: "toolResult", content: [{ type: "text", text }], toolName: "compress", toolCallId: callId, timestamp: Date.now() };
+}
+
+function refOf(message: any): string {
+  const blocks = Array.isArray(message.content) ? message.content : [{ type: "text", text: message.content }];
+  const textBlock = blocks.find((b: any) => b.type === "text");
+  return textBlock?.text?.match(/m\d{5}/)?.[0] ?? null;
+}
+
+function bigText(seed: string) {
+  return `${seed} large enough to compress on its own. `.repeat(130);
+}
 
 test("factory registers the compress tool and 4 flat commands", () => {
   const { api, handlers } = captureApi();
@@ -74,377 +92,206 @@ test("session_before_compact falls back to Pi native compaction on failure", asy
   const { api, handlers } = captureApi();
   createAcpExtension()(api as unknown as ExtensionAPI);
   const handler = handlers.get("session_before_compact")![0]!;
-  const result = await handler({ preparation: { firstKeptEntryId: "x", tokensBefore: 100 } }, {} as any);
+  const result = await handler({ preparation: { firstKeptEntryId: "x", tokensBefore: 100 } }, fakeCtx());
   assert.equal(result, undefined, "no usable state → undefined → Pi falls back to native compaction");
 });
 
 test("before_agent_start appends the ACP system prompt", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as unknown as ExtensionAPI);
-  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, {});
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, fakeCtx());
   const sp = result.systemPrompt.join("\n");
   assert.ok(sp.startsWith("BASE"));
   assert.ok(sp.includes("compress"));
   assert.ok(sp.includes("acp"));
 });
 
-test("context handler tags every message with a ref even when length matches event.messages", async () => {
+test("context handler tags every stream message with sequential refs (no tree access needed)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
 
-  const entries = [userMsg("e1", "first"), userMsg("e2", "second"), userMsg("e3", "third")];
-  const ctx = fakeCtx(entries, "/tmp/nonexistent-omp-it.session.json");
-  // Real Pi passes event.messages with the same length/roles as the session — the
-  // handler must STILL return {messages} (not undefined), or the model never sees tags.
-  const sameLengthMessages = entries.map(() => ({ role: "user", content: "x", timestamp: 0 }));
-
-  const result = await handlers.get("context")![0]!({ type: "context", messages: sameLengthMessages }, ctx);
-  assert.ok(result, "must return transformed array even when length/roles match (tags must apply)");
+  const stream = [userMsg("first"), userMsg("second"), userMsg("third")];
+  const result = await handlers.get("context")![0]!({ type: "context", messages: stream }, fakeCtx());
+  assert.ok(result, "must return transformed array so tags apply");
   const out = result.messages;
   assert.equal(out.length, 3);
-  const firstContent = (out[0] as any).content as any[];
-  assert.ok(firstContent.some((b: any) => b.type === "text" && b.text.includes("m0000")), "first msg ref-tagged");
+  assert.equal(refOf(out[0]), "m00001", "position 1 → m00001");
+  assert.equal(refOf(out[1]), "m00002", "position 2 → m00002");
+  assert.equal(refOf(out[2]), "m00003", "position 3 → m00003");
 });
 
-test("context handler works under omp (oh-my-pi) where sessionManager exposes getBranch() not buildContextEntries()", async () => {
+test("refs stay stable as the stream grows (append-only turns)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, fakeCtx());
 
-  const entries = [userMsg("e1", "first"), userMsg("e2", "second")];
-  const ctx = {
-    ...fakeCtx(entries, "/tmp/nonexistent-omp-omp.session.json"),
-    sessionManager: {
-      getBranch: () => entries,
-      getSessionId: () => "test-session",
-      getSessionFile: () => "/tmp/nonexistent-omp-omp.session.json",
-    },
-  };
-  const sameLengthMessages = entries.map(() => ({ role: "user", content: "x", timestamp: 0 }));
+  const turn1 = [userMsg(bigText("one")), userMsg("short")];
+  const r1 = await fire(turn1);
+  const turn2 = [...turn1, userMsg(bigText("two")), userMsg("reply")];
+  const r2 = await fire(turn2);
 
-  const result = await handlers.get("context")![0]!({ type: "context", messages: sameLengthMessages }, ctx);
-  assert.ok(result, "handler must not throw and must return transformed messages under omp");
-  const out = result.messages;
-  assert.equal(out.length, 2);
-  const firstContent = (out[0] as any).content as any[];
-  assert.ok(firstContent.some((b: any) => b.type === "text" && b.text.includes("m0000")), "omp path tags messages with refs");
+  assert.equal(refOf(r1.messages[0]), refOf(r2.messages[0]), "same stream position keeps its ref");
+  assert.equal(refOf(r1.messages[1]), refOf(r2.messages[1]), "appending must not renumber the prefix");
 });
 
-test("omp matches emergency-truncated tool results before compression", async (t) => {
+test("metadata fields (attribution, usage, timestamps) never shift refs", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
-  const dir = await mkdtemp(join(tmpdir(), "omp-omp-truncation-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const stateFile = join(dir, "session.json");
-  const originalText = "This large tool output must retain its persisted identity. ".repeat(130);
-  const truncatedText = `${originalText.slice(0, 2000)}\n\n...[truncated for context space] — original ~1500 tokens]...\n\n${originalText.slice(-2000)}`;
-  const filler = (n: string) => `filler ${n} `.repeat(400);
-  const persisted = [
-    { type: "message", id: "e1", parentId: null, timestamp: "", message: { role: "toolResult", toolName: "read", toolCallId: "call-read", content: [{ type: "text", text: originalText }], timestamp: Date.now() } },
-    ...["two", "three", "four", "five", "six", "seven"].map((n, index) => userMsg(`e${index + 2}`, filler(n))),
-  ];
-  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
-  const liveMessages = [
-    { role: "toolResult", toolName: "read", toolCallId: "call-read", content: [{ type: "text", text: truncatedText }], timestamp: Date.now() },
-    ...["two", "three", "four", "five", "six", "seven"].map((n) => ({ role: "user", content: [{ type: "text", text: filler(n) }], timestamp: Date.now() })),
-  ];
-  const transformed = await handlers.get("context")![0]!({ type: "context", messages: liveMessages }, ctx);
-  const targetRef = transformed.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
-  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
-  const result = await compressTool.execute("tc-omp-truncation", { content: [{ startId: targetRef, endId: targetRef, summary: "This large tool result was emergency-truncated in provider context and is now safely compressed from the original entry." }] }, undefined, undefined, ctx);
-  assert.match(result.content[0].text, /1 block/, result.content[0].text);
+  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, fakeCtx());
+
+  const base = [userMsg(bigText("meta")), { role: "assistant", content: [{ type: "text", text: "answer" }] }];
+  const r1 = await fire(base);
+  const noisy = base.map((m, i) => ({
+    ...m,
+    attribution: "user",
+    usage: { input: 10, output: 5 },
+    stopReason: "tool_use",
+    timestamp: 9999999 + i,
+  }));
+  const r2 = await fire(noisy);
+  assert.equal(refOf(r1.messages[0]), refOf(r2.messages[0]), "identity ignores metadata");
+  assert.equal(refOf(r1.messages[1]), refOf(r2.messages[1]));
+});
+
+test("compress tool prunes the covered range on the next context event", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+
+  const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
+  const r1 = await fire(stream);
+  const targetRef = refOf(r1.messages[0]);
+
+  const compressTool = api.tools.find((t) => t.name === "compress")!;
+  const res = await compressTool.execute("tc-1", { content: [{ startId: targetRef, endId: refOf(r1.messages[1]), summary: "Both large messages were compressed into this durable summary." }] }, undefined, undefined, ctx);
+  assert.match(res.content[0].text, /1 block/, res.content[0].text);
+
+  const r2 = await fire([...stream, userMsg("next turn")]);
+  const texts = r2.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
+  // NOTE: the kernel never prunes the FIRST user message (protected anchor),
+  // so only the second covered original disappears from the model view.
+  assert.ok(!texts.includes("second large enough"), "covered original pruned from the model view");
+  assert.ok(texts.includes("next turn"), "new turn visible");
+  const statusTool = api.tools.find((t) => t.name === "acp_status")!;
+  const status = await statusTool.execute("tc-verify", {}, undefined, undefined, ctx);
+  assert.match(status.content[0].text, /1 active/, status.content[0].text);
+});
+
+test("in-stream compress calls are deduped — a replayed tool call does not double-apply", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+
+  const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
+  const r1 = await fire(stream);
+  const start = refOf(r1.messages[0]);
+  const end = refOf(r1.messages[1]);
+
+  // The model issued the call mid-turn…
+  const call = assistantCompressCall("call_c1", [{ startId: start, endId: end, summary: "Both large messages were compressed by the model into this durable summary." }]);
+  // …the tool executed (state committed)…
+  const compressTool = api.tools.find((t) => t.name === "compress")!;
+  const res = await compressTool.execute("call_c1", { content: [{ startId: start, endId: end, summary: "Both large messages were compressed by the model into this durable summary." }] }, undefined, undefined, ctx);
+  assert.match(res.content[0].text, /1 block/, res.content[0].text);
+
+  // …now the context event sees the assistant call + result in the stream.
+  const r2 = await fire([...stream, call, toolResult("call_c1", "compressed 1 block")]);
+  const summaries = r2.messages.filter((m: any) => JSON.stringify(m.content).includes("compressed by the model"));
+  assert.equal(summaries.length, 1, "exactly one view of the summary (the retained tool call) — replay must not double-apply");
+  assert.ok(!JSON.stringify(r2.messages).includes("second large enough"), "covered original pruned");
+});
+
+test("restart recovery: a fresh extension rebuilds blocks by replaying in-stream compress calls", async () => {
+  const first = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(first.api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+
+  const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
+  const r1 = await first.handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  const start = refOf(r1.messages[0]);
+  const end = refOf(r1.messages[1]);
+
+  const call = assistantCompressCall("call_c1", [{ startId: start, endId: end, summary: "Both large messages were compressed into this durable summary before the restart." }]);
+  const withCall = [...stream, call, toolResult("call_c1", "compressed 1 block"), userMsg("post-compress turn")];
+  await first.handlers.get("context")![0]!({ type: "context", messages: withCall }, ctx);
+
+  // New process: brand-new extension instance, no sidecar state file — the
+  // stream alone must reconstruct the block.
+  const second = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  const r3 = await second.handlers.get("context")![0]!({ type: "context", messages: withCall }, ctx);
+
+  const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
+  // First user message is protected by kernel design; the second covered
+  // original staying pruned proves the block was replayed from the stream.
+  assert.ok(!texts.includes("second large enough"), "covered original stays pruned after restart (block replayed)");
+  assert.ok(texts.includes("durable summary before the restart"), "summary text visible via the retained in-stream compress call");
+  assert.ok(texts.includes("post-compress turn"), "tail intact after restart");
+  const statusTool = second.api.tools.find((t) => t.name === "acp_status")!;
+  const status = await statusTool.execute("tc-verify-restart", {}, undefined, undefined, ctx);
+  assert.match(status.content[0].text, /1 active/, status.content[0].text);
+});
+
+test("tail rewind (retry) re-folds deterministically without losing prefix refs", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+
+  const prefix = [userMsg(bigText("stable one")), userMsg(bigText("stable two"))];
+  const abandonedTail = [userMsg("abandoned question"), { role: "assistant", content: [{ type: "text", text: "abandoned answer" }] }];
+  await fire([...prefix, ...abandonedTail]);
+
+  const retried = [...prefix, userMsg("retry question")];
+  const r = await fire(retried);
+  assert.equal(refOf(r.messages[0]), "m00001", "prefix refs unchanged after rewind");
+  assert.equal(refOf(r.messages[1]), "m00002");
+  const texts = r.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
+  assert.ok(!texts.includes("abandoned"), "rewound tail dropped");
+  assert.ok(texts.includes("retry question"), "new tail visible");
 });
 
 test("acp_status refs remain usable by the next compress call", async () => {
-  const { api } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
-  const stateFile = "/tmp/nonexistent-omp-status-compress.session.json";
-  await rm(`${stateFile}.acp-omp.json`, { force: true });
-  const originalText = "This range is reported by acp_status and must remain addressable by compress. ".repeat(130);
-  const persisted = [userMsg("e1", originalText), ...["two", "three", "four", "five", "six", "seven"].map((n, index) => userMsg(`e${index + 2}`, `filler ${n} `.repeat(400)))];
-  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
-  const statusTool = api.tools.find((tool: { name: string }) => tool.name === "acp_status")!;
-  const status = await statusTool.execute("tc-status", {}, undefined, undefined, ctx);
-  const targetRef = status.content[0].text.match(/m\d{5}/)![0];
-  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
-  const result = await compressTool.execute("tc-status-compress", { content: [{ startId: targetRef, endId: targetRef, summary: "This range was selected by acp_status and is now safely compressed from the original entry." }] }, undefined, undefined, ctx);
-  assert.match(result.content[0].text, /1 block/, result.content[0].text);
-});
-
-test("omp rebuilds refs after stale live state before status compression", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
-  const stateFile = "/tmp/nonexistent-omp-stale-live.session.json";
-  await rm(`${stateFile}.acp-omp.json`, { force: true });
-  const longText = "This stale live state must be rebuilt against the current persisted branch. ".repeat(130);
-  const filler = (n: string) => `filler ${n} `.repeat(400);
-  const texts = [longText, filler("two"), filler("three"), filler("four"), filler("five"), filler("six"), filler("seven")];
-  let persisted: MockEntry[] = [];
-  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
-  const liveMessages = texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }));
-  await handlers.get("context")![0]!({ type: "context", messages: liveMessages }, ctx);
-  persisted = texts.map((text, index) => userMsg(`e${index + 1}`, text));
-  const statusTool = api.tools.find((tool: { name: string }) => tool.name === "acp_status")!;
-  const status = await statusTool.execute("tc-stale-live-status", {}, undefined, undefined, ctx);
+  const ctx = fakeCtx();
+
+  const stream = [userMsg(bigText("status target")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
+  await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+
+  const statusTool = api.tools.find((t) => t.name === "acp_status")!;
+  const status = await statusTool.execute("tc-status", {}, undefined, undefined, ctx);
   const targetRef = status.content[0].text.match(/m\d{5}/)![0];
   assert.equal(targetRef, "m00001", status.content[0].text);
-  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
-  const result = await compressTool.execute("tc-stale-live-compress", { content: [{ startId: targetRef, endId: targetRef, summary: "This stale live range was rebuilt against stable persisted entries and is now safely compressed." }] }, undefined, undefined, ctx);
+
+  const compressTool = api.tools.find((t) => t.name === "compress")!;
+  const result = await compressTool.execute("tc-status-compress", { content: [{ startId: targetRef, endId: targetRef, summary: "This range was selected by acp_status and is now safely compressed." }] }, undefined, undefined, ctx);
   assert.match(result.content[0].text, /1 block/, result.content[0].text);
 });
 
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as unknown as ExtensionAPI);
-  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, fakeCtx());
   const sp = result.systemPrompt.join("\n");
-  // kernel constants inlined (regression guard against reverting to a hardcoded copy)
   assert.ok(sp.includes("Work from summaries, not raw tool outputs"), "kernel COMPRESS_PHILOSOPHY inlined");
   assert.ok(sp.includes("HOW TO COMPRESS"), "kernel HOW_TO_COMPRESS_RULES inlined");
   assert.ok(sp.includes("TIER 2 COMPRESSION"), "kernel TIER2_DISTILL_RULES inlined");
   assert.ok(sp.includes("TIER 3 COMPRESSION"), "kernel TIER3_CONDENSE_RULES inlined");
-  // marker system removed entirely from kernel constants
   assert.ok(!sp.includes("[[KEEP:"), "no KEEP marker teaching");
   assert.ok(!sp.includes("[[REF:"), "no REF marker teaching");
   assert.ok(!sp.includes("KEEP MARKERS"), "no KEEP MARKERS section");
-  // old hardcoded copy removed
   assert.ok(!sp.includes("Two failure modes to avoid"), "old hardcoded philosophy removed");
   assert.ok(!sp.includes("Over-compression: Compressing too aggressively"), "old hardcoded over/under-compression section removed");
 });
 
-test("context handler persists state so a second call is idempotent on the same entries", async () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
-
-  const entries = [userMsg("e1", "alpha"), userMsg("e2", "beta")];
-  const ctx = fakeCtx(entries, "/tmp/nonexistent-omp-it2.session.json");
-
-
-  const first = await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
-  const second = await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
-
-  assert.equal(first.messages.length, second.messages.length);
-  const tag1 = ((first.messages[0] as any).content as any[]).find((b: any) => b.type === "text" && b.text.startsWith("[m"));
-  const tag2 = ((second.messages[0] as any).content as any[]).find((b: any) => b.type === "text" && b.text.startsWith("[m"));
-  assert.equal(tag1?.text, tag2?.text, "refs stable across calls (loaded from persisted state)");
-});
-test("omp keeps compression blocks active when provider context has an extra prefix", async (t) => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
-  const dir = await mkdtemp(join(tmpdir(), "omp-omp-provider-prefix-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const stateFile = join(dir, "session.json");
-  const texts = [
-    "This first message is large enough to compress. ".repeat(130),
-    "This second message is also part of the compressed range. ".repeat(130),
-    ...["three", "four", "five", "six", "seven"].map((n) => `filler ${n} `.repeat(400)),
-  ];
-  const persisted = texts.map((text, index) => userMsg(`e${index + 1}`, text));
-  const ctx = {
-    ...fakeCtx(persisted, stateFile),
-    sessionManager: {
-      getBranch: () => persisted,
-      getSessionId: () => "test-session",
-      getSessionFile: () => stateFile,
-    },
-  };
-  const initial = await handlers.get("context")![0]!(
-    { type: "context", messages: texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })) },
-    ctx,
-  );
-  const first = initial.messages[0] as { content: Array<{ type?: string; text?: string }> };
-  const targetRef = first.content.find((block) => block.type === "text")!.text!.match(/m\d{5}/)![0];
-  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
-  const compressed = await compressTool.execute(
-    "tc-omp-provider-prefix",
-    { content: [{ startId: targetRef, endId: "m00002", summary: "The first two messages were compressed into a durable ACP summary." }] },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.match(compressed.content[0].text, /1 block/);
-
-  const next = await handlers.get("context")![0]!(
-    {
-      type: "context",
-      messages: [
-        { role: "user", content: [{ type: "text", text: "provider-only context prefix" }], timestamp: Date.now() },
-        ...texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })),
-      ],
-    },
-    ctx,
-  );
-  const saved = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
-  assert.equal(saved.blocks[0].active, true, "the compressed block must remain active after the prefix");
-  assert.ok(next.messages.length < texts.length + 1, "covered messages must be replaced in provider context");
-});
-
-test("omp keeps compression active when persisted and provider tails diverge", async (t) => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
-  const dir = await mkdtemp(join(tmpdir(), "omp-omp-branch-divergence-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const stateFile = join(dir, "session.json");
-  const commonTexts = [
-    "This first common message is large enough to compress. ".repeat(130),
-    "This second common message is also part of the compressed range. ".repeat(130),
-    ...["three", "four", "five", "six", "seven"].map((n) => `common filler ${n} `.repeat(400)),
-  ];
-  let persisted = commonTexts.map((text, index) => userMsg(`e${index + 1}`, text));
-  const ctx = {
-    ...fakeCtx(persisted, stateFile),
-    sessionManager: {
-      getBranch: () => persisted,
-      getSessionId: () => "test-session",
-      getSessionFile: () => stateFile,
-    },
-  };
-  const liveCommon = commonTexts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }));
-  const initial = await handlers.get("context")![0]!({ type: "context", messages: liveCommon }, ctx);
-  const first = initial.messages[0] as { content: Array<{ type?: string; text?: string }> };
-  const targetRef = first.content.find((block) => block.type === "text")!.text!.match(/m\d{5}/)![0];
-  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
-  const compressed = await compressTool.execute(
-    "tc-omp-branch-divergence",
-    { content: [{ startId: targetRef, endId: "m00002", summary: "The first two common messages were compressed into a durable ACP summary." }] },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.match(compressed.content[0].text, /1 block/);
-
-  const activeUserText = "current user on the active branch";
-  persisted = [...persisted, userMsg("e-active-user", activeUserText)];
-  const divergent = await handlers.get("context")![0]!(
-    {
-      type: "context",
-      messages: [
-        { role: "user", content: [{ type: "text", text: "projected provider-only prefix" }], timestamp: Date.now() },
-        ...liveCommon,
-        { role: "assistant", content: [{ type: "text", text: "abandoned branch assistant tail" }], timestamp: Date.now() },
-        { role: "user", content: [{ type: "text", text: activeUserText }], timestamp: Date.now() },
-      ],
-    },
-    ctx,
-  );
-  const saved = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
-  assert.equal(saved.blocks[0].active, true, "the compressed block must remain active across divergent branch tails");
-  assert.ok(divergent.messages.length < commonTexts.length + 3, "covered common messages must stay pruned");
-});
-
-
 test("system prompt never includes the ACP_DELEGATE NOTIFICATIONS section (omp defers delegation to oh-my-pi)", () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ delegate: true })(api as unknown as ExtensionAPI);
-  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, fakeCtx());
   const sp = result.systemPrompt.join("\n");
   assert.ok(!sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section always omitted (omp provides its own orchestration)");
   assert.ok(sp.includes("ACP TAGS"), "core ACP prompt present");
-});
-
-test("omp keeps compression block active across turns (stable entry IDs, no migration)", async (t) => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, coreOverrides: { preserveRecentTokens: 0 } })(api as unknown as ExtensionAPI);
-  const dir = await mkdtemp(join(tmpdir(), "omp-block-stable-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const stateFile = join(dir, "session.json");
-
-  const target = "This large message will be compressed. ".repeat(130);
-  const filler = (n: string) => `filler ${n} `.repeat(200);
-
-  const persisted = [
-    userMsg("e1", filler("first")),
-    userMsg("e2", target),
-    ...["a", "b", "c", "d", "e"].map((n, i) => userMsg(`e${i + 3}`, filler(n))),
-  ];
-  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
-
-  const first = await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
-  const targetRef = first.messages[1]!.content.find((b: { type: string; text: string }) => b.type === "text")!.text.match(/m\d{5}/)![0];
-
-  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
-  const compressRes = await compressTool.execute!("tc1", { content: [{ startId: targetRef, endId: targetRef, summary: "Summary of the large compressed message across turns for stability testing." }] }, undefined, undefined, ctx);
-  assert.match(compressRes.content[0]!.text, /1 block/, compressRes.content[0]!.text);
-
-  await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
-
-  const saved = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
-  const activeBlocks = saved.blocks.filter((b: { active: boolean }) => b.active);
-  assert.equal(activeBlocks.length, 1, "block must stay active across turns");
-  assert.ok(activeBlocks[0]!.effectiveMessageIds.includes("e2"), "block uses stable persisted entry ID");
-  assert.ok(!activeBlocks[0]!.effectiveMessageIds.some((id: string) => id.startsWith("live-")), "no stale live-* IDs in block");
-});
-
-test("omp e2e: compression block stable across turns with omp metadata fields (attribution, usage, stopReason)", async (t) => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, coreOverrides: { preserveRecentTokens: 0 } })(api as unknown as ExtensionAPI);
-  const dir = await mkdtemp(join(tmpdir(), "omp-metadata-stable-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const stateFile = join(dir, "session.json");
-
-  const target = "This large message will be compressed. ".repeat(130);
-  const filler = (n: string) => `filler ${n} `.repeat(200);
-
-  // Persisted entries carry omp metadata fields that must not affect ref stability
-  const persisted = [
-    { type: "message", id: "e1", parentId: null, timestamp: "", message: { attribution: "user", role: "user", content: [{ type: "text", text: filler("first") }], timestamp: Date.now() } },
-    { type: "message", id: "e2", parentId: null, timestamp: "", message: { attribution: "user", role: "user", content: [{ type: "text", text: target }], timestamp: Date.now() } },
-    ...["a", "b", "c", "d", "e"].map((n, i) => ({ type: "message" as const, id: `e${i + 3}`, parentId: null, timestamp: "", message: { attribution: "user", role: "user", content: [{ type: "text", text: filler(n) }], timestamp: Date.now() } })),
-  ];
-  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
-
-  const first = await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
-  const targetRef = first.messages[1]!.content.find((b: { type: string; text: string }) => b.type === "text")!.text.match(/m\d{5}/)![0];
-
-  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
-  const compressRes = await compressTool.execute!("tc1", { content: [{ startId: targetRef, endId: targetRef, summary: "Summary of the large compressed message with omp metadata fields for stability testing." }] }, undefined, undefined, ctx);
-  assert.match(compressRes.content[0]!.text, /1 block/, compressRes.content[0]!.text);
-
-  await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
-
-  const saved = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
-  const activeBlocks = saved.blocks.filter((b: { active: boolean }) => b.active);
-  assert.equal(activeBlocks.length, 1, "block must stay active across turns with metadata fields");
-  assert.ok(activeBlocks[0]!.effectiveMessageIds.includes("e2"), "block uses stable persisted entry ID");
-  assert.ok(!activeBlocks[0]!.effectiveMessageIds.some((id: string) => id.startsWith("live-")), "no stale live-* IDs in block");
-  const liveRawIds = Object.keys(saved.messageRefs?.byRaw ?? {}).filter((id: string) => id.startsWith("live-"));
-  assert.equal(liveRawIds.length, 0, `0 live-* messageRefs expected, got ${liveRawIds.length}`);
-});
-
-test("omp e2e: stable refs across full session lifecycle with provider metadata", async (t) => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
-  const dir = await mkdtemp(join(tmpdir(), "omp-lifecycle-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const stateFile = join(dir, "session.json");
-
-  function buildConversation(n: number) {
-    const msgs: any[] = [];
-    for (let i = 0; i < n; i++) {
-      msgs.push({ attribution: "user", role: "user", content: [{ type: "text", text: `user msg ${i} ${"x".repeat(100)}` }], timestamp: Date.now() });
-      msgs.push({
-        role: "assistant",
-        content: [{ type: "toolCall", id: `call_${i}`, name: "read", arguments: { path: `file${i}.ts` } }],
-        api: "openai-completions", model: "glm-5.2", provider: "zhipuai",
-        stopReason: "tool_use", usage: { input: 1000, output: 100, totalTokens: 1100 },
-        contextSnapshot: { promptTokens: 1000 }, duration: 100, ttft: 50, responseId: `resp_${i}`,
-        timestamp: Date.now(),
-      });
-      msgs.push({ role: "toolResult", content: [{ type: "text", text: `result ${i} ${"y".repeat(100)}` }], toolName: "read", toolCallId: `call_${i}`, details: { exitCode: 0 }, isError: false, timestamp: Date.now() });
-    }
-    return msgs;
-  }
-
-  // Start with persisted entries that carry full omp metadata
-  const conv = buildConversation(5);
-  const persisted = conv.map((m, i) => ({ type: "message" as const, id: `e${i}`, parentId: null, timestamp: "", message: m }));
-  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
-
-  const r1 = await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
-  assert.ok(r1.messages.length > 0, "first turn produces output");
-
-  await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
-
-  const saved = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
-  const liveRawIds = Object.keys(saved.messageRefs?.byRaw ?? {}).filter((id: string) => id.startsWith("live-"));
-  assert.equal(liveRawIds.length, 0, `0 live-* messageRefs expected with persisted entries, got ${liveRawIds.length}`);
 });

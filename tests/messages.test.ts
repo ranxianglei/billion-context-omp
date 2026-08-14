@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity, salvageLiveTail } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity, streamToCoreMessages, findCompressCalls } from "../src/messages.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 
@@ -469,85 +469,83 @@ test("message identity ignores omp metadata fields (attribution, usage, stopReas
     "different content must still produce different identities");
 });
 
-test("salvageLiveTail recovers pending user message missing from entries", () => {
-  const persisted1 = userBlocks("first question");
-  const persisted2 = { role: "assistant", content: [{ type: "text", text: "first answer" }], timestamp: Date.now() };
-  const byId = new Map<string, SessionMessageEntry["message"]>([
-    ["e1", persisted1 as SessionMessageEntry["message"]],
-    ["e2", persisted2 as SessionMessageEntry["message"]],
-  ]);
-  const pending = { role: "user", content: [{ type: "text", text: "second question" }], timestamp: Date.now() };
-  const eventMessages = [persisted1, persisted2, pending] as SessionMessageEntry["message"][];
-
-  const salvage = salvageLiveTail(eventMessages, byId);
-  assert.ok(salvage);
-  assert.equal(salvage.length, 1);
-  assert.equal((salvage[0] as { content: Array<{ text: string }> }).content[0].text, "second question");
+test("streamToCoreMessages assigns position ids p1..pN in order", () => {
+  const stream = [
+    userBlocks("first question"),
+    { role: "assistant", content: [{ type: "text", text: "first answer" }] },
+    userBlocks("second question"),
+  ] as SessionMessageEntry["message"][];
+  const cores = streamToCoreMessages(stream);
+  assert.equal(cores.length, 3);
+  assert.deepEqual(cores.map((c) => c.id), ["p1", "p2", "p3"]);
+  assert.equal(cores[0].text, "first question");
+  assert.equal(cores[2].text, "second question");
 });
 
-test("salvageLiveTail returns empty when the prompt is already persisted (TUI path)", () => {
-  const persisted1 = userBlocks("hello");
-  const byId = new Map<string, SessionMessageEntry["message"]>([
-    ["e1", persisted1 as SessionMessageEntry["message"]],
-  ]);
-  const eventMessages = [persisted1] as SessionMessageEntry["message"][];
-  assert.deepEqual(salvageLiveTail(eventMessages, byId), []);
+test("streamToCoreMessages splits multi tool-call assistants into stable position ids", () => {
+  const stream = [
+    userBlocks("run two tools"),
+    {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "tc1", name: "bash", arguments: { command: "ls" } },
+        { type: "toolCall", id: "tc2", name: "read", arguments: { path: "x" } },
+      ],
+    },
+    { role: "toolResult", content: [{ type: "text", text: "out1" }], toolName: "bash", toolCallId: "tc1" },
+    { role: "toolResult", content: [{ type: "text", text: "out2" }], toolName: "read", toolCallId: "tc2" },
+  ] as SessionMessageEntry["message"][];
+  const cores = streamToCoreMessages(stream);
+  const ids = cores.map((c) => c.id).join(",");
+  assert.ok(ids.includes("p2#tc1") && ids.includes("p2#tc2"), `ids: ${ids}`);
+  assert.equal(cores.filter((c) => c.role === "tool").length, 2);
 });
 
-test("salvageLiveTail returns empty when nothing matches entries (fresh session)", () => {
-  const pending = { role: "user", content: [{ type: "text", text: "brand new" }], timestamp: Date.now() };
-  const byId = new Map<string, SessionMessageEntry["message"]>();
-  assert.deepEqual(salvageLiveTail([pending] as SessionMessageEntry["message"][], byId), []);
+test("streamToCoreMessages keeps plain position id for single-tool assistants", () => {
+  const stream = [
+    userBlocks("run one tool"),
+    { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: { command: "ls" } }] },
+    { role: "toolResult", content: [{ type: "text", text: "out1" }], toolName: "bash", toolCallId: "tc1" },
+  ] as SessionMessageEntry["message"][];
+  const cores = streamToCoreMessages(stream);
+  assert.deepEqual(cores.map((c) => c.id), ["p1", "p2", "p3"]);
 });
 
-test("salvageLiveTail ignores timestamp and metadata differences when anchoring", () => {
-  const persisted = { role: "user", content: [{ type: "text", text: "question" }], timestamp: 1000 };
-  const byId = new Map<string, SessionMessageEntry["message"]>([
-    ["e1", persisted as SessionMessageEntry["message"]],
-  ]);
-  const liveClone = { role: "user", attribution: "user", content: [{ type: "text", text: "question" }], timestamp: 9999 };
-  const pending = { role: "user", content: [{ type: "text", text: "follow up" }], timestamp: Date.now() };
-  const salvage = salvageLiveTail([liveClone, pending] as SessionMessageEntry["message"][], byId);
-  assert.ok(salvage);
-  assert.equal(salvage.length, 1);
-  assert.equal((salvage[0] as { content: Array<{ text: string }> }).content[0].text, "follow up");
+test("findCompressCalls extracts ranges from assistant compress tool calls", () => {
+  const assistant = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "call_1", name: "compress", arguments: JSON.stringify({
+        content: [{ startId: "m00003", endId: "m00009", summary: "covered early exploration", topic: "exploration" }],
+      }) },
+    ],
+  };
+  const calls = findCompressCalls(assistant as SessionMessageEntry["message"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].id, "call_1");
+  assert.equal(calls[0].ranges.length, 1);
+  const r = calls[0].ranges[0]!;
+  assert.equal(r.compressCallId, "call_1");
+  assert.equal(r.startRef, "m00003");
+  assert.equal(r.endRef, "m00009");
+  assert.equal(r.summary, "covered early exploration");
+  assert.equal(r.topic, "exploration");
 });
 
-test("salvageLiveTail distinguishes re-sent duplicate content from persisted history", () => {
-  const oldDup = { role: "user", content: [{ type: "text", text: "ok" }], timestamp: 1000 };
-  const reply = { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 1001 };
-  const byId = new Map<string, SessionMessageEntry["message"]>([
-    ["e1", oldDup as SessionMessageEntry["message"]],
-    ["e2", reply as SessionMessageEntry["message"]],
-  ]);
-  const pendingDup = { role: "user", content: [{ type: "text", text: "ok" }], timestamp: 9999 };
-  const salvage = salvageLiveTail([oldDup, reply, pendingDup] as SessionMessageEntry["message"][], byId);
-  assert.ok(salvage);
-  assert.equal(salvage.length, 1);
-  assert.equal((salvage[0] as { timestamp: number }).timestamp, 9999);
-});
+test("findCompressCalls accepts already-object arguments and skips empty ranges", () => {
+  const assistant = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "call_2", name: "compress", arguments: {
+        content: [{ startId: "m00001", endId: "m00002", summary: "s" }, { summary: "empty item no ids" }],
+      } },
+    ],
+  };
+  const calls = findCompressCalls(assistant as SessionMessageEntry["message"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].ranges.length, 1);
+  assert.equal(calls[0].ranges[0]!.startRef, "m00001");
 
-test("salvageLiveTail drops system-reminder injections but keeps the prompt", () => {
-  const persisted1 = userBlocks("question");
-  const byId = new Map<string, SessionMessageEntry["message"]>([
-    ["e1", persisted1 as SessionMessageEntry["message"]],
-  ]);
-  const pending = { role: "user", content: [{ type: "text", text: "follow up" }], timestamp: Date.now() };
-  const reminder = { role: "user", content: [{ type: "text", text: LT + "system-reminder" + GT + "\ntodo nudge" }], timestamp: Date.now() };
-  const salvage = salvageLiveTail([persisted1, pending, reminder] as SessionMessageEntry["message"][], byId);
-  assert.ok(salvage);
-  assert.equal(salvage.length, 1);
-  assert.equal((salvage[0] as { content: Array<{ text: string }> }).content[0].text, "follow up");
-});
-
-test("salvageLiveTail keeps mid-turn live tool traffic after the anchor", () => {
-  const persisted1 = userBlocks("run tests");
-  const byId = new Map<string, SessionMessageEntry["message"]>([
-    ["e1", persisted1 as SessionMessageEntry["message"]],
-  ]);
-  const liveCall = { role: "assistant", content: [{ type: "toolCall", id: "tc9", name: "bash", arguments: { command: "ls" } }], timestamp: Date.now() };
-  const liveResult = { role: "toolResult", content: [{ type: "text", text: "file.txt" }], toolName: "bash", toolCallId: "tc9", timestamp: Date.now() };
-  const salvage = salvageLiveTail([persisted1, liveCall, liveResult] as SessionMessageEntry["message"][], byId);
-  assert.ok(salvage);
-  assert.equal(salvage.length, 2);
+  const none = findCompressCalls({ role: "user", content: [{ type: "text", text: "hi" }] } as SessionMessageEntry["message"]);
+  assert.equal(none.length, 0);
 });

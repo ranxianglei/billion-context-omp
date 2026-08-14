@@ -29,14 +29,13 @@ async function cleanState() {
   await rm(`${STATE_FILE}.acp-omp.json`, { force: true });
 }
 
-function fakeCtx(entries: any[]) {
+function fakeCtx() {
   return {
     mode: "rpc",
     hasUI: false,
     ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
     model: { contextWindow: 200_000 },
     sessionManager: {
-      getBranch: () => entries,
       getSessionId: () => "test-session",
       getSessionFile: () => STATE_FILE,
     },
@@ -46,8 +45,9 @@ function fakeCtx(entries: any[]) {
 async function setup(entries: any[]) {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const ctx = fakeCtx(entries);
-  await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
+  const ctx = fakeCtx();
+  const stream = entries.map((e: any) => e.message);
+  await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
   return { compressTool, ctx };
 }
@@ -62,6 +62,7 @@ test("软保护区排除消息 → kernel warnings 透出到结果行", async ()
     userMsg("e2", filler("two")), userMsg("e3", filler("three")),
     userMsg("e4", filler("four")), userMsg("e5", filler("five")),
     userMsg("e6", filler("six")), userMsg("e7", filler("seven")),
+    userMsg("e8", filler("eight")), userMsg("e9", filler("nine")),
   ];
   const { compressTool, ctx } = await setup(entries);
   const res = await compressTool.execute(

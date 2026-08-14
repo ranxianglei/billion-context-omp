@@ -15,11 +15,8 @@
  * reports ALL entries as in-context. The ACP state is the source of truth.
  */
 
-import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
-import { blockDocs, messageDocs, type SearchDoc, type MessageInput, type MessageRole } from "acp-kernel";
-import { entriesToCoreMessages } from "./messages.js";
+import { blockDocs, messageDocs, type CompressionState, type CoreMessage, type SearchDoc, type MessageInput } from "acp-kernel";
 import { estimateTextTokens } from "./tokens.js";
-import type { CompressionState } from "acp-kernel";
 
 /** All message refs covered by any block (active or inactive). */
 function buildCoveredRefs(state: CompressionState): Set<string> {
@@ -41,17 +38,7 @@ function buildMessageOwnerMap(state: CompressionState): Map<string, string> {
     return m;
 }
 
-function toRole(entry: SessionMessageEntry): MessageRole | null {
-    const role = entry.message.role;
-    if (role === "user") return "user";
-    if (role === "assistant") return "assistant";
-    if (role === "toolResult") return "tool";
-    return null;
-}
-
-export function buildSearchDocs(ctx: ExtensionContext, state: CompressionState): SearchDoc[] {
-    const sm = ctx.sessionManager;
-    const allEntries: SessionEntry[] = sm.getEntries();
+export function buildSearchDocs(coreMessages: CoreMessage[], state: CompressionState): SearchDoc[] {
     const covered = buildCoveredRefs(state);
     const ownerMap = buildMessageOwnerMap(state);
 
@@ -60,34 +47,21 @@ export function buildSearchDocs(ctx: ExtensionContext, state: CompressionState):
 
     const seenRefs = new Set<string>();
     const msgs: MessageInput[] = [];
-    const processEntry = (entry: SessionEntry): void => {
-        if (entry.type !== "message") return;
-        const role = toRole(entry as SessionMessageEntry);
-        if (!role) return;
-        const cores = entriesToCoreMessages([entry]);
-        for (const cm of cores) {
-            if (!cm.id || seenRefs.has(cm.id)) continue;
-            if (!covered.has(cm.id)) continue;
-            seenRefs.add(cm.id);
-            const text = cm.text ?? "";
-            if (!text || text.length < 2) continue;
-            const ownerBlock = ownerMap.get(cm.id);
-            msgs.push({
-                ref: cm.id,
-                role,
-                text,
-                tokens: estimateTextTokens(text),
-                blockId: ownerBlock,
-                tier: ownerBlock ? blockTier.get(ownerBlock) : undefined,
-            });
-        }
-    };
-    for (const entry of allEntries) processEntry(entry);
-    for (const id of covered) {
-        if (seenRefs.has(id)) continue;
-        const baseId = id.split("#")[0]!;
-        const entry = sm.getEntry(baseId);
-        if (entry) processEntry(entry);
+    for (const cm of coreMessages) {
+        if (!cm.id || seenRefs.has(cm.id)) continue;
+        if (!covered.has(cm.id)) continue;
+        seenRefs.add(cm.id);
+        const text = cm.text ?? "";
+        if (!text || text.length < 2) continue;
+        const ownerBlock = ownerMap.get(cm.id);
+        msgs.push({
+            ref: cm.id,
+            role: cm.role === "tool" ? "tool" : cm.role === "assistant" ? "assistant" : "user",
+            text,
+            tokens: estimateTextTokens(text),
+            blockId: ownerBlock,
+            tier: ownerBlock ? blockTier.get(ownerBlock) : undefined,
+        });
     }
 
     return [...blockDocs(state), ...messageDocs(msgs)];

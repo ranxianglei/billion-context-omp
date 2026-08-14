@@ -32,16 +32,15 @@ async function cleanState(sessionFile: string) {
   await rm(`${sessionFile}.acp-omp.json`, { force: true });
 }
 
-function fakeCtx(entries: any[], stateFile: string, notifies: string[]) {
+function fakeCtx(notifies: string[]) {
   return {
     mode: "rpc",
     hasUI: false,
     ui: { notify: (m: string) => notifies.push(m), confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
     model: { contextWindow: 200_000 },
     sessionManager: {
-      getBranch: () => entries,
       getSessionId: () => "test-session",
-      getSessionFile: () => stateFile,
+      getSessionFile: () => "/tmp/omp-decompress-it.session.json",
     },
   };
 }
@@ -67,10 +66,10 @@ test("/acp-decompress returns a block's content and stays repeatable (append mod
     userMsg("e6", filler("six")), userMsg("e7", filler("seven")),
   ];
   const notifies: string[] = [];
-  const ctx = fakeCtx(entries, stateFile, notifies);
+  const ctx = fakeCtx(notifies);
 
-  // 1) Run the context handler so the kernel assigns refs (m00001..) and saves state.
-  await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
+  // 1) Fold the stream so the kernel assigns refs (m00001..).
+  await handlers.get("context")![0]!({ type: "context", messages: entries.map((e: any) => e.message) }, ctx);
 
   // 2) Compress the target message (m00001) to create an active block (b1).
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
@@ -102,7 +101,7 @@ test("/acp-decompress rejects invalid input with a usage message", async () => {
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
   const notifies: string[] = [];
-  const ctx = fakeCtx([], "/tmp/omp-decompress-invalid.session.json", notifies);
+  const ctx = fakeCtx(notifies);
   await cleanState("/tmp/omp-decompress-invalid.session.json");
   const decompressCmd = api.commands.get("acp-decompress");
 
@@ -121,9 +120,8 @@ test("/acp-decompress reports not-found for a valid id with no matching block", 
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
   const notifies: string[] = [];
-  const ctx = fakeCtx([userMsg("e1", "only message")], "/tmp/omp-decompress-nf.session.json", notifies);
-  await cleanState("/tmp/omp-decompress-nf.session.json");
-  await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
+  const ctx = fakeCtx(notifies);
+  await handlers.get("context")![0]!({ type: "context", messages: [{ role: "user", content: "only message", timestamp: Date.now() }] }, ctx);
 
   const decompressCmd = api.commands.get("acp-decompress");
   await decompressCmd.handler("b99", ctx);

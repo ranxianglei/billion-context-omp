@@ -12,12 +12,12 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages, salvageLiveTail } from "./messages.js";
+import { coreOutToAgentMessages, messageIdentity } from "./messages.js";
 import { summarizeRange, selectRangeSpan } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { dumpContextMessages, dumpProviderRequest } from "./dump.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
@@ -66,7 +66,7 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const tokenCount = estimateTokens(coreMessages, coveredIds);
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
-      await runtime.save(turn.state, ctx);
+      runtime.commitFoldState(ctx, turn.state);
 
       const ranges = (turn.nudge?.compressibleRanges ?? []).filter((r) => !r.dangerous);
       if (ranges.length === 0) return undefined;
@@ -93,7 +93,7 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
         logWarn("compact", { sid, event: "rejected", span: `${span.startRef}..${span.endRef}`, model, errors });
         return undefined;
       }
-      await runtime.save(applied.state, ctx);
+      runtime.commitFoldState(ctx, applied.state);
 
       logInfo("compact", {
         sid,
@@ -125,7 +125,6 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
-    runtime.store.invalidate();
     runtime.clearNudgeTracking();
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
@@ -159,7 +158,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
-      const { state, coreMessages, entries } = await runtime.stateFor(ctx);
+      const { state, coreMessages, originalById, streamLen } = runtime.foldStream(ctx, event.messages ?? []);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
       // Prefer pi's real token count (anchored on provider usage) over our
@@ -174,7 +173,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       debug.event("context-in", {
         sid,
         eventMsgs: event.messages?.length ?? 0,
-        entries: entries.length,
+        streamLen,
         coreMsgs: coreMessages.length,
         tokenCount,
         estimatedTokens: estimated,
@@ -185,23 +184,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         activeBefore: state.blocks.filter((b) => b.active).length,
       });
 
-      // On the first context event after session restart/resume, omp's
-      // getBranch() may return only metadata entries (title, session) before
-      // the actual message entries are loaded. This produces coreMessages=[]
-      // while event.messages has real content. If we replace event.messages
-      // with our empty rebuild, the LLM sees nothing — user's first message
-      // is silently lost until the next context event.
-      if (coreMessages.length === 0 && (event.messages?.length ?? 0) > 0) {
-        debug.event("getbranch-stale-fallback", {
-          sid,
-          eventMsgs: event.messages?.length ?? 0,
-          entries: entries.length,
-        });
-        return;
-      }
-
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
-      await runtime.save(turn.state, ctx);
+      runtime.commitFoldState(ctx, turn.state);
 
       logInfo("turn", {
         sid,
@@ -232,7 +216,6 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       activeAfter: turn.state.blocks.filter((b) => b.active).length,
     });
 
-    const originalById = collectOriginals(entries);
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
     debug.event("core-out", {
       sid,
@@ -242,18 +225,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     });
 
     // omp appends the pending prompt to the session tree only after its
-    // message_end is processed, which can happen after the first context
-    // event of a turn. Anything in event.messages past the last known entry
-    // (the live tail) would be dropped by the rebuild above — salvage it so
-    // the model always sees the current user message.
-    const salvage = salvageLiveTail(event.messages ?? [], originalById);
-    if (salvage.length > 0) {
-      rebuilt.push(...salvage);
-      logWarn("context", { sid, event: "live-tail-salvaged", count: salvage.length, roles: salvage.map((m) => (m as { role?: string }).role) });
-      debug.event("live-tail-salvaged", { sid, count: salvage.length, roles: salvage.map((m) => (m as { role?: string }).role) });
-    } else {
-      debug.event("live-tail-checked", { sid, eventMsgs: event.messages?.length ?? 0, salvaged: 0 });
-    }
+    // message_end is processed — but the input stream already carries it, and
+    // the stream (not the tree) is our single source of truth, so no tail
+    // salvage is needed.
     const debugOn = debug.enabled;
 
     if (turn.nudge?.shouldInject) {
@@ -271,7 +245,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // reply (streaming/tool loop), and without this gate the same nudge
       // would be appended on every event.
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
-      const turnKey = lastUserMessageId(entries) ?? sid;
+      const turnKey = lastUserKey(event.messages ?? []) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
       if (!alreadyShown) {
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
@@ -353,22 +327,12 @@ function wireProviderDebug(pi: ExtensionAPI): void {
   });
 }
 
-function collectOriginals(entries: Array<{ type: string; id: string; message?: AgentMessage; content?: unknown }>): Map<string, AgentMessage> {
-  const map = new Map<string, AgentMessage>();
-  for (const entry of entries) {
-    if (entry.type === "message" && entry.message) {
-      map.set(entry.id, entry.message);
-    } else if (entry.type === "custom_message") {
-      // Pi's convertToLlm projects custom messages as { role: "user", content }
-      // for the LLM. Mirror that here so coreOutToAgentMessages restores a
-      // proper user AgentMessage — using role:"custom" would be dropped by Pi.
-      const content = typeof entry.content === "string"
-        ? [{ type: "text" as const, text: entry.content }]
-        : entry.content;
-      map.set(entry.id, { role: "user", content } as AgentMessage);
-    }
+function lastUserKey(stream: AgentMessage[]): string | undefined {
+  for (let i = stream.length - 1; i >= 0; i--) {
+    const m = stream[i]! as { role?: string };
+    if (m.role === "user") return `p${i + 1}:${messageIdentity(m).slice(0, 64)}`;
   }
-  return map;
+  return undefined;
 }
 
 function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts, example: string): AgentMessage {

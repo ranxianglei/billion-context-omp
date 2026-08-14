@@ -98,7 +98,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
       logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "apply-errors", count: applied.result.errors.length, errors: applied.result.errors.slice(0, 5) });
       return `Compression rejected: ${applied.result.errors.join("; ")}. No changes applied — run acp_status to verify current state.`;
     }
-    await runtime.save(applied.state, ctx);
+    await runtime.commitFoldState(ctx, applied.state, toolCallId);
     const { blocksCreated, tokensCompressed, warnings } = applied.result;
 
     const afterTokens = Math.max(0, beforeTokens - tokensCompressed);

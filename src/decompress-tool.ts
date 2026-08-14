@@ -2,7 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
-import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
+import { parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -103,56 +103,24 @@ function headPreview(text: string): string {
   return text.slice(0, PREVIEW_CHARS) + "\n\n... (truncated; use read tool for full content)";
 }
 
-/** Locate a single message's original text by its ref (CoreMessage.id). Scans
- *  session entries since the raw text lives in pi's append-only session log,
- *  NOT in the block (blocks store only a summary + the ref pointer). Returns
- *  the text and role, or null if the ref is not found. */
-function findMessageContent(ref: string, ctx: ExtensionContext): { text: string; role: string } | null {
-  for (const entry of ctx.sessionManager.getEntries()) {
-    if (entry.type !== "message") continue;
-    for (const cm of entriesToCoreMessages([entry])) {
-      if (cm.id === ref) {
-        return { text: cm.text ?? "", role: cm.role };
-      }
-    }
-  }
-  const baseId = ref.split("#")[0]!;
-  if (baseId && baseId !== ref) {
-    const entry = ctx.sessionManager.getEntry(baseId);
-    if (entry) {
-      for (const cm of entriesToCoreMessages([entry])) {
-        if (cm.id === ref) return { text: cm.text ?? "", role: cm.role };
-      }
-    }
+/** Locate a single message's original text by its raw id (CoreMessage.id).
+ *  The fold slot's coreMessages is the full projected input stream — the
+ *  stream never shrinks within a session, so compressed-away messages are
+ *  still there for restoration. */
+function findMessageContent(ref: string, coreMessages: ReturnType<typeof entriesToCoreMessages>): { text: string; role: string } | null {
+  for (const cm of coreMessages) {
+    if (cm.id === ref) return { text: cm.text ?? "", role: cm.role };
   }
   return null;
 }
 
-/** Recover a block's message refs from the FULL session tree (getEntry), not
- *  just the active branch, so block decompress still works after a tree
- *  navigation (workspace-history /undo /redo, Pi /tree). Block refs are
- *  CoreMessage ids — multi tool-call assistants are `${entryId}#${callId}`
- *  (messages.ts projectMessage) — while getEntry() keys are SessionEntry ids
- *  (no suffix), so both sides normalize to the base id before comparing.
- *  Re-projecting a fetched entry re-splits multi tool-call assistants back
- *  into `${entryId}#${callId}` CoreMessages, which match
- *  block.effectiveMessageIds verbatim in collectBlockContent's targetIds set. */
+/** The fold slot's coreMessages already covers the whole input stream, so no
+ *  tree fallback is needed — messages missing from the stream (e.g. after an
+ *  omp compaction rewrote history) simply have no restorable content. */
 function resolveBlockMessages(
-  block: CompressionBlock,
   coreMessages: ReturnType<typeof entriesToCoreMessages>,
-  ctx: ExtensionContext,
 ): ReturnType<typeof entriesToCoreMessages> {
-  const neededBaseIds = new Set(block.effectiveMessageIds.map((id) => id.split("#")[0]!));
-  const presentBaseIds = new Set(coreMessages.map((m) => m.id.split("#")[0]!));
-  const missingBaseIds = [...neededBaseIds].filter((id) => !presentBaseIds.has(id));
-  if (missingBaseIds.length === 0) return coreMessages;
-
-  const extra: ReturnType<typeof entriesToCoreMessages> = [];
-  for (const baseId of missingBaseIds) {
-    const entry = ctx.sessionManager.getEntry(baseId);
-    if (entry) extra.push(...entriesToCoreMessages([entry]));
-  }
-  return [...coreMessages, ...extra];
+  return coreMessages;
 }
 
 /** Decompress a single message by its ref. Unlike block decompression (which
@@ -163,8 +131,9 @@ async function handleMessageRef(
   ownerBlockId: string,
   args: DecompressArgs,
   ctx: ExtensionContext,
+  coreMessages: ReturnType<typeof entriesToCoreMessages>,
 ): Promise<string> {
-  const found = findMessageContent(ref, ctx);
+  const found = findMessageContent(ref, coreMessages);
   if (!found || !found.text) {
     return `Message ${ref} (in block ${ownerBlockId}) has no restorable text content in the session log.`;
   }
@@ -209,7 +178,7 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   // misread as a block number by parseBlockIdArg.
   const owner = state.blocks.find((b) => b.effectiveMessageIds.includes(arg));
   if (owner) {
-    return handleMessageRef(arg, owner.blockId, args, ctx);
+    return handleMessageRef(arg, owner.blockId, args, ctx, coreMessages);
   }
 
   // Otherwise treat as a block id.
@@ -225,7 +194,7 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   // Resolve the block's message refs against the FULL session tree (falling
   // back to getEntry for refs missing from the active branch), so decompress
   // still restores original text after a tree navigation (undo/redo//tree).
-  const resolved = resolveBlockMessages(block, coreMessages, ctx);
+  const resolved = resolveBlockMessages(coreMessages);
   const { text, count } = collectBlockContent(state, block, resolved, { full });
 
   if (count === 0) return `Block ${blockId} has no restorable message content.`;
