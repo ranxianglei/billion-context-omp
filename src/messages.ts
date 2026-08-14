@@ -1,6 +1,6 @@
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 import type { CoreMessage } from "acp-kernel";
-
+import { debug } from "./log.js";
 type AgentMessage = SessionMessageEntry["message"];
 
 type AnyMessage = {
@@ -187,6 +187,7 @@ export function coreOutToAgentMessages(
 ): AgentMessage[] {
   const out: AgentMessage[] = [];
   const emittedSplit = new Set<string>();
+  const dropped: string[] = [];
 
   for (const core of coreOut) {
     if (core.id.startsWith("acp_summary_")) continue;
@@ -194,7 +195,11 @@ export function coreOutToAgentMessages(
     const hashIdx = core.id.indexOf("#");
     if (hashIdx < 0) {
       const original = originalById.get(core.id);
-      if (original) out.push(patchRefTag(original, core));
+      if (original) {
+        out.push(patchRefTag(original, core));
+      } else {
+        dropped.push(`${core.id} (${core.role})`);
+      }
       continue;
     }
 
@@ -203,7 +208,10 @@ export function coreOutToAgentMessages(
     emittedSplit.add(baseId);
 
     const original = originalById.get(baseId);
-    if (!original) continue;
+    if (!original) {
+      dropped.push(`${baseId}#${core.id.substring(hashIdx + 1)} (${core.role})`);
+      continue;
+    }
 
     const survivingCallIds = new Set(
       coreOut
@@ -215,6 +223,9 @@ export function coreOutToAgentMessages(
     out.push(reconstructToolCallMessage(original, core, survivingCallIds));
   }
 
+  if (dropped.length > 0) {
+    debug.event("core-out-dropped", { count: dropped.length, ids: dropped });
+  }
   return out;
 }
 
