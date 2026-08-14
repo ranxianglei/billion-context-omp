@@ -1,4 +1,4 @@
-import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionContext, SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import {
   createCore,
   defaultCountTokens,
@@ -9,28 +9,19 @@ import {
   type Prompts,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
-import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
-import { SessionStateStore, type LiveRefOrigin } from "./state.js";
-import { logInfo } from "./log.js";
-import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
+import { entriesToCoreMessages } from "./messages.js";
+import { SessionStateStore } from "./state.js";
 
 type SessionEntrySource = {
   buildContextEntries?: () => SessionEntry[];
   getBranch?: () => SessionEntry[];
 };
 
-type AgentMessage = SessionMessageEntry["message"];
-
 export function readContextEntries(sm: ExtensionContext["sessionManager"]): SessionEntry[] {
   const source = sm as unknown as SessionEntrySource;
   if (typeof source.buildContextEntries === "function") return source.buildContextEntries();
   if (typeof source.getBranch === "function") return source.getBranch();
   return [];
-}
-
-export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
-  const source = sm as unknown as SessionEntrySource;
-  return typeof source.buildContextEntries === "function";
 }
 
 export interface AcpRuntime {
@@ -45,136 +36,9 @@ export interface AcpRuntime {
   clearNudgeTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
-  stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
+  stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   acquireLock(sid: string): Promise<() => void>;
-}
-
-function mergeLiveEntries(entries: SessionEntry[], live: AgentMessage[], state: CompressionState, origins: LiveRefOrigin[]): SessionEntry[] {
-  const persisted = entries.filter((e): e is SessionMessageEntry => e.type === "message");
-  const liveIdentities = live.map(messageIdentity);
-  const persistedIdentities = persisted.map((entry) => messageIdentity(entry.message));
-  const persistedRange = findUniqueLongestRun<MatchKey>(persistedIdentities, normalizePersistedMatchKeys(persisted, persistedIdentities, live, liveIdentities));
-  const originRange = findUniqueLongestRun(origins.map((origin) => origin.identity), liveIdentities);
-  const out: SessionEntry[] = [];
-  const nextOrigins: LiveRefOrigin[] = [];
-  const usedIds = new Set<string>();
-  for (let i = 0; i < live.length; i++) {
-    const msg = live[i]!;
-    const entry = valueInRange(persisted, persistedRange, i);
-    const origin = valueInRange(origins, originRange, i);
-    if (entry) {
-      if (origin) migrateLiveRefs(state, origin.rawId, entry.id);
-      else migrateTaggedRef(state, msg, entry.id);
-      out.push(entry);
-      continue;
-    }
-    const id = origin?.rawId ?? nextLiveId(state, usedIds, i);
-    usedIds.add(id);
-    out.push({ type: "message", id, parentId: null, timestamp: String(msg.timestamp ?? Date.now()), message: msg });
-    nextOrigins.push({ rawId: id, identity: liveIdentities[i]! });
-  }
-  origins.splice(0, origins.length, ...nextOrigins);
-  const matched = persistedRange?.length ?? 0;
-  const unmatched = live.length - matched;
-  const matchRate = live.length > 0 ? Math.round((matched / live.length) * 100) : 100;
-  logInfo("runtime", { event: "merge-live-entries", live: live.length, matched, unmatched, matchRate });
-  return out;
-}
-
-
-function nextLiveId(state: CompressionState, used: Set<string>, index: number): string {
-  let id = `live-${index}`;
-  let suffix = index;
-  while (used.has(id) || state.messageRefs.byRaw[id] !== undefined) id = `live-${++suffix}`;
-  return id;
-}
-
-function migrateTaggedRef(state: CompressionState, message: AgentMessage, stableId: string): void {
-  const ref = messageRef(message);
-  const rawId = ref ? state.messageRefs.byRef[ref] : undefined;
-  if (rawId?.startsWith("live-")) migrateLiveRefs(state, rawId, stableId);
-}
-
-function migrateLiveRefs(state: CompressionState, liveId: string, stableId: string): void {
-  const rootId = liveId.split("#", 1)[0]!;
-  if (!rootId.startsWith("live-")) return;
-  const remap: Record<string, string> = {};
-  for (const [rawId, ref] of Object.entries(state.messageRefs.byRaw)) {
-    if (rawId !== rootId && !rawId.startsWith(`${rootId}#`)) continue;
-    const stableRawId = `${stableId}${rawId.slice(rootId.length)}`;
-    remap[rawId] = stableRawId;
-    if (state.messageRefs.byRaw[stableRawId] === undefined) {
-      state.messageRefs.byRaw[stableRawId] = ref;
-      state.messageRefs.byRef[ref] = stableRawId;
-    } else if (state.messageRefs.byRef[ref] === rawId) {
-      delete state.messageRefs.byRef[ref];
-    }
-    delete state.messageRefs.byRaw[rawId];
-  }
-  if (Object.keys(remap).length > 0) {
-    for (const block of state.blocks) {
-      block.directMessageIds = block.directMessageIds.map((id) => remap[id] ?? id);
-      block.effectiveMessageIds = block.effectiveMessageIds.map((id) => remap[id] ?? id);
-    }
-  }
-}
-
-type MatchKey = string | symbol;
-
-const NO_PERSISTED_MATCH = Symbol("no-persisted-match");
-
-function normalizePersistedMatchKeys(
-  persisted: readonly SessionMessageEntry[],
-  persistedIdentities: readonly string[],
-  live: readonly AgentMessage[],
-  liveIdentities: readonly string[],
-): MatchKey[] {
-  const persistedByStructure = new Map<string, number>();
-  for (let index = 0; index < persisted.length; index++) {
-    const key = toolResultStructureKey(persisted[index]!.message);
-    if (key === undefined) continue;
-    persistedByStructure.set(key, persistedByStructure.has(key) ? -1 : index);
-  }
-  return live.map((message, liveIndex) => {
-    const key = toolResultStructureKey(message);
-    const candidateIndex = key === undefined ? undefined : persistedByStructure.get(key);
-    if (candidateIndex === undefined) return liveIdentities[liveIndex]!;
-    if (candidateIndex < 0) return NO_PERSISTED_MATCH;
-    return sameToolResult(persisted[candidateIndex]!.message, message)
-      ? persistedIdentities[candidateIndex]!
-      : liveIdentities[liveIndex]!;
-  });
-}
-
-function toolResultStructureKey(message: AgentMessage): string | undefined {
-  if (message.role !== "toolResult") return undefined;
-  return `${message.toolName}\0${message.toolCallId}`;
-}
-
-function valueInRange<T>(values: readonly T[], range: MatchRange | undefined, liveIndex: number): T | undefined {
-  if (!range || liveIndex < range.liveStart || liveIndex >= range.liveStart + range.length) return undefined;
-  return values[range.candidateStart + liveIndex - range.liveStart];
-}
-
-function sameToolResult(stored: AgentMessage, visible: AgentMessage): boolean {
-  if (stored.role !== "toolResult" || visible.role !== "toolResult") return false;
-  return sameNonTextBlocks(stored.content, visible.content)
-    && matchesStoredText(extractText(stored.content), extractText(visible.content));
-}
-
-function sameNonTextBlocks(a: unknown, b: unknown): boolean {
-  const nonText = (blocks: unknown[]): unknown[] => blocks.filter((block) => {
-    if (!block || typeof block !== "object" || !("type" in block)) return true;
-    return block.type !== "text";
-  });
-  try {
-    const na = Array.isArray(a) ? nonText(a) : [];
-    const nb = Array.isArray(b) ? nonText(b) : [];
-    return JSON.stringify(na) === JSON.stringify(nb);
-  } catch {
-    return false;
-  }
 }
 
 function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof entriesToCoreMessages>): void {
@@ -220,28 +84,14 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return resolveConfig(adapterRef, liveContextLimit(ctx));
   }
 
-  let lastEntries: { sm: object; sid: string; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] } | null = null;
-
-  async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
+  async function stateFor(ctx: ExtensionContext) {
     const sm = ctx.sessionManager;
     const sessionFile = sm.getSessionFile() ?? undefined;
     const sessionId = sm.getSessionId();
     const state = await store.load(sessionFile, sessionId);
-    if (liveMessages === undefined && lastEntries && lastEntries.sm === sm && lastEntries.sid === sessionId) {
-      return { state, coreMessages: lastEntries.coreMessages, entries: lastEntries.entries };
-    }
     const entries = readContextEntries(sm);
-    if (!isPiHost(sm) && liveMessages && liveMessages.length > 0) {
-      const origins = store.getLiveRefOrigins(sessionFile, sessionId);
-      const merged = mergeLiveEntries(entries, liveMessages, state, origins);
-      store.setLiveRefOrigins(sessionFile, sessionId, origins);
-      const coreMessages = entriesToCoreMessages(merged);
-      lastEntries = { sm, sid: sessionId, coreMessages, entries: merged };
-      return { state, coreMessages, entries: merged };
-    }
     const coreMessages = entriesToCoreMessages(entries);
-    if (liveMessages === undefined) pruneOrphanRefs(state, coreMessages);
-    lastEntries = { sm, sid: sessionId, coreMessages, entries };
+    pruneOrphanRefs(state, coreMessages);
     return { state, coreMessages, entries };
   }
 

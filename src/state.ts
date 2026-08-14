@@ -5,14 +5,8 @@ import { logError, logInfo, logWarn } from "./log.js";
 
 const STATE_SUFFIX = ".acp-omp.json";
 
-export interface LiveRefOrigin {
-  rawId: string;
-  identity: string;
-}
-
 interface StateCacheSlot {
   state: CompressionState;
-  liveRefOrigins: LiveRefOrigin[];
 }
 
 function stateFileFor(sessionFile: string | undefined): string | null {
@@ -56,14 +50,12 @@ export class SessionStateStore {
     const cached = this.cache.get(key);
     if (cached) return cached.state;
     let state = createInitialState();
-    let liveRefOrigins: LiveRefOrigin[] = [];
     if (file) {
       try {
         const raw = await fs.readFile(file, "utf8");
-        const parsed = JSON.parse(raw) as CompressionState & { liveRefOrigins?: unknown };
+        const parsed = JSON.parse(raw) as CompressionState;
         if (parsed && Array.isArray(parsed.blocks)) {
           state = mergeInitialState(parsed);
-          liveRefOrigins = parseLiveRefOrigins(parsed.liveRefOrigins);
         }
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
@@ -80,7 +72,7 @@ export class SessionStateStore {
         if (parentState) state = parentState;
       }
     }
-    this.cache.set(key, { state, liveRefOrigins });
+    this.cache.set(key, { state });
     return state;
   }
 
@@ -88,29 +80,18 @@ export class SessionStateStore {
     const file = stateFileFor(sessionFile);
     if (!file) return;
     const key = cacheKey(sessionFile, sessionId);
-    const liveRefOrigins = this.cache.get(key)?.liveRefOrigins ?? [];
-    this.cache.set(key, { state, liveRefOrigins });
+    this.cache.set(key, { state });
     const dir = path.dirname(file);
     await fs.mkdir(dir, { recursive: true }).catch((e: unknown) => {
       logError("state", { event: "save-mkdir-failed", dir, error: e instanceof Error ? e.message : String(e) });
     });
     const tmp = path.join(dir, `.acp-omp-tmp-${path.basename(file)}`);
     try {
-      await fs.writeFile(tmp, JSON.stringify({ ...state, liveRefOrigins }), "utf8");
+      await fs.writeFile(tmp, JSON.stringify(state), "utf8");
       await fs.rename(tmp, file);
     } catch (e) {
       logError("state", { event: "save-failed", file, error: e instanceof Error ? e.message : String(e) });
     }
-  }
-
-  getLiveRefOrigins(sessionFile: string | undefined, sessionId: string): LiveRefOrigin[] {
-    return [...(this.cache.get(cacheKey(sessionFile, sessionId))?.liveRefOrigins ?? [])];
-  }
-
-  setLiveRefOrigins(sessionFile: string | undefined, sessionId: string, origins: LiveRefOrigin[]): void {
-    const key = cacheKey(sessionFile, sessionId);
-    const slot = this.cache.get(key);
-    if (slot) this.cache.set(key, { state: slot.state, liveRefOrigins: [...origins] });
   }
 
   invalidate(): void {
@@ -144,15 +125,6 @@ export class SessionStateStore {
     logWarn("state", { event: "parent-chain-exhausted", file: sessionFile, maxDepth: MAX_CHAIN_DEPTH });
     return undefined;
   }
-}
-
-function parseLiveRefOrigins(value: unknown): LiveRefOrigin[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is LiveRefOrigin => {
-    if (!item || typeof item !== "object") return false;
-    const origin = item as { rawId?: unknown; identity?: unknown };
-    return typeof origin.rawId === "string" && typeof origin.identity === "string";
-  });
 }
 
 function mergeInitialState(parsed: CompressionState): CompressionState {

@@ -158,7 +158,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
-      const { state, coreMessages, entries } = await runtime.stateFor(ctx, event.messages);
+      const { state, coreMessages, entries } = await runtime.stateFor(ctx);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
       // Prefer pi's real token count (anchored on provider usage) over our

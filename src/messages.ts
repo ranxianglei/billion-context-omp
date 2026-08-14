@@ -120,25 +120,6 @@ export function messageIdentity(message: unknown): string {
   return JSON.stringify(normalizeIdentityValue(message, true));
 }
 
-export function messageRef(message: unknown): string | undefined {
-  if (message === null || typeof message !== "object" || !("content" in message)) return undefined;
-  const content = message.content;
-  const texts = typeof content === "string"
-    ? [content]
-    : Array.isArray(content)
-      ? content.flatMap((block) => {
-          const value = block as { type?: string; text?: string };
-          return value.type === "text" && typeof value.text === "string" ? [value.text] : [];
-        })
-      : [];
-  for (const text of texts) {
-    const tag = text.match(REF_TAG)?.[0] ?? text.match(TRAILING_REF_TAG)?.[0];
-    const ref = tag?.match(/m\d{1,5}/)?.[0];
-    if (ref) return ref;
-  }
-  return undefined;
-}
-
 const IDENTITY_KEYS = new Set(["role", "content", "toolName", "toolCallId", "command", "output", "summary"]);
 function normalizeIdentityValue(value: unknown, message = false): unknown {
   if (Array.isArray(value)) {
