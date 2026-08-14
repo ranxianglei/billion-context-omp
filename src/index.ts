@@ -19,7 +19,7 @@ import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
-import { dumpContextMessages, dumpProviderRequest, summarizeProviderPayload } from "./dump.js";
+import { dumpContextMessages, dumpProviderRequest } from "./dump.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { formatSystemPromptForEvent } from "./compat.js";
 
@@ -296,17 +296,24 @@ function wireProviderDebug(pi: ExtensionAPI): void {
     if (!debug.enabled) return;
     const sid = ctx.sessionManager.getSessionId();
     const dumpPath = dumpProviderRequest(event.payload, { sid });
-    const summary = summarizeProviderPayload(event.payload);
-    debug.event("provider-request", { sid, dumpPath, ...summary });
+    logInfo("provider-request", { sid, dumpPath });
   });
 
   pi.on("after_provider_response", (event, ctx) => {
     if (!debug.enabled) return;
+    const h = event.headers;
+    const cache: Record<string, string> = {};
+    for (const [k, v] of Object.entries(h)) {
+      const lk = k.toLowerCase();
+      if (lk.includes("cache") || lk.includes("usage") || lk.includes("token") || lk.includes("rate") || lk.includes("x-")) {
+        cache[lk] = v;
+      }
+    }
     debug.event("provider-response", {
       sid: ctx.sessionManager.getSessionId(),
       status: event.status,
       requestId: event.requestId ?? null,
-      headers: event.headers,
+      cache,
     });
   });
 }
