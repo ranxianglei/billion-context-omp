@@ -123,7 +123,11 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // Rebuild blocks from the persisted session right away so /acp and
     // acp_status show them immediately on resume — before the first LLM call.
     runtime.primeFold(ctx);
-    void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
+    // Awaited (not fire-and-forget): session_start is the natural update
+    // point and short-lived hosts (print/JSON mode) exit right after the
+    // turn — awaiting here plus the keepAlive in autoInstallLatest
+    // guarantees the install completes before the process can exit.
+    await checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
   });
@@ -275,7 +279,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // long-running session never re-fires session_start, so an update could
     // go unnoticed for days. checkForUpdate throttles internally (3 min) and
     // is guarded against concurrent calls, so firing it per LLM call is safe.
-    void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
+    await checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
     return { messages: rebuilt };
