@@ -3,6 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-p
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+import { viableRanges } from "./messages.js";
 import { logThrow } from "./log.js";
 
 const StatusParams = type({
@@ -67,7 +68,9 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   if (args.scope) return base;
 
   const nudge = turn.nudge;
-  const ranges = nudge?.compressibleRanges ?? [];
+  // Same viability filter as the nudge path: never list ranges too small to
+  // carry a meaningful summary (atomic batch rejection trap).
+  const ranges = viableRanges(nudge?.compressibleRanges ?? []);
   const protectedRanges = nudge?.protectedRanges ?? [];
 
   const extra: string[] = [];

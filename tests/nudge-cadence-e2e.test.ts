@@ -66,3 +66,41 @@ test("context handler: ignored nudge re-delivers after +growthFloor within the s
   const r2 = (await fire()) as { messages: any[] };
   assert.equal(nudgeCount(r2), 1, "second nudge at +20K in the SAME user turn (was swallowed by per-turn dedup)");
 });
+
+test("nudge never lists degenerate ranges that would fail the summary floor atomically", async () => {
+  const { api, handlers } = capture();
+  createAcpExtension({ compress: { nudgeGrowthTokens: 20000 } } as never)(api as unknown as ExtensionAPI);
+
+  let tokens = 0;
+  const ctx = {
+    mode: "rpc",
+    hasUI: false,
+    cwd: "/tmp",
+    ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+    model: { contextWindow: 200_000 },
+    getContextUsage: () => ({ tokens, percent: tokens / 1_000_000, contextWindow: 1_000_000 }),
+    sessionManager: { getSessionId: () => "degenerate-e2e", getSessionFile: () => "/tmp/degenerate-e2e.json" },
+  } as unknown as ExtensionContext;
+
+  // Tiny isolated opener (16-token class) + a big compressible middle + tail.
+  const stream: any[] = [msg("user", "hi")];
+  for (let i = 1; i <= 16; i++) stream.push(msg(i % 2 ? "assistant" : "user", `f${i} ` + MID));
+  const fire = () => handlers.get("context")![0]!({ type: "context", messages: [...stream, msg("user", "go")] }, ctx);
+
+  tokens = 45000;
+  await fire(); // establish growth baseline
+  tokens = 65001;
+  const r1 = (await fire()) as { messages: any[] };
+  const nudgeMsg = r1.messages.filter((m: any) => m.role === "user" && JSON.stringify(m.content).includes("compress("));
+  assert.equal(nudgeMsg.length, 1, "nudge injected");
+  const text = nudgeMsg[0].content[0].text;
+  // Every LISTED range must be viable (≥200 tokens): the isolated 16-token
+  // opener either merges into its big neighbor (fine) or gets filtered (fine)
+  // — but a standalone sub-summary-floor range must never be recommended.
+  const listed = [...text.matchAll(/m\d+–m\d+\s+\d+ msgs\s+([\d.]+K?)/g)].map((m) => {
+    const v = m[1]!;
+    return v.endsWith("K") ? parseFloat(v) * 1000 : parseFloat(v);
+  });
+  assert.ok(listed.length > 0, "ranges listed");
+  for (const t of listed) assert.ok(t >= 200, `degenerate range listed: ${t} tokens`);
+});
