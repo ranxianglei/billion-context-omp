@@ -1,0 +1,51 @@
+import { test } from "bun:test";
+import assert from "node:assert/strict";
+import { topicFallback } from "../src/compress-tool.js";
+import { makeCommands } from "../src/commands.js";
+import type { AcpRuntime } from "../src/runtime.js";
+import type { ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
+
+test("topicFallback: summary first slice, ≤30 chars, decorative only", () => {
+  assert.equal(topicFallback("Session opener: user asked for base64 padding. More follows."), "Session opener: user asked for…");
+  assert.equal(topicFallback("Short summary line\nsecond line"), "Short summary line");
+  assert.equal(topicFallback("123456789012345678901234567890"), "123456789012345678901234567890");
+  assert.equal(topicFallback(""), "");
+});
+
+test("/acp panel shows a topic for blocks without one (summary fallback)", async () => {
+  const runtime = {
+    configFor: () => ({
+      modelContextLimit: 200_000,
+      nudge: { growthFloorTokens: 20_000, thresholdPct: 0.2 },
+      compress: { minCompressRange: 5000 },
+    }),
+    stateFor: async () => ({
+      state: {
+        blocks: [
+          { blockId: "b1", tier: 1, active: true, topic: undefined, summary: "Database migration steps completed successfully today", compressedTokens: 5100, effectiveMessageIds: [], directBlockIds: [] },
+        ],
+        stats: { tokensCompressed: 5100 },
+        messageRefs: { byRaw: {}, byRef: {} },
+      },
+      coreMessages: [],
+    }),
+    core: { processTurn: () => ({ messages: [], state: { blocks: [], stats: { tokensCompressed: 0 } }, nudge: undefined }) },
+  } as unknown as AcpRuntime;
+
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (text: string) => notified.push(text) },
+    getContextUsage: () => ({ tokens: 1000 }),
+    model: { contextWindow: 200_000 },
+    sessionManager: { getSessionId: () => "t", getSessionFile: () => "/tmp/x.json" },
+  } as unknown as ExtensionCommandContext;
+
+  const acp = makeCommands(runtime).find((c) => c.name === "acp")!;
+  await acp.options.handler!("", ctx);
+
+  const text = notified[0] ?? "";
+  const blockLine = text.split("\n").find((l) => l.includes("[b1]"));
+  assert.ok(blockLine, `block line missing in:\n${text}`);
+  assert.match(blockLine, /: /, "topic column must render even without model-provided topic");
+  assert.match(blockLine, /Database migration steps compl…/, "falls back to summary first slice (30-char cut)");
+});

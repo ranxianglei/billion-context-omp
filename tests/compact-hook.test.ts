@@ -1,0 +1,174 @@
+import { mock, test } from "bun:test";
+import assert from "node:assert/strict";
+
+interface Captured {
+  systemPrompt: string[];
+  userText: string;
+}
+
+let captured: Captured | undefined;
+let llmCalls = 0;
+let llmResponse = '{"summary": "FULL DIGEST COVERING EVERYTHING"}';
+
+mock.module("@oh-my-pi/pi-ai", () => ({
+  complete: async (
+    _model: unknown,
+    payload: { systemPrompt: string[]; messages: { content: { type: string; text: string }[] }[] },
+  ) => {
+    llmCalls++;
+    captured = {
+      systemPrompt: payload.systemPrompt,
+      userText: payload.messages[0]!.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"),
+    };
+    return { content: [{ type: "text", text: llmResponse }] };
+  },
+}));
+
+const { createAcpExtension } = await import("../src/index.js");
+const { default: extensionFactory } = await import("../src/index.js");
+
+interface MockApi {
+  on(event: string, handler: (e: unknown, ctx: unknown) => unknown): void;
+  tools: unknown[];
+  commands: Map<string, unknown>;
+  registerTool(tool: unknown): void;
+  registerCommand(name: string, options: unknown): void;
+}
+
+function captureApi(): { api: MockApi; handlers: Map<string, Array<(e: unknown, ctx: unknown) => unknown>> } {
+  const handlers = new Map<string, Array<(e: unknown, ctx: unknown) => unknown>>();
+  const api: MockApi = {
+    on(event, handler) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    tools: [],
+    commands: new Map(),
+    registerTool(tool) {
+      this.tools.push(tool);
+    },
+    registerCommand(name, options) {
+      this.commands.set(name, options);
+    },
+  };
+  return { api, handlers };
+}
+
+function compactCtx() {
+  return {
+    mode: "rpc",
+    hasUI: false,
+    cwd: "/tmp",
+    ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+    model: { contextWindow: 200_000, provider: "test", id: "m1" },
+    modelRegistry: {
+      find: () => undefined,
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {} }),
+    },
+    sessionManager: {
+      getSessionId: () => "compact-test",
+      getSessionFile: () => "/tmp/nonexistent.session.json",
+    },
+  };
+}
+
+function userMsg(text: string) {
+  return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+}
+
+function compressCallMsg(summary: string) {
+  return {
+    role: "assistant",
+    content: [
+      {
+        type: "toolCall",
+        id: "call_1",
+        name: "write",
+        arguments: JSON.stringify({
+          path: "xd://compress",
+          content: JSON.stringify({ content: [{ startId: "m00002", endId: "m00003", summary }] }),
+        }),
+      },
+    ],
+    timestamp: Date.now(),
+  };
+}
+
+function preparation() {
+  return {
+    firstKeptEntryId: "entry-9",
+    tokensBefore: 12_345,
+    previousSummary: "OLD COMPACT SUMMARY MUST SURVIVE",
+    messagesToSummarize: [
+      userMsg("gap content A before the old block"),
+      compressCallMsg("PRIOR BLOCK SUMMARY ABOUT DATABASE"),
+      userMsg("gap content B after the old block"),
+    ],
+    turnPrefixMessages: [userMsg("turn prefix content")],
+    recentMessages: [userMsg("kept recent content")],
+    isSplitTurn: false,
+    fileOps: { read: [], edited: [] },
+    settings: {},
+  };
+}
+
+function fire(api: MockApi, handlers: Map<string, Array<(e: unknown, ctx: unknown) => unknown>>, event: unknown, ctx: unknown) {
+  void api;
+  const handler = handlers.get("session_before_compact")![0]!;
+  return handler(event, ctx);
+}
+
+test("/compact summarizes ALL discarded content — gap, prior compress-call summaries, turn prefix", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as never);
+  const result = (await fire(api, handlers, { type: "session_before_compact", preparation: preparation(), customInstructions: "focus on auth" }, compactCtx())) as {
+    compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number };
+  };
+  assert.ok(result, "handler must return a compaction result");
+  assert.equal(result.compaction.summary, "FULL DIGEST COVERING EVERYTHING");
+  assert.equal(result.compaction.firstKeptEntryId, "entry-9", "native cutoff passthrough");
+  assert.equal(result.compaction.tokensBefore, 12_345);
+  // Regression: omp truncates EVERYTHING before firstKeptEntryId from the LLM
+  // view, so the summary prompt must include all of it — not a selected span.
+  const text = captured!.userText;
+  assert.ok(text.includes("gap content A"), "gap before old block must be covered");
+  assert.ok(text.includes("gap content B"), "gap after old block must be covered");
+  assert.ok(text.includes("PRIOR BLOCK SUMMARY ABOUT DATABASE"), "prior in-stream compress call (block summary carrier) must be covered");
+  assert.ok(text.includes("turn prefix content"), "turnPrefixMessages must be covered");
+  assert.ok(!text.includes("kept recent content"), "recentMessages are kept in full — must not be compressed");
+  // previousSummary is folded in so iterative compactions never lose it.
+  assert.ok(captured!.systemPrompt.join("\n").includes("PREVIOUS compaction"), "previousSummary handling must be instructed");
+  assert.ok(captured!.systemPrompt.join("\n").includes("focus on auth"), "customInstructions must reach the prompt");
+});
+
+test("/compact falls back to native compaction when nothing to summarize", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as never);
+  const callsBefore = llmCalls;
+  const result = await fire(api, handlers, { type: "session_before_compact", preparation: { firstKeptEntryId: "x", tokensBefore: 100 } }, compactCtx());
+  assert.equal(result, undefined, "no messagesToSummarize → undefined → native fallback");
+  assert.equal(llmCalls, callsBefore, "no LLM call for empty preparation");
+});
+
+test("/compact falls back when the LLM response is unparseable", async () => {
+  const { api, handlers } = captureApi();
+  extensionFactory(api as never);
+  const prev = llmResponse;
+  llmResponse = "not json at all";
+  try {
+    const result = await fire(api, handlers, { type: "session_before_compact", preparation: preparation() }, compactCtx());
+    assert.equal(result, undefined, "unparseable summary → native fallback");
+  } finally {
+    llmResponse = prev;
+  }
+});
+
+test("/compact falls back when no model resolves", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ compress: { compressModel: "nope:missing" } })(api as never);
+  const callsBefore = llmCalls;
+  const result = await fire(api, handlers, { type: "session_before_compact", preparation: preparation() }, compactCtx());
+  assert.equal(result, undefined, "unresolvable configured model → native fallback");
+  assert.equal(llmCalls, callsBefore, "no LLM call when model does not resolve");
+});

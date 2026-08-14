@@ -1,11 +1,19 @@
-import { defineConfig } from 'tsup';
+import { defineConfig } from "tsup";
+import { readFileSync } from "node:fs";
+
+const pkg = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf-8"),
+);
 
 export default defineConfig({
-  entry: ['src/index.ts'],
-  format: ['esm'],
-  dts: true,
-  clean: true,
+  entry: ["src/index.ts"],
+  format: ["esm"],
+  target: "es2022",
+  dts: false,
   sourcemap: true,
-  target: 'es2022',
-  platform: 'node',
+  clean: true,
+  define: {
+    CURRENT_VERSION: JSON.stringify(pkg.version),
+  },
+  external: [/@oh-my-pi\//],
 });

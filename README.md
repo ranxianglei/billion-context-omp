@@ -2,60 +2,100 @@
 
 # billion-context-omp
 
-[oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) client extension for [billion-context](https://www.npmjs.com/package/billion-context).
+[acp-kernel](https://github.com/ranxianglei/acp-kernel)-powered, model-driven context management for the [omp (oh-my-pi)](https://github.com/can1357/oh-my-pi) coding agent.
 
-`billion-context` is a Node.js proxy that sits between any AI agent and its model API, rewriting Anthropic/OpenAI streams with [acp-kernel](https://github.com/ranxianglei/acp-kernel) compression. `billion-context-omp` wires **omp** — the terminal coding agent — into that pipeline: it builds the `base_url` override that routes omp's traffic through a running `billion-context` proxy, and **self-disables when it detects omp is already behind bili** so two layers of compression never stack.
+[omp](https://omp.sh) is a hard fork of the [Pi coding agent](https://github.com/nickthecook/pi) (re-scoped `@oh-my-pi/*` packages). `billion-context-omp` targets omp's native extension API and wires acp-kernel's compression pipeline into it — giving you multi-tier, model-driven context compression with zero runtime dependencies.
 
-> ⚠️ This is a **skeleton** package. The config-building helpers are placeholders.
-> Wire them to omp's actual provider/`base_url` config shape as you build it out.
+> **Not** a drop-in copy of `billion-context-pi`. omp's extension API differs from standard Pi (arktype schemas, `string[]` system prompts, divergent message/tool shapes, `~/.omp` config dir), so this port targets omp directly rather than leaning on omp's legacy-Pi shim.
 
-## Why
+## What it does
 
-Long coding sessions blow up context. Once you pass the context window the session degrades or dies, and every provider charges per token. Compression lets a single session run for days — billions of tokens through one window.
-
-omp already supports arbitrary providers and custom `base_url`. This package is the thin glue that points those `base_url`s at a bili proxy and keeps the `/bili/` self-detection signal consistent with the rest of the billion-context client family (`billion-context-pi`, `opencode-acp`, …).
+- **Message-ref tagging** — every message gets an `` ref tag the model cites inside compress calls.
+- **Model-driven compression** — the model writes the summaries; the engine decides *when* to compress, *what range*, and tracks all state.
+- **3-tier LSM compression** — tier-1 summaries distill into tier-2, then tier-3, as the session grows.
+- **Growth-gated nudges** — a nudge is injected into context only when usage crosses a threshold *and* context has grown, so it never fires spuriously.
+- **Emergency truncation** — last-resort truncation of runaway tool outputs above the emergency threshold.
+- **Decompress + search** — restore a compressed block on demand, or keyword-search all summaries without decompressing.
+- **`/compact` interception** — omp's native compaction is replaced by an ACP model-summarized compaction.
 
 ## Install
 
+omp loads extensions via the `extensions:` setting (user `~/.omp/agent/settings.json` or project `.omp/settings.json`), or the `omp:` manifest key, or the `--trusted-extension` flag.
+
+From npm:
+
 ```bash
-npm install billion-context-omp
+omp install billion-context-omp
 ```
 
-## Quickstart
+Or add it to your omp settings:
 
-```ts
-import { BillionContextOmp } from 'billion-context-omp';
-
-const omp = new BillionContextOmp({ endpoint: 'http://localhost:8787' });
-
-// Route a provider through bili:
-omp.buildBaseUrl('https://api.openai.com/v1');
-// => 'http://localhost:8787/bili/https://api.openai.com/v1'
-
-// Detect an already-routed URL (use to self-disable / avoid double compression):
-omp.isBiliBaseUrl('http://localhost:8787/bili/https://api.openai.com/v1'); // => true
+```jsonc
+{
+  "extensions": ["billion-context-omp"]
+}
 ```
 
-## API
+Restart omp. The extension auto-activates on the next session.
 
-### `new BillionContextOmp(options?)`
+## Config
 
-| option     | type     | description                              |
-| ---------- | -------- | ---------------------------------------- |
-| `endpoint` | `string` | Origin of a running billion-context proxy. |
+Config is read from `~/.omp/acp-omp.json` (global) and `<project>/.omp/acp-omp.json` (project-local overrides global):
 
-### `omp.buildBaseUrl(upstream): string`
+```jsonc
+{
+  "debug": false,            // verbose ACP log (default ~/.omp/acp-omp.log)
+  "autoUpdate": true,        // auto-install newer versions from npm
+  "modelContextLimit": 200000,
+  "compress": {
+    "maxContextLimit": "75%",        // forced-compression threshold
+    "emergencyThresholdPercent": "95%", // emergency truncation threshold
+    "nudgeGrowthTokens": 50000
+  },
+  "compressModel": "zhipuai:glm-5.2", // model used for /compact auto-compression
+  "toolBashDefaultTimeout": 60,
+  "toolOutputMaxBytes": 200000
+}
+```
 
-Wrap an upstream `base_url` as `${endpoint}/bili/${upstream}`. Throws if no endpoint is configured. Passes through unchanged if already routed.
+State persists to `~/.omp/agent/sessions/<session>.acp-omp.json`.
 
-### `omp.isBiliBaseUrl(baseUrl): boolean`
+## Tools & commands
 
-True when the URL already carries the `/bili/` prefix — use this to self-disable when omp's `base_url` is already pointing at bili.
+| Tool | Purpose |
+|------|---------|
+| `compress` | Replace a conversation range with a summary you write |
+| `decompress` | Restore a compressed block (to file by default; `inline:true` to return inline) |
+| `search_context` | Keyword-search compressed summaries |
+| `acp_status` | Context usage, breakdown, compressible ranges, blocks |
 
-### `omp.buildConfig(providers): Record<provider, { base_url }>`
+| Command | Purpose |
+|---------|---------|
+| `/acp` | Context usage + token breakdown + compression status |
+| `/acp-status` | Same as `/acp` |
+| `/acp-decompress <id>` | Restore a block's content inline |
+| `/acp-search <query>` | Search compressed blocks |
 
-Build base_url overrides for multiple omp providers at once. _(Skeleton.)_
+## Relationship to billion-context-pi
+
+`billion-context-omp` is a close port of [`billion-context-pi`](https://github.com/ranxianglei/billion-context-pi). Both are acp-kernel adapters. Differences:
+
+- **Targets omp, not Pi** — imports types from `@oh-my-pi/pi-coding-agent` (omp's fork), uses omp's arktype schemas (`@oh-my-pi/omptype`), and reads the config dir from `@oh-my-pi/pi-utils` (`CONFIG_DIR_NAME` = `.omp`), so all paths land under `~/.omp/`.
+- **Package identity & paths** — `billion-context-omp` uses `~/.omp/acp-omp.json`, `~/.omp/acp-omp.log`, and `<session>.acp-omp.json` state files, so it never collides with anything else.
+- **Delegate subsystem deferred** — omp already provides its own multi-agent orchestration. To avoid tool conflicts, this port does **not** register the `acp_delegate`/`acp_delegate_wait`/`acp_delegate_cancel` tools or the fleet status widget. Everything else (compression, decompress, search, status, nudges, `/compact` interception, tool guardrails) is identical to the Pi build.
+
+## Build
+
+```bash
+npm run build       # tsup bundle (inlines acp-kernel) + tsc --emitDeclarationOnly
+npm run typecheck   # tsc --noEmit
+npm test            # bun test tests/*.test.ts
+```
+
+`dist/index.js` is self-contained — acp-kernel is bundled inline (zero runtime deps).
+
+> Tests run under [Bun](https://bun.sh) (omp's host packages import the Bun runtime). Install Bun first: `curl -fsSL https://bun.sh/install | sh`.
 
 ## License
 
-MIT © [ranxianglei](https://github.com/ranxianglei)
+MIT © ranxianglei
