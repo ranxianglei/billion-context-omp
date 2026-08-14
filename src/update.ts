@@ -162,12 +162,12 @@ export async function checkForUpdate(
       const installed = await autoInstallLatest(latest);
       if (installed && notify) {
         notify(
-          `\x1b[32m\u2714 ACP auto-updated ${current} \u2192 ${latest}. Restart Pi to finish.\x1b[0m`,
+          `\x1b[32m\u2714 ACP auto-updated ${current} \u2192 ${latest}. Restart omp to finish.\x1b[0m`,
         );
         logInfo("update", { event: "auto-installed", from: current, to: latest });
       } else if (!installed && notify) {
         notify(
-          `${PACKAGE_NAME} ${latest} available (you have ${current}). Run: pi update --extension npm:${PACKAGE_NAME}`,
+          `${PACKAGE_NAME} ${latest} available (you have ${current}). Run: omp install ${PACKAGE_NAME}@latest`,
         );
       }
     }
