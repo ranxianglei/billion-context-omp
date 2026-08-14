@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity, salvageLiveTail } from "../src/messages.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 
@@ -467,4 +467,87 @@ test("message identity ignores omp metadata fields (attribution, usage, stopReas
   const msgB = { role: "user", content: [{ type: "text", text: "goodbye" }] };
   assert.notEqual(messageIdentity(msgA), messageIdentity(msgB),
     "different content must still produce different identities");
+});
+
+test("salvageLiveTail recovers pending user message missing from entries", () => {
+  const persisted1 = userBlocks("first question");
+  const persisted2 = { role: "assistant", content: [{ type: "text", text: "first answer" }], timestamp: Date.now() };
+  const byId = new Map<string, SessionMessageEntry["message"]>([
+    ["e1", persisted1 as SessionMessageEntry["message"]],
+    ["e2", persisted2 as SessionMessageEntry["message"]],
+  ]);
+  const pending = { role: "user", content: [{ type: "text", text: "second question" }], timestamp: Date.now() };
+  const eventMessages = [persisted1, persisted2, pending] as SessionMessageEntry["message"][];
+
+  const salvage = salvageLiveTail(eventMessages, byId);
+  assert.ok(salvage);
+  assert.equal(salvage.length, 1);
+  assert.equal((salvage[0] as { content: Array<{ text: string }> }).content[0].text, "second question");
+});
+
+test("salvageLiveTail returns empty when the prompt is already persisted (TUI path)", () => {
+  const persisted1 = userBlocks("hello");
+  const byId = new Map<string, SessionMessageEntry["message"]>([
+    ["e1", persisted1 as SessionMessageEntry["message"]],
+  ]);
+  const eventMessages = [persisted1] as SessionMessageEntry["message"][];
+  assert.deepEqual(salvageLiveTail(eventMessages, byId), []);
+});
+
+test("salvageLiveTail returns empty when nothing matches entries (fresh session)", () => {
+  const pending = { role: "user", content: [{ type: "text", text: "brand new" }], timestamp: Date.now() };
+  const byId = new Map<string, SessionMessageEntry["message"]>();
+  assert.deepEqual(salvageLiveTail([pending] as SessionMessageEntry["message"][], byId), []);
+});
+
+test("salvageLiveTail ignores timestamp and metadata differences when anchoring", () => {
+  const persisted = { role: "user", content: [{ type: "text", text: "question" }], timestamp: 1000 };
+  const byId = new Map<string, SessionMessageEntry["message"]>([
+    ["e1", persisted as SessionMessageEntry["message"]],
+  ]);
+  const liveClone = { role: "user", attribution: "user", content: [{ type: "text", text: "question" }], timestamp: 9999 };
+  const pending = { role: "user", content: [{ type: "text", text: "follow up" }], timestamp: Date.now() };
+  const salvage = salvageLiveTail([liveClone, pending] as SessionMessageEntry["message"][], byId);
+  assert.ok(salvage);
+  assert.equal(salvage.length, 1);
+  assert.equal((salvage[0] as { content: Array<{ text: string }> }).content[0].text, "follow up");
+});
+
+test("salvageLiveTail distinguishes re-sent duplicate content from persisted history", () => {
+  const oldDup = { role: "user", content: [{ type: "text", text: "ok" }], timestamp: 1000 };
+  const reply = { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 1001 };
+  const byId = new Map<string, SessionMessageEntry["message"]>([
+    ["e1", oldDup as SessionMessageEntry["message"]],
+    ["e2", reply as SessionMessageEntry["message"]],
+  ]);
+  const pendingDup = { role: "user", content: [{ type: "text", text: "ok" }], timestamp: 9999 };
+  const salvage = salvageLiveTail([oldDup, reply, pendingDup] as SessionMessageEntry["message"][], byId);
+  assert.ok(salvage);
+  assert.equal(salvage.length, 1);
+  assert.equal((salvage[0] as { timestamp: number }).timestamp, 9999);
+});
+
+test("salvageLiveTail drops system-reminder injections but keeps the prompt", () => {
+  const persisted1 = userBlocks("question");
+  const byId = new Map<string, SessionMessageEntry["message"]>([
+    ["e1", persisted1 as SessionMessageEntry["message"]],
+  ]);
+  const pending = { role: "user", content: [{ type: "text", text: "follow up" }], timestamp: Date.now() };
+  const reminder = { role: "user", content: [{ type: "text", text: LT + "system-reminder" + GT + "\ntodo nudge" }], timestamp: Date.now() };
+  const salvage = salvageLiveTail([persisted1, pending, reminder] as SessionMessageEntry["message"][], byId);
+  assert.ok(salvage);
+  assert.equal(salvage.length, 1);
+  assert.equal((salvage[0] as { content: Array<{ text: string }> }).content[0].text, "follow up");
+});
+
+test("salvageLiveTail keeps mid-turn live tool traffic after the anchor", () => {
+  const persisted1 = userBlocks("run tests");
+  const byId = new Map<string, SessionMessageEntry["message"]>([
+    ["e1", persisted1 as SessionMessageEntry["message"]],
+  ]);
+  const liveCall = { role: "assistant", content: [{ type: "toolCall", id: "tc9", name: "bash", arguments: { command: "ls" } }], timestamp: Date.now() };
+  const liveResult = { role: "toolResult", content: [{ type: "text", text: "file.txt" }], toolName: "bash", toolCallId: "tc9", timestamp: Date.now() };
+  const salvage = salvageLiveTail([persisted1, liveCall, liveResult] as SessionMessageEntry["message"][], byId);
+  assert.ok(salvage);
+  assert.equal(salvage.length, 2);
 });

@@ -181,6 +181,34 @@ function safeStringify(value: unknown): string {
   }
 }
 
+const SYSTEM_REMINDER_PREFIX = "\x3csystem-reminder";
+
+function liveIdentity(message: AgentMessage): string {
+  const m = message as AnyMessage;
+  return [m.role ?? "", m.toolName ?? "", m.toolCallId ?? "", safeStringify(m.content)].join("|");
+}
+
+export function salvageLiveTail(
+  eventMessages: AgentMessage[],
+  originalById: Map<string, AgentMessage>,
+): AgentMessage[] {
+  if (eventMessages.length === 0 || originalById.size === 0) return [];
+  const lastEntry = [...originalById.values()][originalById.size - 1]!;
+  const lastIdentity = liveIdentity(lastEntry);
+  let anchor = -1;
+  for (let i = eventMessages.length - 1; i >= 0; i--) {
+    if (liveIdentity(eventMessages[i]!) === lastIdentity) { anchor = i; break; }
+  }
+  if (anchor < 0) return [];
+  const out: AgentMessage[] = [];
+  for (const message of eventMessages.slice(anchor + 1)) {
+    const m = message as AnyMessage;
+    if (m.role === "user" && extractText(m.content).startsWith(SYSTEM_REMINDER_PREFIX)) continue;
+    out.push(message);
+  }
+  return out;
+}
+
 export function coreOutToAgentMessages(
   coreOut: CoreMessage[],
   originalById: Map<string, AgentMessage>,

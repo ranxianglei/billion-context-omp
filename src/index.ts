@@ -12,7 +12,7 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages } from "./messages.js";
+import { coreOutToAgentMessages, salvageLiveTail } from "./messages.js";
 import { summarizeRange, selectRangeSpan } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -240,6 +240,20 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       originalByIdSize: originalById.size,
       rebuiltMsgs: rebuilt.length,
     });
+
+    // omp appends the pending prompt to the session tree only after its
+    // message_end is processed, which can happen after the first context
+    // event of a turn. Anything in event.messages past the last known entry
+    // (the live tail) would be dropped by the rebuild above — salvage it so
+    // the model always sees the current user message.
+    const salvage = salvageLiveTail(event.messages ?? [], originalById);
+    if (salvage.length > 0) {
+      rebuilt.push(...salvage);
+      logWarn("context", { sid, event: "live-tail-salvaged", count: salvage.length, roles: salvage.map((m) => (m as { role?: string }).role) });
+      debug.event("live-tail-salvaged", { sid, count: salvage.length, roles: salvage.map((m) => (m as { role?: string }).role) });
+    } else {
+      debug.event("live-tail-checked", { sid, eventMsgs: event.messages?.length ?? 0, salvaged: 0 });
+    }
     const debugOn = debug.enabled;
 
     if (turn.nudge?.shouldInject) {
