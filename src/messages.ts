@@ -44,6 +44,21 @@ export function streamToCoreMessages(stream: AgentMessage[]): CoreMessage[] {
   return out;
 }
 
+/** Map of toolCallId → result text for tool results in the stream. Used to
+ *  skip replaying compress calls that were REJECTED live ("No changes
+ *  applied") — only calls that actually created blocks should rebuild them. */
+export function toolResultTexts(stream: AgentMessage[]): Map<string, string> {
+  const results = new Map<string, string>();
+  for (const message of stream) {
+    const m = message as AnyMessage;
+    if (m.role !== "toolResult") continue;
+    const id = m.toolCallId;
+    if (typeof id !== "string" || !id) continue;
+    results.set(id, extractText(m.content));
+  }
+  return results;
+}
+
 export interface StreamCompressCall {
   id: string;
   ranges: { startRef: string; endRef: string; summary: string; topic?: string; summaryMaxChars?: number; compressCallId: string }[];
@@ -52,12 +67,9 @@ export interface StreamCompressCall {
 export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
   const out: StreamCompressCall[] = [];
   for (const call of allToolCalls((message as AnyMessage).content)) {
-    if (call.name !== "compress" || !call.id) continue;
-    let args = call.arguments;
-    if (typeof args === "string") {
-      try { args = JSON.parse(args); } catch { continue; }
-    }
-    if (!args || typeof args !== "object") continue;
+    if (!call.id) continue;
+    const args = compressToolArgs(call);
+    if (!args) continue;
     const content = (args as { content?: unknown }).content;
     if (!Array.isArray(content)) continue;
     const ranges: StreamCompressCall["ranges"] = [];
@@ -76,6 +88,33 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
     if (ranges.length > 0) out.push({ id: call.id, ranges });
   }
   return out;
+}
+
+/** Extract a compress tool's arguments from a stream toolCall. omp mounts
+ *  extension tools as xd:// devices: the model invokes them through the write
+ *  tool with path "xd://compress" and the tool args JSON-encoded in the
+ *  content field — the session stream never shows a name:"compress" call.
+ *  Sessions without a granted write tool expose compress top-level instead,
+ *  so both shapes must replay. */
+function compressToolArgs(call: { name: string; arguments?: unknown }): Record<string, unknown> | null {
+  let args = call.arguments;
+  if (typeof args === "string") {
+    try { args = JSON.parse(args); } catch { return null; }
+  }
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const a = args as Record<string, unknown>;
+  if (call.name === "compress") return a;
+  if (call.name !== "write") return null;
+  const path = typeof a.path === "string" ? a.path.split("?")[0]!.replace(/\/+$/, "") : "";
+  if (path !== "xd://compress") return null;
+  let inner: unknown = a.content;
+  if (typeof inner === "string") {
+    try { inner = JSON.parse(inner); } catch { return null; }
+  }
+  if (!inner || typeof inner !== "object") return null;
+  if (Array.isArray(inner)) return { content: inner };
+  const ia = inner as Record<string, unknown>;
+  return Array.isArray(ia.content) ? ia : { content: [ia] };
 }
 
 function projectMessage(message: AgentMessage, id: string): CoreMessage[] {

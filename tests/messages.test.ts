@@ -532,6 +532,53 @@ test("findCompressCalls extracts ranges from assistant compress tool calls", () 
   assert.equal(r.topic, "exploration");
 });
 
+test("findCompressCalls recognizes omp xd://compress write-device invocations", () => {
+  // omp mounts extension tools as xd:// devices: the model calls the write
+  // tool with path xd://compress and the compress args JSON-encoded in content.
+  const assistant = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "call_xd1", name: "write", arguments: {
+        path: "xd://compress",
+        content: JSON.stringify({ content: [{ startId: "m00002", endId: "m00004", summary: "xd device compress call summary for the replay test." }] }),
+        intent: "compress old range",
+      } },
+    ],
+  };
+  const calls = findCompressCalls(assistant as SessionMessageEntry["message"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].id, "call_xd1");
+  const r = calls[0].ranges[0]!;
+  assert.equal(r.startRef, "m00002");
+  assert.equal(r.endRef, "m00004");
+  assert.equal(r.summary, "xd device compress call summary for the replay test.");
+
+  // object (pre-decoded) content form
+  const assistantObj = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "call_xd2", name: "write", arguments: {
+        path: "xd://compress",
+        content: { content: [{ startId: "m00001", endId: "m00001", summary: "object form of the xd compress invocation." }] },
+      } },
+    ],
+  };
+  const calls2 = findCompressCalls(assistantObj as SessionMessageEntry["message"]);
+  assert.equal(calls2.length, 1);
+  assert.equal(calls2[0].ranges[0]!.startRef, "m00001");
+
+  // other xd:// devices and plain file writes are not compress calls
+  const other = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "w1", name: "write", arguments: { path: "xd://acp_status", content: "{}" } },
+      { type: "toolCall", id: "w2", name: "write", arguments: { path: "src/index.ts", content: "export {}" } },
+      { type: "toolCall", id: "w3", name: "write", arguments: { path: "xd://compress", content: "not json {" } },
+    ],
+  };
+  assert.equal(findCompressCalls(other as SessionMessageEntry["message"]).length, 0);
+});
+
 test("findCompressCalls accepts already-object arguments and skips empty ranges", () => {
   const assistant = {
     role: "assistant",

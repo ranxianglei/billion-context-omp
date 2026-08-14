@@ -14,7 +14,7 @@ import {
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { debug, logWarn } from "./log.js";
-import { findCompressCalls, messageIdentity, streamToCoreMessages, type AgentMessage } from "./messages.js";
+import { findCompressCalls, messageIdentity, streamToCoreMessages, toolResultTexts, type AgentMessage } from "./messages.js";
 
 export interface FoldResult {
   state: CompressionState;
@@ -129,9 +129,19 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     });
     slot.state = { ...slot.state, messageRefs: assigned.map };
 
+    // Fresh fold (session start / restart / refold): replay only compress
+    // calls whose live tool result actually applied a block — rejected
+    // calls ("No changes applied") must not resurrect later. Incremental
+    // folds only scan NEW stream positions for unseen calls.
+    const isFreshFold = slot.foldedLen === 0;
+    const resultTexts = isFreshFold ? toolResultTexts(stream) : null;
     let replayed = 0;
-    for (let i = slot.foldedLen; i < stream.length; i++) {
+    for (let i = isFreshFold ? 0 : slot.foldedLen; i < stream.length; i++) {
       for (const call of findCompressCalls(stream[i]!)) {
+        if (resultTexts?.get(call.id)?.includes("No changes applied")) {
+          debug.event("fold-replay-skipped", { sid, callId: call.id });
+          continue;
+        }
         if (slot.appliedCallIds.has(call.id) || stateHasCompressCall(slot.state, call.id)) continue;
         try {
           const applied = core.applyCompression({ ranges: call.ranges, messages: coreMessages, state: slot.state, config });

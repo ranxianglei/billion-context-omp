@@ -234,6 +234,35 @@ test("restart recovery: a fresh extension rebuilds blocks by replaying in-stream
   assert.match(status.content[0].text, /1 active/, status.content[0].text);
 });
 
+test("restart replay skips compress calls that were rejected live", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+
+  const filler = (n: string) => `filler ${n} `.repeat(400);
+  const stream = [userMsg(bigText("rejected target")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(filler(n)))];
+  const r1 = await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  const targetRef = refOf(r1.messages[0]);
+
+  // The model issued a compress call live, and the tool REJECTED it.
+  const rejectedCall = assistantCompressCall("call_r1", [{ startId: targetRef, endId: targetRef, summary: "A summary long enough to pass length validation if it were replayed." }]);
+  const withRejection = [
+    ...stream,
+    rejectedCall,
+    toolResult("call_r1", "Compression rejected: Total compressible content too small (12 chars across 1 range(s), min 5000).. No changes applied — run acp_status to verify current state."),
+  ];
+  await handlers.get("context")![0]!({ type: "context", messages: withRejection }, ctx);
+
+  // Restart: fresh extension must NOT resurrect the rejected call.
+  const second = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  const r2 = await second.handlers.get("context")![0]!({ type: "context", messages: withRejection }, ctx);
+  const statusTool = second.api.tools.find((t) => t.name === "acp_status")!;
+  const status = await statusTool.execute("tc-rejected", {}, undefined, undefined, ctx);
+  assert.doesNotMatch(status.content[0].text, /\d+ active/, "rejected call must not replay into a block");
+  assert.ok(JSON.stringify(r2.messages).includes("rejected target"), "target stays visible (never compressed)");
+});
+
 test("tail rewind (retry) re-folds deterministically without losing prefix refs", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
