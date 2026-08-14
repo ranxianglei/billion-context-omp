@@ -125,7 +125,9 @@ export function wireToolGuardrails(pi: ExtensionAPI, runtime: AcpRuntime): void 
       isBash && event.isError ? detectBashTimeout(event.content) : undefined;
 
     let modified: ToolResultEvent["content"] | undefined;
-    const max = runtime.adapter.toolOutputMaxBytes;
+    // Default cap keeps runaway tool output from flooding the context; an
+    // explicit 0 in user config disables it (capToolOutput treats 0 as off).
+    const max = runtime.adapter.toolOutputMaxBytes ?? DEFAULT_TOOL_OUTPUT_MAX_BYTES;
     if (max !== undefined) {
       const details = event.details as Record<string, unknown> | undefined;
       const fullPath = details && typeof details.fullOutputPath === "string" ? details.fullOutputPath : undefined;

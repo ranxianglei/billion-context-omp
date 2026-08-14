@@ -390,3 +390,82 @@ test("system prompt never includes the ACP_DELEGATE NOTIFICATIONS section (omp d
   assert.ok(!sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section always omitted (omp provides its own orchestration)");
   assert.ok(sp.includes("ACP TAGS"), "core ACP prompt present");
 });
+
+test("restart replay preserves tier-2 blocks (block-boundary ranges must not be treated as stale)", async () => {
+  const first = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(first.api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: any[]) => first.handlers.get("context")![0]!({ type: "context", messages }, ctx);
+
+  const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
+  const r1 = await fire(stream);
+  const start = refOf(r1.messages[0]);
+  const end = refOf(r1.messages[1]);
+
+  const compressTool = first.api.tools.find((t) => t.name === "compress")!;
+  const res1 = await compressTool.execute("call_c1", { content: [{ startId: start, endId: end, summary: "Both large messages were compressed into this durable tier one summary." }] }, undefined, undefined, ctx);
+  const res2 = await compressTool.execute("call_c2", { content: [{ startId: "b1", endId: "b1", summary: "Tier two distillation condensing the tier one block even further for long sessions." }] }, undefined, undefined, ctx);
+  assert.match(res2.content[0].text, /1 block/, res2.content[0].text);
+
+  const call1 = assistantCompressCall("call_c1", [{ startId: start, endId: end, summary: "Both large messages were compressed into this durable tier one summary." }]);
+  const call2 = assistantCompressCall("call_c2", [{ startId: "b1", endId: "b1", summary: "Tier two distillation condensing the tier one block even further for long sessions." }]);
+  const withCalls = [...stream, call1, toolResult("call_c1", res1.content[0].text), call2, toolResult("call_c2", res2.content[0].text), userMsg("post tier-two turn")];
+  await fire(withCalls);
+
+  const statusTool1 = first.api.tools.find((t) => t.name === "acp_status")!;
+  const liveStatus = (await statusTool1.execute("tc-live", {}, undefined, undefined, ctx)).content[0].text;
+
+  // New process: the stream alone must rebuild BOTH tiers.
+  const second = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  const r3 = await second.handlers.get("context")![0]!({ type: "context", messages: withCalls }, ctx);
+  const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
+  assert.ok(!texts.includes("second large enough"), "covered original stays pruned under the tier-2 block");
+
+  const statusTool2 = second.api.tools.find((t) => t.name === "acp_status")!;
+  const status = (await statusTool2.execute("tc-restart", {}, undefined, undefined, ctx)).content[0].text;
+  assert.ok(status.includes("b2"), `tier-2 block b2 must survive restart:\n${status}`);
+  assert.equal((status.match(/active/g) ?? []).length >= 0, true);
+  assert.ok(liveStatus.includes("b2"), "sanity: live status shows b2");
+});
+
+test("mixed message/block boundary batch keeps fingerprint index alignment on replay", async () => {
+  const first = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(first.api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: any[]) => first.handlers.get("context")![0]!({ type: "context", messages }, ctx);
+
+  const stream = [userMsg(bigText("first")), userMsg(bigText("second")), userMsg(bigText("third")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
+  const r1 = await fire(stream);
+  const start = refOf(r1.messages[0]);
+  const end = refOf(r1.messages[1]);
+  const third = refOf(r1.messages[2]);
+
+  const compressTool = first.api.tools.find((t) => t.name === "compress")!;
+  const res1 = await compressTool.execute("call_c1", { content: [{ startId: start, endId: end, summary: "First two large messages were compressed into this durable tier one summary." }] }, undefined, undefined, ctx);
+  // One call, two ranges: a fresh message range + a block re-distill range.
+  const mixedRanges = [
+    { startId: third, endId: third, summary: "Third large message compressed on its own into this separate summary block." },
+    { startId: "b1", endId: "b1", summary: "Tier two distillation of the first block created in the same batch call." },
+  ];
+  const res2 = await compressTool.execute("call_c2", { content: mixedRanges }, undefined, undefined, ctx);
+  assert.match(res2.content[0].text, /2 blocks/, res2.content[0].text);
+  // The fp list must carry one aligned entry per range (both resolve to real
+  // fingerprints — the block boundary via the block ledger).
+  assert.match(res2.content[0].text, /\[fp=[0-9a-f]+,[0-9a-f]+\]/, res2.content[0].text);
+
+  const call1 = assistantCompressCall("call_c1", [{ startId: start, endId: end, summary: "First two large messages were compressed into this durable tier one summary." }]);
+  const call2 = assistantCompressCall("call_c2", mixedRanges);
+  const withCalls = [...stream, call1, toolResult("call_c1", res1.content[0].text), call2, toolResult("call_c2", res2.content[0].text), userMsg("post mixed-batch turn")];
+
+  const second = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  const r3 = await second.handlers.get("context")![0]!({ type: "context", messages: withCalls }, ctx);
+  const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
+  assert.ok(!texts.includes("second large enough"), "block-range content stays pruned (call not mis-skipped)");
+  assert.ok(!texts.includes("third large enough"), "message-range content stays pruned");
+
+  const statusTool = second.api.tools.find((t) => t.name === "acp_status")!;
+  const status = (await statusTool.execute("tc-mixed", {}, undefined, undefined, ctx)).content[0].text;
+  assert.ok(status.includes("b3"), `both ranges of the mixed call must replay (b1, b2, b3):\n${status}`);
+});

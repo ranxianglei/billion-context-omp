@@ -133,3 +133,35 @@ test("isBashToolResult narrows by toolName and exposes bash details (vendored gu
     assert.equal((bash.details as Record<string, unknown> | undefined)?.fullOutputPath, "/tmp/x");
   }
 });
+
+test("tool_result hook applies the 200KB default cap even when user config omits toolOutputMaxBytes", async () => {
+  const handlers = new Map<string, ((event: any, ...rest: any[]) => any)[]>();
+  const api = {
+    on(event: string, handler: (event: any, ...rest: any[]) => any) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    tools: [],
+    commands: new Map(),
+    registerTool() {},
+    registerCommand() {},
+  };
+  const { createAcpExtension } = await import("../src/index.js");
+  // No toolOutputMaxBytes anywhere: adapter defaults + user config {} → the
+  // hook must still fall back to DEFAULT_TOOL_OUTPUT_MAX_BYTES.
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+
+  const big = "x".repeat(250_000);
+  const event = { type: "tool_result", toolName: "read", content: [{ type: "text", text: big }], details: {} };
+  let modified: unknown;
+  for (const h of handlers.get("tool_result") ?? []) {
+    const r = h(event, { sessionManager: { getSessionId: () => "s" } });
+    if (r && typeof r.then === "function") { const awaited = await r; if (awaited) modified = awaited; }
+    else if (r) modified = r;
+  }
+  assert.ok(modified, "oversized output must be modified under the default cap");
+  const text = ((modified as any).content.find((c: any) => c.type === "text")).text;
+  assert.ok(text.length < 250_000, `truncated to ${text.length} chars`);
+  assert.match(text, /output capped/, `notice expected, got tail: ${text.slice(-160)}`);
+});

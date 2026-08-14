@@ -14,7 +14,7 @@ import {
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { debug, logWarn } from "./log.js";
-import { findCompressCalls, messageIdentity, rawPos, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage } from "./messages.js";
+import { boundaryPos, findCompressCalls, isBlockRef, messageIdentity, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage, type BlockLike } from "./messages.js";
 
 export interface FoldResult {
   state: CompressionState;
@@ -156,7 +156,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
         // itself in the stream, and the span fingerprint recorded in the
         // success result must still match — otherwise skip rather than
         // silently compress the wrong messages with a stale summary.
-        const stale = call.ranges.some((r, ri) => staleRange(r, ri, resultText, coreMessages, i, slot.state.messageRefs.byRef));
+        const stale = call.ranges.some((r, ri) => staleRange(r, ri, resultText, coreMessages, i, slot.state.messageRefs.byRef, slot.state.blocks));
         if (stale) {
           debug.event("fold-replay-stale", { sid, callId: call.id });
           continue;
@@ -232,19 +232,24 @@ function staleRange(
   coreMessages: CoreMessage[],
   callIndex: number,
   byRef: Record<string, string>,
+  blocks: BlockLike[],
 ): boolean {
-  const startRaw = byRef[r.startRef];
-  const endRaw = byRef[r.endRef];
-  if (!startRaw || !endRaw) return true;
-  const start = rawPos(startRaw);
-  const end = rawPos(endRaw);
+  const start = boundaryPos(r.startRef, byRef, blocks, "min");
+  const end = boundaryPos(r.endRef, byRef, blocks, "max");
+  if (start === 0 || end === 0) {
+    // A vanished MESSAGE ref means the prefix was rewritten → stale. A block
+    // ref we cannot resolve is left to the kernel's BoundaryNotFoundError —
+    // nested blocks rebuild in replay order and may legitimately be missing
+    // only if the call list itself is inconsistent.
+    return !isBlockRef(r.startRef) && !isBlockRef(r.endRef);
+  }
   // Ranges always cover messages BEFORE the call that issued them — a call
   // resolving to positions at/after itself means the prefix was rewritten.
-  if (start === 0 || end === 0 || end > callIndex) return true;
-  const m = resultText.match(/\[fp=([0-9a-f,]+)\]/);
+  if (end > callIndex) return true;
+  const m = resultText.match(/\[fp=([0-9a-f,-]+)\]/);
   if (!m) return false;
   const expected = m[1]!.split(",");
-  const fp = spanFingerprint(coreMessages, startRaw, endRaw);
-  if (expected[rangeIndex] === undefined) return !expected.includes(fp);
-  return expected[rangeIndex] !== fp;
+  const want = expected[rangeIndex];
+  if (want === undefined || want === "-") return false;
+  return want !== spanFingerprint(coreMessages, start, end);
 }

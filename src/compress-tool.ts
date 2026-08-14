@@ -7,7 +7,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
-import { spanFingerprint } from "./messages.js";
+import { rangeFingerprints } from "./messages.js";
 import { estimateTokens, collectCoveredMessageIds, formatTokens } from "./tokens.js";
 
 const RangeSpec = type({
@@ -136,13 +136,14 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
 
     // Span fingerprints: replay-time identity check written into the result
     // text (which persists in the stream). If a host-side rewrite later shifts
-    // positions, fold replay re-computes and mismatches → call skipped.
-    const byRef = applied.state.messageRefs.byRef;
-    const fps = rangeSpecs.map((r) => spanFingerprint(coreMessages, byRef[r.startRef] ?? "", byRef[r.endRef] ?? "")).filter((fp) => fp.length > 0);
+    // positions, fold replay re-computes and mismatches → call skipped. One
+    // entry per range ("-" for block-boundary ranges the ledger can't
+    // position) so replay-side index lookup stays aligned.
+    const fps = rangeFingerprints(rangeSpecs, coreMessages, applied.state.messageRefs.byRef, applied.state.blocks);
 
     const lines = [`▣ ACP | ${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens (~${formatTokens(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
     if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
-    if (fps.length > 0) lines.push(`[fp=${fps.join(",")}]`);
+    if (fps.some((fp) => fp !== "-")) lines.push(`[fp=${fps.join(",")}]`);
     return lines.join("\n");
   } finally { releaseLock(); }
 }

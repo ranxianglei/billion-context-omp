@@ -175,10 +175,13 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   // Resolve what `arg` refers to. Check message-ref FIRST (data-driven: a ref
   // exists in some block's effectiveMessageIds). This must precede block-id
   // parsing because pure-digit hex refs (e.g. 51102431) would otherwise be
-  // misread as a block number by parseBlockIdArg.
-  const owner = state.blocks.find((b) => b.effectiveMessageIds.includes(arg));
+  // misread as a block number by parseBlockIdArg. effectiveMessageIds hold
+  // RAW ids (p1/p2#tc…), so a model-facing mNNNNN ref must be translated
+  // through byRef first.
+  const rawArg = state.messageRefs.byRef[arg] ?? arg;
+  const owner = state.blocks.find((b) => b.effectiveMessageIds.includes(rawArg));
   if (owner) {
-    return handleMessageRef(arg, owner.blockId, args, ctx, coreMessages);
+    return handleMessageRef(rawArg, owner.blockId, args, ctx, coreMessages);
   }
 
   // Otherwise treat as a block id.

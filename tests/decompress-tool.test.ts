@@ -200,3 +200,13 @@ test("decompress survives repeated compress → decompress cycles (state not los
   assert.ok(cycle2.includes("filler two"),
     "cycle 2: newly compressed block also restores");
 });
+
+test("decompress accepts a model-facing mNNNNN message ref (not just raw ids)", async () => {
+  const { decompressTool, ctx } = await setupWithCompressedBlock();
+  // effectiveMessageIds hold raw ids; the model only ever sees mNNNNN refs,
+  // so the tool must translate through byRef before matching.
+  const res = await decompressTool.execute("tc-mref", { blockId: "m00001", inline: true }, undefined, undefined, ctx);
+  const text = (res.content[0] as any).text as string;
+  assert.ok(text.includes("This is a detailed message that needs to be compressed."),
+    `mNNNNN ref must resolve to the covered message's original text, got: ${text.slice(0, 200)}`);
+});
