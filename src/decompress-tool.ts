@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { homeDir } from "./home.js";
 
 /** Directory for auto-generated decompress output files. */
-const AUTO_DIR = join(homeDir() || tmpdir(), ".cache", "pi", "acp-decompress");
+const AUTO_DIR = join(homeDir() || tmpdir(), ".cache", "omp", "acp-decompress");
 
 /** Maximum chars of a head preview included in the tool result for file mode. */
 const PREVIEW_CHARS = 600;
@@ -24,7 +24,7 @@ const MESSAGE_INLINE_THRESHOLD = 2000;
 const DecompressParams = type({
   blockId: type("string").describe('Block id to restore, e.g. "b5". Also accepts a message ref (UUID) from search_context results — resolves to the owning block automatically.'),
   "full?": type("boolean").describe("If true, recurse through all nested blocks to original messages. Default: false (restores one tier up — nested block summaries shown, direct messages in full)."),
-  "toFile?": type("string").describe("Write restored content to this file path (must be under /tmp, ~/.cache/opencode, or ~/.cache/pi) instead of the default auto-generated path. Block stays compressed."),
+  "toFile?": type("string").describe("Write restored content to this file path (must be under /tmp, ~/.cache/omp, or ~/.cache/pi) instead of the default auto-generated path. Block stays compressed."),
   "inline?": type("boolean").describe("If true, return content inline as this tool's result (appends to context). Default: false — content is written to an auto-generated file to avoid context bloat. Only set true when the content is small or you accept the context cost."),
 });
 
@@ -55,6 +55,7 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
 const ALLOWED_DIRS = [
   tmpdir(),
   join(homeDir(), ".cache", "opencode"),
+  join(homeDir(), ".cache", "omp"),
   join(homeDir(), ".cache", "pi"),
 ];
 
@@ -68,7 +69,7 @@ function resolveToFilePath(targetPath: string): string | { error: string } {
     return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
   });
   if (!isAllowed) {
-    return { error: `Error: toFile path must be under ${tmpdir()}, ~/.cache/opencode, or ~/.cache/pi. Got: ${targetPath}` };
+    return { error: `Error: toFile path must be under ${tmpdir()}, ~/.cache/omp, or ~/.cache/pi. Got: ${targetPath}` };
   }
   return resolved;
 }

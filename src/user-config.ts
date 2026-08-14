@@ -53,7 +53,7 @@ function join(... parts: string[]): string {
 const KNOWN = new Set([
   "debug", "autoUpdate", "modelContextLimit",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
-  "delegate", "compress", "displayUsage",
+  "delegate", "compress", "compressModel", "displayUsage",
   "prompts", "acknowledgePromptsRisk",
 ]);
 

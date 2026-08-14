@@ -1,4 +1,5 @@
-import { defaultConfig, type Config, type Prompts } from "acp-kernel";
+import { defaultConfig, validateConfig, type Config, type Prompts } from "acp-kernel";
+import { logWarn } from "./log.js";
 
 /** Delegate sub-agent configuration. */
 export interface DelegateConfig {
@@ -134,12 +135,13 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number):
     config.nudge.growthFloor = c.nudgeGrowthTokens;
     config.nudge.growthCap = c.nudgeGrowthTokens;
   }
+  const warnings = validateConfig(config);
+  if (warnings.length > 0) logWarn("config", { warnings: warnings.join("; ") });
   return config;
 }
 
 export function parsePercent(v: number | string): number {
-  if (typeof v === "number") return v;
-  const s = v.trim();
-  if (s.endsWith("%")) return Number(s.slice(0, -1)) / 100;
-  return Number(s);
+  const n = typeof v === "number" ? v : v.trim().endsWith("%") ? Number(v.trim().slice(0, -1)) / 100 : Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
 }
