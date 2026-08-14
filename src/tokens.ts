@@ -1,4 +1,4 @@
-import { defaultCountTokens, type CoreMessage } from "acp-kernel";
+import { type CoreMessage } from "acp-kernel";
 
 export function estimateTextTokens(text: string): number {
   if (!text) return 0;

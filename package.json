@@ -39,6 +39,8 @@
 	"scripts": {
 		"test": "bun scripts/test.ts",
 		"typecheck": "tsc --noEmit",
+		"typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
+		"typecheck:all": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
 		"build": "tsup && tsc --emitDeclarationOnly"
 	},
 	"keywords": [

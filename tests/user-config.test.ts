@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { loadUserConfig, applyUserConfig } from "../src/user-config.js";
 import type { AdapterConfig } from "../src/config.js";
+import type { Config } from "acp-kernel";
 
 const CONFIG_DIR_NAME = ".omp";
 
@@ -155,7 +156,7 @@ test("applyUserConfig preserves protected adapter fields", () => {
     modelContextLimit: 200_000,
     delegate: true,
     preserveRecentMessages: 5000,
-    coreOverrides: { someKey: "someValue" },
+    coreOverrides: { someKey: "someValue" } as Partial<Config>,
     protectedTools: ["read", "write"],
   };
   const user = { modelContextLimit: 100_000 };

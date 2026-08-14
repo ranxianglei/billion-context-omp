@@ -26,18 +26,19 @@ test("save then load round-trips state", async () => {
   const before = createInitialState();
   before.blocks.push({
     blockId: "b0",
-    runId: 0,
+    runId: "0",
     tier: 1,
     generation: "young",
     active: true,
     summary: "alpha",
     directMessageIds: ["a", "b"],
     effectiveMessageIds: ["a", "b"],
+    directBlockIds: [],
+    compressedTokens: 0,
     survivedCount: 1,
     createdAt: 100,
   });
   before.nextBlockId = 1;
-  before.messageRefs.nextRef = 2;
   before.messageRefs.byRaw.a = "m00000";
   before.messageRefs.byRef.m00000 = "a";
 

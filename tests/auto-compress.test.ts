@@ -27,7 +27,7 @@ function makeState(ids: string[]): StateLite {
 }
 
 function makeRange(startRef: string, endRef: string, tokens: number) {
-  return { startRef, endRef, tokens, dangerous: false };
+  return { startRef, endRef, tokens, count: 1, toolPct: 0, textPct: 1, dangerous: false };
 }
 
 function withHome<T>(dir: string, fn: () => T): T {
@@ -61,7 +61,7 @@ test("parseSummary returns null on non-JSON, empty, or missing summary", () => {
 test("resolveCompressModel: explicit configured model wins", () => {
   const registry = { find: (p: string, id: string) => (p === "openai" && id === "gpt-4o" ? { provider: p, id } : undefined) };
   const current = { provider: "anthropic", id: "claude" };
-  const r = resolveCompressModel(registry as never, current as never, "openai:gpt-4o");
+  const r = resolveCompressModel(registry, current, "openai:gpt-4o");
   assert.equal(r?.model.provider, "openai");
   assert.equal(r?.model.id, "gpt-4o");
   assert.equal(r?.label, "openai:gpt-4o");
@@ -70,27 +70,27 @@ test("resolveCompressModel: explicit configured model wins", () => {
 test("resolveCompressModel: configured missing → null (not fallback) so caller surfaces config error", () => {
   const registry = { find: () => undefined };
   const current = { provider: "anthropic", id: "claude" };
-  assert.equal(resolveCompressModel(registry as never, current as never, "openai:nonexistent"), null);
+  assert.equal(resolveCompressModel(registry, current, "openai:nonexistent"), null);
 });
 
 test("resolveCompressModel: no config → current session model", () => {
   const registry = { find: () => undefined };
   const current = { provider: "anthropic", id: "claude" };
-  const r = resolveCompressModel(registry as never, current as never, null);
+  const r = resolveCompressModel(registry, current, null);
   assert.equal(r?.model.provider, "anthropic");
   assert.equal(r?.label, "anthropic:claude");
 });
 
 test("resolveCompressModel: bare model id without provider defaults to openai", () => {
   const registry = { find: (p: string, id: string) => (p === "openai" ? { provider: p, id } : undefined) };
-  const r = resolveCompressModel(registry as never, undefined, "gpt-4o-mini");
+  const r = resolveCompressModel(registry, undefined, "gpt-4o-mini");
   assert.equal(r?.model.provider, "openai");
   assert.equal(r?.model.id, "gpt-4o-mini");
 });
 
 test("resolveCompressModel: nothing usable → null", () => {
   const registry = { find: () => undefined };
-  assert.equal(resolveCompressModel(registry as never, undefined, null), null);
+  assert.equal(resolveCompressModel(registry, undefined, null), null);
 });
 
 test("readCompressModel returns null when acp-omp.json absent (graceful)", () => {
@@ -149,7 +149,7 @@ test("selectRangeSpan returns null when the whole set is below minChars", () => 
 
 test("selectRangeSpan seeds on largest range and expands until chars >= minChars", () => {
   const ids = Array.from({ length: 8 }, (_, i) => `m${i}`);
-  const msgs: CoreMessageLite[] = ids.map((id, i) => ({ id: `id${i}`, role: "user", text: "x".repeat(2000) }));
+  const msgs: CoreMessageLite[] = ids.map((_id, i) => ({ id: `id${i}`, role: "user", text: "x".repeat(2000) }));
   const state = makeState(ids.map((_, i) => `id${i}`));
   const ranges = [
     makeRange("m00000", "m00001", 100),

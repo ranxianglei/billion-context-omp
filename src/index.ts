@@ -1,10 +1,9 @@
 import type {
   ExtensionAPI,
-  ExtensionContext,
   ExtensionFactory,
   SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent";
-import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
+import type { NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
@@ -17,7 +16,7 @@ import { coreOutToAgentMessages } from "./messages.js";
 import { summarizeRange, selectRangeSpan } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
-import { debug, setDebugEnabled, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
+import { debug, setDebugEnabled, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
@@ -238,10 +237,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const turnKey = lastUserMessageId(entries) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
       if (!alreadyShown) {
-        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
+        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, example));
         if (emergency) {
           logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
         }
@@ -300,7 +299,7 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
   return map;
 }
 
-function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts): AgentMessage {
+function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts, example: string): AgentMessage {
   const rendered = renderNudgeText(nudge, prompts);
   const lines = [rendered.text];
 
@@ -319,6 +318,8 @@ function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts:
     lines.push("");
     lines.push(`Compressed blocks: ${blocks.length} active (${tierStr}) — ${fmt(totalSummary)} summary, ${fmt(totalCompressed)} original compressed. Blocks: ${ids}${extra}.`);
   }
+
+  if (example) lines.push(example);
 
   return {
     role: "user",

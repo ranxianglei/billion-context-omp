@@ -8,20 +8,27 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 // Mock Pi's ExtensionAPI — captures the event handlers the factory registers,
 // so we can invoke them with a fake ExtensionContext and assert the wiring works.
-function captureApi() {
-  const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
-  const api = {
-    on(event: string, handler: (e: any, ctx: any) => any) {
+interface MockApi {
+  tools: Array<{ name: string; [k: string]: unknown }>;
+  commands: Map<string, unknown>;
+  on(event: string, handler: (e: unknown, ctx: unknown) => unknown): void;
+  registerTool(tool: unknown): void;
+  registerCommand(name: string, options: unknown): void;
+}
+function captureApi(): { api: MockApi; handlers: Map<string, Array<(e: unknown, ctx: unknown) => unknown>> } {
+  const handlers = new Map<string, Array<(e: unknown, ctx: unknown) => unknown>>();
+  const api: MockApi = {
+    on(event, handler) {
       const list = handlers.get(event) ?? [];
       list.push(handler);
       handlers.set(event, list);
     },
-    tools: [] as any[],
-    commands: new Map<string, any>(),
-    registerTool(tool: any) {
-      this.tools.push(tool);
+    tools: [],
+    commands: new Map(),
+    registerTool(tool) {
+      this.tools.push(tool as MockApi["tools"][number]);
     },
-    registerCommand(name: string, options: any) {
+    registerCommand(name, options) {
       this.commands.set(name, options);
     },
   };
@@ -46,9 +53,11 @@ function userMsg(id: string, text: string) {
   return { type: "message", id, parentId: null, timestamp: "", message: { role: "user", content: text, timestamp: Date.now() } };
 }
 
+type MockEntry = { type: string; id: string; parentId: null; timestamp: string; message: object };
+
 test("factory registers the compress tool and 4 flat commands", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
+  createAcpExtension()(api as unknown as ExtensionAPI);
 
   assert.ok(api.tools.some((t) => t.name === "compress"), "compress tool registered");
   assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-search", "acp-status"]);
@@ -59,7 +68,7 @@ test("factory registers the compress tool and 4 flat commands", () => {
 
 test("session_before_compact falls back to Pi native compaction on failure", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
+  createAcpExtension()(api as unknown as ExtensionAPI);
   const handler = handlers.get("session_before_compact")![0]!;
   const result = await handler({ preparation: { firstKeptEntryId: "x", tokensBefore: 100 } }, {} as any);
   assert.equal(result, undefined, "no usable state → undefined → Pi falls back to native compaction");
@@ -67,7 +76,7 @@ test("session_before_compact falls back to Pi native compaction on failure", asy
 
 test("before_agent_start appends the ACP system prompt", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
+  createAcpExtension()(api as unknown as ExtensionAPI);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, {});
   const sp = result.systemPrompt.join("\n");
   assert.ok(sp.startsWith("BASE"));
@@ -77,7 +86,7 @@ test("before_agent_start appends the ACP system prompt", () => {
 
 test("context handler tags every message with a ref even when length matches event.messages", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
 
   const entries = [userMsg("e1", "first"), userMsg("e2", "second"), userMsg("e3", "third")];
   const ctx = fakeCtx(entries, "/tmp/nonexistent-omp-it.session.json");
@@ -95,7 +104,7 @@ test("context handler tags every message with a ref even when length matches eve
 
 test("context handler works under omp (oh-my-pi) where sessionManager exposes getBranch() not buildContextEntries()", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
 
   const entries = [userMsg("e1", "first"), userMsg("e2", "second")];
   const ctx = {
@@ -118,7 +127,7 @@ test("context handler works under omp (oh-my-pi) where sessionManager exposes ge
 
 test("omp context handler keeps the current (not-yet-persisted) user message: branch lags event.messages by one", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
   const stateFile = "/tmp/nonexistent-omp-omp-lag.session.json";
   await rm(`${stateFile}.acp-omp.json`, { force: true });
   // Simulate omp's real timing: the branch only holds the PREVIOUS turn's
@@ -155,7 +164,7 @@ test("omp context handler keeps the current (not-yet-persisted) user message: br
 
 test("omp live message keeps the same entry id once persisted (stable refs across turns)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
 
   // Turn 1: branch empty (brand-new session), event carries the first message.
   const turn1Messages = [{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() }];
@@ -197,7 +206,7 @@ test("omp migrates tagged live refs to stable entry ids", async () => {
   const stateFile = "/tmp/nonexistent-omp-identity.session.json";
   await rm(`${stateFile}.acp-omp.json`, { force: true });
   const texts = ["This tagged message must retain its stable persisted identity. ".repeat(130), "filler two ".repeat(400)];
-  let persisted: ReturnType<typeof userMsg>[] = [];
+  let persisted: MockEntry[] = [];
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   const first = await handlers.get("context")![0]!({ type: "context", messages: texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() })) }, ctx);
   const targetRef = first.messages[0].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
@@ -263,7 +272,7 @@ test("omp migrates a live ref after the provider context evicts its prefix", asy
   createAcpExtension({ modelContextLimit: 200_000 })(api);
   const stateFile = "/tmp/nonexistent-omp-shifted-live-ref.session.json";
   await rm(`${stateFile}.acp-omp.json`, { force: true });
-  let persisted: ReturnType<typeof userMsg>[] = [];
+  let persisted: MockEntry[] = [];
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   const first = await handlers.get("context")![0]!({ type: "context", messages: ["A", "B", "C"].map((text) => ({ role: "user", content: text, timestamp: Date.now() })) }, ctx);
   const bRef = first.messages[1].content.find((block: { type: string; text: string }) => block.type === "text").text.match(/m\d{5}/)![0];
@@ -443,7 +452,7 @@ test("omp rebuilds refs after stale live state before status compression", async
   const longText = "This stale live state must be rebuilt against the current persisted branch. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(400);
   const texts = [longText, filler("two"), filler("three"), filler("four"), filler("five"), filler("six"), filler("seven")];
-  let persisted: ReturnType<typeof userMsg>[] = [];
+  let persisted: MockEntry[] = [];
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   const liveMessages = texts.map((text) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }));
   await handlers.get("context")![0]!({ type: "context", messages: liveMessages }, ctx);
@@ -459,7 +468,7 @@ test("omp rebuilds refs after stale live state before status compression", async
 
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension()(api as any);
+  createAcpExtension()(api as unknown as ExtensionAPI);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
   const sp = result.systemPrompt.join("\n");
   // kernel constants inlined (regression guard against reverting to a hardcoded copy)
@@ -478,7 +487,7 @@ test("system prompt sources compression rules from acp-kernel (no hardcoded drif
 
 test("context handler persists state so a second call is idempotent on the same entries", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
 
   const entries = [userMsg("e1", "alpha"), userMsg("e2", "beta")];
   const ctx = fakeCtx(entries, "/tmp/nonexistent-omp-it2.session.json");
@@ -498,7 +507,7 @@ test("omp migrates assistant tool-call refs after prefix eviction", async () => 
   const stateFile = "/tmp/nonexistent-omp-assistant-origin.session.json";
   await rm(`${stateFile}.acp-omp.json`, { force: true });
   const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
-  let persisted: ReturnType<typeof userMsg>[] = [];
+  let persisted: MockEntry[] = [];
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   await handlers.get("context")![0]!({ type: "context", messages: [assistant("call-a")] }, ctx);
   const firstState = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
@@ -521,7 +530,7 @@ test("omp migrates parallel assistant tool-call child refs after prefix eviction
     { type: "toolCall", id: "call-a", name: "read", arguments: { path: "a" } },
     { type: "toolCall", id: "call-b", name: "write", arguments: { path: "b" } },
   ], timestamp: Date.now() });
-  let persisted: ReturnType<typeof userMsg>[] = [];
+  let persisted: MockEntry[] = [];
   const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
   await handlers.get("context")![0]!({ type: "context", messages: [assistant()] }, ctx);
   const first = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
@@ -541,7 +550,7 @@ test("omp reloads assistant origins before migrating after prefix eviction", asy
   const stateFile = "/tmp/nonexistent-omp-assistant-reload.session.json";
   await rm(`${stateFile}.acp-omp.json`, { force: true });
   const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
-  let persisted: ReturnType<typeof userMsg>[] = [];
+  let persisted: MockEntry[] = [];
   const makeCtx = () => ({ ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } });
   const first = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(first.api);
@@ -563,7 +572,7 @@ test("omp preserves stable destination when migrating a colliding live ref", asy
   const stateFile = "/tmp/nonexistent-omp-collision.session.json";
   await rm(`${stateFile}.acp-omp.json`, { force: true });
   const assistant = (id: string) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path: "x" } }], timestamp: Date.now() });
-  let persisted: ReturnType<typeof userMsg>[] = [];
+  let persisted: MockEntry[] = [];
   const makeCtx = () => ({ ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } });
   const first = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(first.api);
@@ -705,7 +714,7 @@ test("omp keeps compression active when persisted and provider tails diverge", a
 
 test("system prompt never includes the ACP_DELEGATE NOTIFICATIONS section (omp defers delegation to oh-my-pi)", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ delegate: true })(api as any);
+  createAcpExtension({ delegate: true })(api as unknown as ExtensionAPI);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
   const sp = result.systemPrompt.join("\n");
   assert.ok(!sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section always omitted (omp provides its own orchestration)");

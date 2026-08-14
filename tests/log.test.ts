@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { tmpdir } from "node:os";
 
 async function freshLog(): Promise<string> {
-  const dir = await mkdir(path.join(tmpdir(), `acp-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`), { recursive: true });
+  const dir = (await mkdir(path.join(tmpdir(), `acp-log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`), { recursive: true }))!;
   return path.join(dir, "acp-omp.log");
 }
 
@@ -77,7 +77,7 @@ test("log lines carry ISO timestamp, level and scope", async () => {
   log.closeLogStream();
   const content = await readFile(file, "utf8");
   const line = content.trim();
-  const prefix = line.split(" [")[0];
+  const prefix = line.split(" [")[0]!;
   assert.ok(!Number.isNaN(Date.parse(prefix)), `timestamp parses as date: ${prefix}`);
   await rm(path.dirname(file), { recursive: true, force: true });
 });

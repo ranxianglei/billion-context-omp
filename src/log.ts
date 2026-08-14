@@ -61,7 +61,9 @@ function writeLine(level: string, scope: string, fields: Record<string, unknown>
 }
 
 export type LogLevel = "error" | "warn" | "info" | "debug";
-
+/** No-op: writeLine uses appendFileSync (stateless per call), so there is no
+ *  stream to close. Kept as a hook in case the backend switches to a
+ *  persistent write stream. Called on session_shutdown. */
 export function closeLogStream(): void {
 }
 

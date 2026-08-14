@@ -136,7 +136,6 @@ test("decompress keeps the block active after a file-mode call", async () => {
   const { decompressTool, ctx } = await setupWithCompressedBlock();
   await decompressTool.execute("tc6", { blockId: "b1" }, undefined, undefined, ctx);
   // Run the status tool to confirm b1 is still folded (active).
-  const { api } = captureApi();
   // re-query via the same ctx's persisted state: simpler to just call decompress
   // again — a second file-mode call should succeed identically (block still there).
   const res2 = await decompressTool.execute("tc7", { blockId: "b1" }, undefined, undefined, ctx);

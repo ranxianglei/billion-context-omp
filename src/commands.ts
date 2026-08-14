@@ -125,7 +125,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
 
   const lines: string[] = [];
 
-  const versionStr = CURRENT_VERSION ? `billion-context-omp@${CURRENT_VERSION}` : "";
+  const versionStr = typeof CURRENT_VERSION !== "undefined" && CURRENT_VERSION ? `billion-context-omp@${CURRENT_VERSION}` : "";
 
   lines.push("╭─────────────────────────────────────────────╮");
   lines.push("│           ACP Context Analysis              │");

@@ -54,9 +54,7 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
  *  arbitrary filesystem locations. */
 const ALLOWED_DIRS = [
   tmpdir(),
-  join(homeDir(), ".cache", "opencode"),
   join(homeDir(), ".cache", "omp"),
-  join(homeDir(), ".cache", "pi"),
 ];
 
 function resolveToFilePath(targetPath: string): string | { error: string } {
@@ -69,7 +67,7 @@ function resolveToFilePath(targetPath: string): string | { error: string } {
     return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
   });
   if (!isAllowed) {
-    return { error: `Error: toFile path must be under ${tmpdir()}, ~/.cache/omp, or ~/.cache/pi. Got: ${targetPath}` };
+    return { error: `Error: toFile path must be under ${tmpdir()} or ~/.cache/omp. Got: ${targetPath}` };
   }
   return resolved;
 }

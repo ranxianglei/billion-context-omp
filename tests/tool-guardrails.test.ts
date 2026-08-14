@@ -7,7 +7,7 @@ import {
   appendTimeoutNotice,
   isBashToolResult,
 } from "../src/tool-guardrails.js";
-import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type { ToolResultEvent } from "@oh-my-pi/pi-coding-agent";
 
 type Content = ToolResultEvent["content"];
 const text = (t: string): Content => [{ type: "text", text: t }];
@@ -54,7 +54,7 @@ test("capToolOutput keeps a complete last line (no mid-line cut)", () => {
   const big = "0123456789\n".repeat(2000);
   const out = capToolOutput(text(big), 100);
   const t = (out![0] as { text: string }).text;
-  const body = t.split("\n\n[ACP guardrail")[0];
+  const body = t.split("\n\n[ACP guardrail")[0]!;
   for (const line of body.split("\n")) {
     assert.ok(line.length === 0 || line.length === 10, "no partial line: " + JSON.stringify(line));
   }
@@ -80,11 +80,11 @@ test("capToolOutput is UTF-8 safe (never splits a multibyte sequence)", () => {
   const big = "中文测试\n".repeat(3000);
   const out = capToolOutput(text(big), 200);
   const t = (out![0] as { text: string }).text;
-  const body = t.split("\n\n[ACP guardrail")[0];
+  const body = t.split("\n\n[ACP guardrail")[0]!;
   const buf = Buffer.from(body, "utf8");
   let i = 0;
   while (i < buf.length) {
-    const b = buf[i];
+    const b = buf[i]!;
     const size = b < 0x80 ? 1 : b < 0xe0 ? 2 : b < 0xf0 ? 3 : 4;
     assert.ok(i + size <= buf.length, "no truncated multibyte sequence at byte " + i);
     i += size;
@@ -121,7 +121,7 @@ test("appendTimeoutNotice adds a new text part when content has no text part", (
   const img = { type: "image", source: { media_type: "image/png", data: "AAAA" } } as Content[number];
   const out = appendTimeoutNotice([img], 30);
   assert.equal(out.length, 2);
-  assert.equal(out[1].type, "text");
+  assert.equal(out[1]!.type, "text");
 });
 
 test("isBashToolResult narrows by toolName and exposes bash details (vendored guard, host-agnostic)", () => {
@@ -130,6 +130,6 @@ test("isBashToolResult narrows by toolName and exposes bash details (vendored gu
   assert.equal(isBashToolResult(bash), true);
   assert.equal(isBashToolResult(other), false);
   if (isBashToolResult(bash)) {
-    assert.equal(bash.details?.fullOutputPath, "/tmp/x");
+    assert.equal((bash.details as Record<string, unknown> | undefined)?.fullOutputPath, "/tmp/x");
   }
 });

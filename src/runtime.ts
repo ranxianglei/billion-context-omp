@@ -11,7 +11,7 @@ import {
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
-import { logInfo, logWarn } from "./log.js";
+import { logInfo } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 
 type SessionEntrySource = {
