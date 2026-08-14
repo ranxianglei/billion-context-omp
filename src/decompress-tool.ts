@@ -5,7 +5,8 @@ import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import { writeFile, mkdir } from "node:fs/promises";
-import { resolve, relative, isAbsolute, join } from "node:path";
+import { realpathSync } from "node:fs";
+import { resolve, relative, isAbsolute, join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { homeDir } from "./home.js";
 
@@ -24,7 +25,7 @@ const MESSAGE_INLINE_THRESHOLD = 2000;
 const DecompressParams = type({
   blockId: type("string").describe('Block id to restore, e.g. "b5". Also accepts a message ref (UUID) from search_context results — resolves to the owning block automatically.'),
   "full?": type("boolean").describe("If true, recurse through all nested blocks to original messages. Default: false (restores one tier up — nested block summaries shown, direct messages in full)."),
-  "toFile?": type("string").describe("Write restored content to this file path (must be under /tmp, ~/.cache/omp, or ~/.cache/pi) instead of the default auto-generated path. Block stays compressed."),
+  "toFile?": type("string").describe("Write restored content to this file path (must be under /tmp or ~/.cache/omp) instead of the default auto-generated path. Block stays compressed."),
   "inline?": type("boolean").describe("If true, return content inline as this tool's result (appends to context). Default: false — content is written to an auto-generated file to avoid context bloat. Only set true when the content is small or you accept the context cost."),
 });
 
@@ -50,20 +51,37 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
   };
 }
 
-/** Allowed roots for toFile paths. Keeps user-supplied paths from escaping to
- *  arbitrary filesystem locations. */
-const ALLOWED_DIRS = [
-  tmpdir(),
-  join(homeDir(), ".cache", "omp"),
-];
+/** Allowed roots for toFile paths, resolved with realpath to prevent
+ *  symlink-based escapes. Falls back to the literal path if the dir does
+ *  not exist yet (e.g. ~/.cache/omp on a fresh machine). */
+const ALLOWED_DIRS = [tmpdir(), join(homeDir(), ".cache", "omp")].map((dir) => {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return resolve(dir);
+  }
+});
 
 function resolveToFilePath(targetPath: string): string | { error: string } {
   const expanded = targetPath.startsWith("~/")
     ? join(homeDir(), targetPath.slice(2))
     : targetPath;
   const resolved = resolve(expanded);
+  // Resolve the real path (following symlinks) so a symlink chain like
+  // /tmp/evil -> /etc cannot escape the allowed roots.
+  let realResolved: string;
+  try {
+    realResolved = realpathSync(resolved);
+  } catch {
+    try {
+      const realParent = realpathSync(dirname(resolved));
+      realResolved = join(realParent, basename(resolved));
+    } catch {
+      return { error: `Error: toFile directory does not exist or is inaccessible. Got: ${targetPath}` };
+    }
+  }
   const isAllowed = ALLOWED_DIRS.some((dir) => {
-    const rel = relative(dir, resolved);
+    const rel = relative(dir, realResolved);
     return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
   });
   if (!isAllowed) {

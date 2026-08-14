@@ -19,7 +19,10 @@ export interface UserAcpConfig {
   compress?: CompressConfig;
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
-  acknowledgePromptsRisk?: boolean;
+  /** Model for /compact summaries, as "provider:modelId" (e.g.
+   *  "zhipuai:glm-5.2"). Shortcut for compress.compressModel — normalized
+   *  into the nested path at load time. */
+  compressModel?: string;
 }
 
 /** Read global + project acp-omp.json, project overrides global. Returns {} on any
@@ -68,11 +71,16 @@ function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
 /** Merge user config onto an adapter config: user config wins for the keys it
  *  sets. Used at session_start to apply runtime-discovered config. */
 export function applyUserConfig(adapter: AdapterConfig, user: UserAcpConfig): AdapterConfig {
-  return {
+  const { compressModel, ...rest } = user;
+  const merged: AdapterConfig = {
     ...adapter,
-    ...user,
+    ...rest,
     coreOverrides: adapter.coreOverrides,
     protectedTools: adapter.protectedTools,
     preserveRecentMessages: adapter.preserveRecentMessages,
   };
+  if (compressModel && !merged.compress?.compressModel) {
+    merged.compress = { ...merged.compress, compressModel };
+  }
+  return merged;
 }

@@ -48,80 +48,80 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   if (ranges.length === 0) return "No ranges provided.";
   const releaseLock = await runtime.acquireLock(ctx.sessionManager.getSessionId());
   try {
-  const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
-  const config = runtime.configFor(ctx);
-  const estimatedTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState));
-  const realUsage = ctx.getContextUsage?.();
-  const turn = runtime.core.processTurn({
-    messages: coreMessages,
-    state: initialState,
-    config,
-    tokenCount: realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : estimatedTokens,
-  });
-  const state = turn.state;
-  const messages = turn.messages;
-  const beforeTokens = estimateTokens(messages, collectCoveredMessageIds(state));
-  const summaryMaxChars = args.summaryMaxChars;
-  const topLevelTopic = args.topic;
+    const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
+    const config = runtime.configFor(ctx);
+    const estimatedTokens = estimateTokens(coreMessages, collectCoveredMessageIds(initialState));
+    const realUsage = ctx.getContextUsage?.();
+    const turn = runtime.core.processTurn({
+      messages: coreMessages,
+      state: initialState,
+      config,
+      tokenCount: realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : estimatedTokens,
+    });
+    const state = turn.state;
+    const messages = turn.messages;
+    const beforeTokens = estimateTokens(messages, collectCoveredMessageIds(state));
+    const summaryMaxChars = args.summaryMaxChars;
+    const topLevelTopic = args.topic;
 
-  debug.event("compress-in", {
-    sid: ctx.sessionManager.getSessionId(),
-    ranges: ranges.length,
-    spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, summary: r.summary, topic: r.topic ?? topLevelTopic ?? null })),
-    blocksBefore: state.blocks.length,
-    activeBefore: state.blocks.filter((b) => b.active).length,
-    beforeMsgCount: messages.length,
-    beforeTokens,
-  });
+    debug.event("compress-in", {
+      sid: ctx.sessionManager.getSessionId(),
+      ranges: ranges.length,
+      spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, summary: r.summary, topic: r.topic ?? topLevelTopic ?? null })),
+      blocksBefore: state.blocks.length,
+      activeBefore: state.blocks.filter((b) => b.active).length,
+      beforeMsgCount: messages.length,
+      beforeTokens,
+    });
 
-  const applied = runtime.core.applyCompression({
-    ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
-    messages,
-    state,
-    config,
-  });
-  await runtime.save(applied.state, ctx);
-  const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
+    const applied = runtime.core.applyCompression({
+      ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
+      messages,
+      state,
+      config,
+    });
+    await runtime.save(applied.state, ctx);
+    const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
 
-  const afterTokens = Math.max(0, beforeTokens - tokensCompressed);
+    const afterTokens = Math.max(0, beforeTokens - tokensCompressed);
 
-  const newBlocks = applied.state.blocks.slice(-blocksCreated);
-  debug.event("compress-out", {
-    sid: ctx.sessionManager.getSessionId(),
-    blocksCreated,
-    tokensCompressed,
-    beforeTokens,
-    afterTokens,
-    afterMsgCount: applied.state.blocks.length,
-    errors: errors.length,
-    errorDetails: errors.slice(0, 3),
-    blocksAfter: applied.state.blocks.length,
-    activeAfter: applied.state.blocks.filter((b) => b.active).length,
-    newBlocks: newBlocks.map((b) => ({ blockId: b.blockId, tier: b.tier, summaryLen: b.summary.length, directMsgCount: b.directMessageIds.length, effectiveMsgCount: b.effectiveMessageIds.length, summary: b.summary })),
-  });
+    const newBlocks = applied.state.blocks.slice(-blocksCreated);
+    debug.event("compress-out", {
+      sid: ctx.sessionManager.getSessionId(),
+      blocksCreated,
+      tokensCompressed,
+      beforeTokens,
+      afterTokens,
+      afterMsgCount: applied.state.blocks.length,
+      errors: errors.length,
+      errorDetails: errors.slice(0, 3),
+      blocksAfter: applied.state.blocks.length,
+      activeAfter: applied.state.blocks.filter((b) => b.active).length,
+      newBlocks: newBlocks.map((b) => ({ blockId: b.blockId, tier: b.tier, summaryLen: b.summary.length, directMsgCount: b.directMessageIds.length, effectiveMsgCount: b.effectiveMessageIds.length, summary: b.summary })),
+    });
 
-  logInfo("compress", {
-    sid: ctx.sessionManager.getSessionId(),
-    event: "applied",
-    ranges: ranges.length,
-    blocksCreated,
-    tokensCompressed,
-    beforeTokens,
-    afterTokens,
-    warnings: warnings.length,
-    errors: errors.length,
-    newBlockIds: newBlocks.map((b) => b.blockId),
-  });
-  if (errors.length > 0) {
-    logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
-  }
-  if (warnings.length > 0) {
-    logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
-  }
+    logInfo("compress", {
+      sid: ctx.sessionManager.getSessionId(),
+      event: "applied",
+      ranges: ranges.length,
+      blocksCreated,
+      tokensCompressed,
+      beforeTokens,
+      afterTokens,
+      warnings: warnings.length,
+      errors: errors.length,
+      newBlockIds: newBlocks.map((b) => b.blockId),
+    });
+    if (errors.length > 0) {
+      logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
+    }
+    if (warnings.length > 0) {
+      logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
+    }
 
-  const lines = [`▣ ACP | ${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens (~${formatTokens(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
-  if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
-  if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
-  return lines.join("\n");
+    const lines = [`▣ ACP | ${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens (~${formatTokens(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+    if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
+    if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
+    return lines.join("\n");
   } finally { releaseLock(); }
 }

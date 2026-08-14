@@ -86,7 +86,10 @@ export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
 export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
 
 /** Resolve delegate config from the adapter, handling the boolean shorthand
- *  and the legacy flat `displayUsage` alias. */
+ *  and the legacy flat `displayUsage` alias.
+ *
+ *  Forward-compatible: not yet wired (AGENTS.md §7 — delegates deferred).
+ *  Retained so future wiring can consume it without re-deriving the logic. */
 export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; displayUsage: "merged" | "separate" } {
   const d = adapter.delegate;
   if (typeof d === "object" && d !== null) {

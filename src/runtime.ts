@@ -193,8 +193,8 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
     let release!: () => void;
-    const next = new Promise<void>((resolve) => { release = () => { locks.delete(sid); resolve(); }; });
-    locks.set(sid, prev.then(() => next));
+    const next = new Promise<void>((resolve) => { release = resolve; });
+    locks.set(sid, next);
     await prev;
     return release;
   }

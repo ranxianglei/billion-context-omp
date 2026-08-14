@@ -13,7 +13,7 @@ type AnyMessage = {
   summary?: string;
 };
 
-const REF_TAG_SOURCE = "(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1,5}\\])";
+const REF_TAG_SOURCE = "(?:\x3cacp\\s[^>]*\x3em\\d+\x3c/acp\x3e|\\[m\\d+\\])";
 const REF_TAG = new RegExp(`^${REF_TAG_SOURCE}\\s?\\n?`);
 const TRAILING_REF_TAG = new RegExp(`\\n*${REF_TAG_SOURCE}\\s*$`);
 
