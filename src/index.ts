@@ -12,7 +12,7 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages } from "./messages.js";
+import { coreOutToAgentMessages, viableRanges } from "./messages.js";
 import { summarizeMessages } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -246,6 +246,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // re-fired at 65.7K and 86.4K, both swallowed, nothing until 106K+).
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       {
+        // Hide degenerate ranges (<200 tokens) before rendering: they cannot
+        // carry the 50-char minimum summary and turn "compress all ranges in
+        // one call" into an atomic-rejection trap.
+        turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";

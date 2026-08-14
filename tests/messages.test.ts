@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity, streamToCoreMessages, findCompressCalls } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity, streamToCoreMessages, findCompressCalls, viableRanges } from "../src/messages.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 
@@ -622,4 +622,10 @@ test("spanFingerprint binds the exact split piece at a parallel-toolcall boundar
   assert.notEqual(fpA, fpB, "two different pieces must fingerprint differently");
   const fps = rangeFingerprints([{ startRef: "m00002", endRef: "m00004" }], core, byRef, []);
   assert.equal(fps[0], fpA, `range starting at m00002 must bind pieceA exactly (got ${fps[0]} want ${fpA})`);
+});
+
+test("viableRanges drops isolated sub-summary-floor ranges, keeps the rest", () => {
+  const mk = (tokens: number) => ({ startRef: "x", endRef: "y", tokens });
+  const out = viableRanges([mk(16), mk(199), mk(200), mk(29551)]);
+  assert.deepEqual(out.map((r) => r.tokens), [200, 29551]);
 });
