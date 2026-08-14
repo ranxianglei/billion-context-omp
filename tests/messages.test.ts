@@ -241,7 +241,7 @@ test("entriesToCoreMessages still skips compaction and model_change", () => {
   const entries: SessionEntry[] = [
     msgEntry("a", user("alpha")),
     { type: "compaction", id: "x", parentId: null, timestamp: "", summary: "s", firstKeptEntryId: "a", tokensBefore: 0 } as SessionEntry,
-    { type: "model_change", id: "y", parentId: null, timestamp: "", provider: "p", modelId: "m" } as SessionEntry,
+    { type: "model_change", id: "y", parentId: null, timestamp: "", provider: "p", modelId: "m" } as unknown as SessionEntry,
     msgEntry("b", user("beta")),
   ];
   const core = entriesToCoreMessages(entries);

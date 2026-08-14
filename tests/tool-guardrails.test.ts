@@ -68,7 +68,7 @@ test("capToolOutput mentions the saved full-output path for bash-style results",
 });
 
 test("capToolOutput preserves non-text (image) content alongside truncated text", () => {
-  const img = { type: "image", source: { media_type: "image/png", data: "AAAA" } } as Content[number];
+  const img = { type: "image", source: { media_type: "image/png", data: "AAAA" } } as unknown as Content[number];
   const content: Content = [{ type: "text", text: "x".repeat(10_000) }, img];
   const out = capToolOutput(content, 500);
   assert.ok(out);
@@ -118,7 +118,7 @@ test("appendTimeoutNotice suggests a larger timeout that scales with the kill ti
 });
 
 test("appendTimeoutNotice adds a new text part when content has no text part", () => {
-  const img = { type: "image", source: { media_type: "image/png", data: "AAAA" } } as Content[number];
+  const img = { type: "image", source: { media_type: "image/png", data: "AAAA" } } as unknown as Content[number];
   const out = appendTimeoutNotice([img], 30);
   assert.equal(out.length, 2);
   assert.equal(out[1]!.type, "text");
