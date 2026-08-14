@@ -97,9 +97,11 @@ function migrateTaggedRef(state: CompressionState, message: AgentMessage, stable
 function migrateLiveRefs(state: CompressionState, liveId: string, stableId: string): void {
   const rootId = liveId.split("#", 1)[0]!;
   if (!rootId.startsWith("live-")) return;
+  const remap: Record<string, string> = {};
   for (const [rawId, ref] of Object.entries(state.messageRefs.byRaw)) {
     if (rawId !== rootId && !rawId.startsWith(`${rootId}#`)) continue;
     const stableRawId = `${stableId}${rawId.slice(rootId.length)}`;
+    remap[rawId] = stableRawId;
     if (state.messageRefs.byRaw[stableRawId] === undefined) {
       state.messageRefs.byRaw[stableRawId] = ref;
       state.messageRefs.byRef[ref] = stableRawId;
@@ -107,6 +109,12 @@ function migrateLiveRefs(state: CompressionState, liveId: string, stableId: stri
       delete state.messageRefs.byRef[ref];
     }
     delete state.messageRefs.byRaw[rawId];
+  }
+  if (Object.keys(remap).length > 0) {
+    for (const block of state.blocks) {
+      block.directMessageIds = block.directMessageIds.map((id) => remap[id] ?? id);
+      block.effectiveMessageIds = block.effectiveMessageIds.map((id) => remap[id] ?? id);
+    }
   }
 }
 

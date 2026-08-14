@@ -724,3 +724,42 @@ test("system prompt never includes the ACP_DELEGATE NOTIFICATIONS section (omp d
   assert.ok(!sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section always omitted (omp provides its own orchestration)");
   assert.ok(sp.includes("ACP TAGS"), "core ACP prompt present");
 });
+
+test("omp keeps compression block active when live messages become persisted (block ID migration)", async (t) => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, coreOverrides: { preserveRecentTokens: 0 } })(api as unknown as ExtensionAPI);
+  const dir = await mkdtemp(join(tmpdir(), "omp-block-migrate-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateFile = join(dir, "session.json");
+
+  const target = "This large message will be compressed while still live. ".repeat(130);
+  const filler = (n: string) => `filler ${n} `.repeat(200);
+
+  let persisted: MockEntry[] = [];
+  const ctx = { ...fakeCtx(persisted, stateFile), sessionManager: { getBranch: () => persisted, getSessionId: () => "test-session", getSessionFile: () => stateFile } };
+
+  const liveMsgs = [
+    { role: "user", content: [{ type: "text", text: filler("first") }], timestamp: Date.now() },
+    { role: "user", content: [{ type: "text", text: target }], timestamp: Date.now() },
+    ...["a", "b", "c", "d", "e"].map((n) => ({ role: "user", content: [{ type: "text", text: filler(n) }], timestamp: Date.now() })),
+  ];
+  const first = await handlers.get("context")![0]!({ type: "context", messages: liveMsgs }, ctx);
+  const targetRef = first.messages[1]!.content.find((b: { type: string; text: string }) => b.type === "text")!.text.match(/m\d{5}/)![0];
+
+  const compressTool = api.tools.find((tool: { name: string }) => tool.name === "compress")!;
+  const compressRes = await compressTool.execute!("tc1", { content: [{ startId: targetRef, endId: targetRef, summary: "Summary of the large compressed live message that was created before persistence." }] }, undefined, undefined, ctx);
+  assert.match(compressRes.content[0]!.text, /1 block/, compressRes.content[0]!.text);
+
+  persisted = [
+    userMsg("e1", filler("first")),
+    userMsg("e2", target),
+    ...["a", "b", "c", "d", "e"].map((n, i) => userMsg(`e${i + 3}`, filler(n))),
+  ];
+  await handlers.get("context")![0]!({ type: "context", messages: first.messages }, ctx);
+
+  const saved = JSON.parse(await readFile(`${stateFile}.acp-omp.json`, "utf8"));
+  const activeBlocks = saved.blocks.filter((b: { active: boolean }) => b.active);
+  assert.equal(activeBlocks.length, 1, "block must stay active after live\u2192persisted migration");
+  assert.ok(activeBlocks[0]!.effectiveMessageIds.includes("e2"), "block IDs migrated to stable persisted ID");
+  assert.ok(!activeBlocks[0]!.effectiveMessageIds.some((id: string) => id.startsWith("live-")), "no stale live-* IDs in block");
+});
