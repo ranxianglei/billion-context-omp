@@ -14,8 +14,17 @@ const RangeSpec = type({
   startId: type("string").describe('Message ref, e.g. "m00005" (from the acp tag), or a block id "b3".'),
   endId: type("string").describe("Inclusive end ref. Must be at or after startId."),
   summary: type("string").describe("Complete technical summary replacing all content in range. Keep only essential details (conclusions, file paths, decisions, exact values, etc.)."),
-  "topic?": type("string").describe("Short label (3-5 words) for THIS range, e.g. 'Auth System Exploration'. Omit to use top-level topic. When compressing multiple unrelated ranges, give each its own topic for better quality."),
+  "topic?": type("string").describe("Short label (3-5 words) for THIS range, e.g. 'Auth System Exploration'. Recommended for every range; omit to use top-level topic."),
 });
+
+/** Label shown for a block when the model did not pass a topic: first
+ *  sentence-ish slice of the summary (≤30 chars). Decorative only — never
+ *  blocks compression. */
+export function topicFallback(summary: string): string {
+  const first = summary.split(/[.\n]/)[0] ?? "";
+  const t = first.trim().replace(/^["'`]+/, "").trim();
+  return t.length <= 30 ? t : `${t.slice(0, 30).trimEnd()}…`;
+}
 
 const CompressParams = type({
   "topic?": type("string").describe("Fallback topic for entries without their own. Omit when each content entry specifies its own topic."),
@@ -30,7 +39,7 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
     name: "compress",
     label: "Compress",
     description:
-      "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ startId, endId, summary }] }). Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) — each entry gets its own summary.",
+      "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ topic: 'Session Opener', startId, endId, summary }] }) — a short topic label is recommended but optional. Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) — each entry gets its own summary.",
     parameters: CompressParams,
     async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       let result: string;

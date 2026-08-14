@@ -2,6 +2,7 @@ import type { ExtensionCommandContext, RegisteredCommand } from "@oh-my-pi/pi-co
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
+import { topicFallback } from "./compress-tool.js";
 import { formatCompactTokens } from "./footer-status.js";
 import { logThrow } from "./log.js";
 
@@ -183,7 +184,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     lines.push("");
     lines.push(`Blocks: ${activeBlocksList.length} active / ${totalBlocksList.length} total (${fmtTokens(state.stats.tokensCompressed)} tokens compressed)`);
     for (const b of activeBlocksList) {
-      const topic = b.topic ? `: ${b.topic}` : "";
+      const topic = b.topic ? `: ${b.topic}` : `: ${topicFallback(b.summary || "")}`;
       const summaryTok = defaultCountTokens(b.summary || "");
       const origTok = b.compressedTokens > 0 ? b.compressedTokens : summaryTok;
       lines.push(`  [${b.blockId}] T${b.tier} ${fmtTokens(origTok)}\u2192${fmtTokens(summaryTok)}${topic}`);
