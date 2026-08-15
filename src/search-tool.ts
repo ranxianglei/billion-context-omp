@@ -17,6 +17,8 @@ export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof Searc
     return {
         name: "search_context",
         label: "Search Context",
+        // First-class top-level tool (not an xd:// device) — see compress-tool.ts; issue #21.
+        loadMode: "essential",
         description:
             "Search compressed blocks AND historical messages by keyword. Use to cheaply locate detail before decompressing. Returns ranked results with ref, size, preview, and the decompress command to retrieve full content.",
         parameters: SearchParams,

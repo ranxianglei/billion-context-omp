@@ -35,6 +35,8 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
   return {
     name: "decompress",
     label: "Decompress",
+    // First-class top-level tool (not an xd:// device) — see compress-tool.ts; issue #21.
+    loadMode: "essential",
     description:
       "Restore a previously compressed block's content, or a single message by its ref. The block/message stays compressed — context and cache prefix are not disrupted. BLOCK decompress (blockId b5) defaults to writing a file (blocks can be large); use the read tool to access it, or inline:true to return inline. MESSAGE decompress (blockId = a message ref from search_context) returns that ONE message's original text — defaults to inline since a single message is usually small; oversized messages go to a file. full:true recurses through nested block tiers (block mode only). You can pass a block id (b5) OR a message ref (e.g. m00123) from search_context results.",
     parameters: DecompressParams,

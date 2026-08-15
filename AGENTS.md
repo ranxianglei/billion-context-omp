@@ -55,7 +55,7 @@ billion-context-omp/
 │   ├── tokens.ts             # Token estimation utilities
 │   ├── log.ts                # Debug logging (~/.omp/acp-omp.log)
 │   └── update.ts             # Auto-update: checks npm, auto-installs latest
-├── tests/                    # 189 tests
+├── tests/                    # 190 tests
 ├── tsup.config.ts
 └── package.json
 ```
@@ -74,6 +74,7 @@ billion-context-omp/
 10. **`complete` import** — omp moved it to `@oh-my-pi/pi-ai` root (no `/compat` subpath). `auto-compress.ts` imports `complete` from there.
 11. **`homeDir()` helper** — `src/home.ts`. omp's host runs under Bun, whose `os.homedir()` ignores `HOME`/`USERPROFILE` env. All home-dir reads in src go through `homeDir()` (respects env first) for cross-platform correctness.
 12. **Tests run under Bun** — omp host packages import the Bun runtime, which Node cannot resolve. Use `bun test` (supports `node:test`/`node:assert` imports). Tests hardcode `.omp` (matching billion-context-pi's hardcoded-`.pi` pattern) rather than importing `CONFIG_DIR_NAME` (which would drag omp's module graph into the test process).
+13. **ACP tools are `loadMode: "essential"`** — all four (compress/decompress/search_context/acp_status) declare `loadMode: "essential"` so the host keeps them top-level first-class function tools. Extension tools default to `"discoverable"`, which mounts them under `xd://` (invoked via `write` with JSON-in-JSON); every doc in this extension (system prompt, nudge, tool descriptions) uses direct-call syntax, and the device protocol caused invocation failures (issue #21). Legacy `xd://compress` device calls still replay (src/messages.ts).
 
 ## 3. Development Standards
 

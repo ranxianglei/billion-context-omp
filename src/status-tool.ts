@@ -20,6 +20,8 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
   return {
     name: "acp_status",
     label: "ACP Status",
+    // First-class top-level tool (not an xd:// device) — see compress-tool.ts; issue #21.
+    loadMode: "essential",
     description:
       "Context status: overview, compressed blocks, or uncompressed ranges/messages. No args = overview + totals + compressible ranges. scope:'uncompressed' + view:'messages' for per-message listing. scope:'compressed' for block drilldown.",
     parameters: StatusParams,
