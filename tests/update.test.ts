@@ -10,7 +10,7 @@ function withFetchGuard<T>(fn: () => Promise<T>): Promise<T> {
   const original = globalThis.fetch;
   globalThis.fetch = (() => {
     throw new Error("fetch must not be called when auto-update is disabled");
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   return fn().finally(() => {
     globalThis.fetch = original;
   });

@@ -156,7 +156,9 @@ export async function checkForUpdate(
     const lastCheck = await readLastCheck();
     if (now - lastCheck < CHECK_INTERVAL_MS) return;
 
-    await writeLastCheck(now);
+    // Written only after the check completes so a failed fetch (network
+    // error, non-200, timeout) can retry on the next session instead of
+    // burning the throttle interval.
 
     const runtimeVersion = await getRuntimeVersion();
 
@@ -169,6 +171,7 @@ export async function checkForUpdate(
       return;
     }
     const data = (await res.json()) as { version?: string };
+    await writeLastCheck(now);
     const latest = data.version;
     if (!latest) return;
 

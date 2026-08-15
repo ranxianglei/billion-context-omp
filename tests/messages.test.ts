@@ -479,8 +479,8 @@ test("streamToCoreMessages assigns position ids p1..pN in order", () => {
   const cores = streamToCoreMessages(stream);
   assert.equal(cores.length, 3);
   assert.deepEqual(cores.map((c) => c.id), ["p1", "p2", "p3"]);
-  assert.equal(cores[0].text, "first question");
-  assert.equal(cores[2].text, "second question");
+  assert.equal(cores[0]!.text, "first question");
+  assert.equal(cores[2]!.text, "second question");
 });
 
 test("streamToCoreMessages splits multi tool-call assistants into stable position ids", () => {
@@ -521,11 +521,11 @@ test("findCompressCalls extracts ranges from assistant compress tool calls", () 
       }) },
     ],
   };
-  const calls = findCompressCalls(assistant as SessionMessageEntry["message"]);
+  const calls = findCompressCalls(assistant as unknown as SessionMessageEntry["message"]);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].id, "call_1");
-  assert.equal(calls[0].ranges.length, 1);
-  const r = calls[0].ranges[0]!;
+  assert.equal(calls[0]!.id, "call_1");
+  assert.equal(calls[0]!.ranges.length, 1);
+  const r = calls[0]!.ranges[0]!;
   assert.equal(r.compressCallId, "call_1");
   assert.equal(r.startRef, "m00003");
   assert.equal(r.endRef, "m00009");
@@ -546,10 +546,10 @@ test("findCompressCalls recognizes omp xd://compress write-device invocations", 
       } },
     ],
   };
-  const calls = findCompressCalls(assistant as SessionMessageEntry["message"]);
+  const calls = findCompressCalls(assistant as unknown as SessionMessageEntry["message"]);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].id, "call_xd1");
-  const r = calls[0].ranges[0]!;
+  assert.equal(calls[0]!.id, "call_xd1");
+  const r = calls[0]!.ranges[0]!;
   assert.equal(r.startRef, "m00002");
   assert.equal(r.endRef, "m00004");
   assert.equal(r.summary, "xd device compress call summary for the replay test.");
@@ -564,9 +564,9 @@ test("findCompressCalls recognizes omp xd://compress write-device invocations", 
       } },
     ],
   };
-  const calls2 = findCompressCalls(assistantObj as SessionMessageEntry["message"]);
+  const calls2 = findCompressCalls(assistantObj as unknown as SessionMessageEntry["message"]);
   assert.equal(calls2.length, 1);
-  assert.equal(calls2[0].ranges[0]!.startRef, "m00001");
+  assert.equal(calls2[0]!.ranges[0]!.startRef, "m00001");
 
   // other xd:// devices and plain file writes are not compress calls
   const other = {
@@ -577,7 +577,7 @@ test("findCompressCalls recognizes omp xd://compress write-device invocations", 
       { type: "toolCall", id: "w3", name: "write", arguments: { path: "xd://compress", content: "not json {" } },
     ],
   };
-  assert.equal(findCompressCalls(other as SessionMessageEntry["message"]).length, 0);
+  assert.equal(findCompressCalls(other as unknown as SessionMessageEntry["message"]).length, 0);
 });
 
 test("findCompressCalls accepts already-object arguments and skips empty ranges", () => {
@@ -589,10 +589,10 @@ test("findCompressCalls accepts already-object arguments and skips empty ranges"
       } },
     ],
   };
-  const calls = findCompressCalls(assistant as SessionMessageEntry["message"]);
+  const calls = findCompressCalls(assistant as unknown as SessionMessageEntry["message"]);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].ranges.length, 1);
-  assert.equal(calls[0].ranges[0]!.startRef, "m00001");
+  assert.equal(calls[0]!.ranges.length, 1);
+  assert.equal(calls[0]!.ranges[0]!.startRef, "m00001");
 
   const none = findCompressCalls({ role: "user", content: [{ type: "text", text: "hi" }] } as SessionMessageEntry["message"]);
   assert.equal(none.length, 0);

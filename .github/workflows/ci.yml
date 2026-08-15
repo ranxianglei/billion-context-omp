@@ -26,6 +26,7 @@ jobs:
           bun-version: 1.3.14
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run typecheck:tests
       - run: npm test
       - run: npm run build
 

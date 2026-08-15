@@ -12,8 +12,9 @@ import {
   formatSlice,
   parseSummary,
   buildSummaryPrompt,
+  positionalRefState,
 } from "../src/auto-compress.ts";
-import { defaultPrompts } from "acp-kernel";
+import { defaultPrompts, type CoreMessage } from "acp-kernel";
 
 type CoreMessageLite = { id: string; role: string; text?: string; toolName?: string };
 type StateLite = { messageRefs: { byRaw: Record<string, string> } };
@@ -198,4 +199,19 @@ test("buildSummaryPrompt reflects acp-omp.json prompt overrides (not a hard-code
   const prompt = buildSummaryPrompt(custom);
   assert.ok(prompt.includes("CUSTOM-PHILOSOPHY-MARKER"));
   assert.ok(prompt.includes("CUSTOM-RULES-MARKER"));
+});
+
+test("positionalRefState maps slice p-ids onto mNNNNN refs (split pieces share the base ref)", () => {
+  const slice = [
+    { id: "p1", role: "user", text: "first" },
+    { id: "p2#tc1", role: "assistant", toolName: "bash", text: "cmd" },
+    { id: "p3", role: "user", text: "third" },
+  ] as unknown as CoreMessage[];
+  const state = positionalRefState(slice);
+  assert.equal(state.messageRefs.byRaw["p1"], "m00001");
+  assert.equal(state.messageRefs.byRaw["p2#tc1"], "m00002");
+  assert.equal(state.messageRefs.byRaw["p3"], "m00003");
+  const rendered = formatSlice(slice, state);
+  assert.ok(rendered.includes("[m00002]"), rendered);
+  assert.ok(!rendered.includes("[p2"), rendered);
 });

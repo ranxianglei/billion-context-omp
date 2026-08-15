@@ -44,12 +44,12 @@ test("long agentic turn: nudge re-fires every +growthFloor, never at same token"
   const r0 = runtime.foldStream(ctx, stream);
   const t0 = runtime.core.processTurn({ messages: r0.coreMessages, state: r0.state, config, tokenCount: 45000 });
   runtime.commitFoldState(ctx, t0.state);
-  assert.equal(t0.nudge?.shouldInject, false, t0.nudge?.reason);
+  assert.equal(t0.nudge?.shouldInject, false, t0.nudge?.reason ?? "");
 
   // t1 (+20001): first fire (this is the injection the model ignores).
   const t1 = runtime.core.processTurn({ messages: r0.coreMessages, state: t0.state, config, tokenCount: 65001 });
   runtime.commitFoldState(ctx, t1.state);
-  assert.equal(t1.nudge?.shouldInject, true, t1.nudge?.reason);
+  assert.equal(t1.nudge?.shouldInject, true, t1.nudge?.reason ?? "");
 
   // t1b (same token, next context event in the same turn): kernel cadence
   // prevents a duplicate — this is what makes per-turn dedup unnecessary.

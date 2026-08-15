@@ -186,7 +186,7 @@ test("decompress restores multi tool-call assistant messages (split refs carry #
 });
 
 test("decompress survives repeated compress → decompress cycles (state not lost)", async () => {
-  const { api, handlers, decompressTool, ctx, stream, fire } = await setupWithCompressedBlock();
+  const { api, decompressTool, ctx, stream, fire } = await setupWithCompressedBlock();
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
 
   let res = await decompressTool.execute("tc2", { blockId: "b1", inline: true }, undefined, undefined, ctx);

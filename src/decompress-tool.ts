@@ -158,7 +158,7 @@ async function handleMessageRef(
     return `Message ${ref} (${role}, block ${ownerBlockId}, ${text.length} chars) restored inline:\n\n${text}`;
   }
 
-  const targetPath = args.toFile ? resolveToFilePath(args.toFile) : autoFilePath(`msg-${ref}`);
+  const targetPath = args.toFile ? resolveToFilePath(args.toFile) : autoFilePath(`msg-${ref.replace(/[^a-zA-Z0-9_-]/g, "-")}`);
   if (typeof targetPath === "object" && "error" in targetPath) {
     logError("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message-path-rejected", ref, toFile: args.toFile });
     return targetPath.error;

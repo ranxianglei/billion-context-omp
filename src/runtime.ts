@@ -121,6 +121,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       slots.set(sid, slot);
     }
     const ids = stream.map(messageIdentity);
+    // O(N) identity rescan per context event is a deliberate design
+    // trade-off: it makes the fold self-healing (rewinds, retries, and host
+    // rewrites are detected from scratch) without persisted sidecar state.
     let lcp = 0;
     while (lcp < Math.min(ids.length, slot.identities.length) && ids[lcp] === slot.identities[lcp]) lcp++;
     if (lcp < slot.foldedLen) {

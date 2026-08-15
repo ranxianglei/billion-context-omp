@@ -90,7 +90,7 @@ Rich status display for the user:
 ╭─────────────────────────────────────────────╮
 │           ACP Context Analysis              │
 ╰─────────────────────────────────────────────╯
- billion-context-omp@0.1.1
+ billion-context-omp@0.1.5
 
  Context: 6% (57k / 1.0M)
 

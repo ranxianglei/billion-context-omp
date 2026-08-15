@@ -19,6 +19,9 @@ export interface UserAcpConfig {
   compress?: CompressConfig;
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
+  /** User has read and accepted the prompt-overwrite risk notice; suppresses
+   *  the startup warning about custom prompts overriding kernel defaults. */
+  acknowledgePromptsRisk?: boolean;
   /** Model for /compact summaries, as "provider:modelId" (e.g.
    *  "zhipuai:glm-5.2"). Shortcut for compress.compressModel — normalized
    *  into the nested path at load time. */

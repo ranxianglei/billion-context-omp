@@ -286,7 +286,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     return { messages: rebuilt };
     } catch (e) {
       logThrow("context", e, { sid, phase: "transform" });
-      throw e;
+      // The host keeps its own structuredClone of the originals, so falling
+      // back to the untransformed view is safe: a broken fold must never
+      // kill the turn.
+      return { messages: event.messages };
     } finally {
       release();
     }

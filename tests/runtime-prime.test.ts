@@ -6,24 +6,23 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 const FILLER = "filler ".repeat(1200);
 
+const asAgent = (m: unknown): AgentMessage => m as AgentMessage;
+
 function makeStream(withCompression: boolean): AgentMessage[] {
   const stream: AgentMessage[] = [
-    { role: "user", content: [{ type: "text", text: "kick " + FILLER }] },
+    asAgent({ role: "user", content: [{ type: "text", text: "kick " + FILLER }] }),
   ];
   if (withCompression) {
     stream.push(
-      {
-        role: "assistant",
-        content: [{ type: "toolCall", id: "call_c1", name: "compress", arguments: JSON.stringify({ content: [{ startId: "m00001", endId: "m00001", summary: "Opener consumed by compression for the test harness run. ".repeat(4) }] }) }],
-      },
-      { role: "tool", content: [{ type: "toolResult", id: "call_c1", content: [{ type: "text", text: "Compressed 1 range — 1.2k tokens saved" }] }] },
+      asAgent({ role: "assistant", content: [{ type: "toolCall", id: "call_c1", name: "compress", arguments: JSON.stringify({ content: [{ startId: "m00001", endId: "m00001", summary: "Opener consumed by compression for the test harness run. ".repeat(4) }] }) }] }),
+      asAgent({ role: "tool", content: [{ type: "toolResult", id: "call_c1", content: [{ type: "text", text: "Compressed 1 range — 1.2k tokens saved" }] }] }),
     );
   }
-  stream.push({ role: "assistant", content: [{ type: "text", text: "done" }] });
+  stream.push(asAgent({ role: "assistant", content: [{ type: "text", text: "done" }] }));
   for (let i = 0; i < 6; i++) {
     stream.push(
-      { role: "user", content: [{ type: "text", text: `turn ${i} ` + FILLER }] },
-      { role: "assistant", content: [{ type: "text", text: `ack ${i}` }] },
+      asAgent({ role: "user", content: [{ type: "text", text: `turn ${i} ` + FILLER }] }),
+      asAgent({ role: "assistant", content: [{ type: "text", text: `ack ${i}` }] }),
     );
   }
   return stream;

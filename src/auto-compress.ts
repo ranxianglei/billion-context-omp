@@ -116,6 +116,28 @@ export function formatSlice(slice: CoreMessage[], state: CompressionState): stri
   return out;
 }
 
+/** Positional ids (p1..pN) map onto the session's m-refs 1:1 because the
+ *  slice is built from the oldest end of the session — the same numbering
+ *  assignRefs derives. Feeding this state to formatSlice makes /compact
+ *  summaries quote the same mNNNNN refs the fold view shows, instead of raw
+ *  p-ids the model never sees. Split pieces (p2#tc1) share the base
+ *  message's ref. */
+export function positionalRefState(slice: CoreMessage[]): CompressionState {
+  const byRaw: Record<string, string> = {};
+  const byRef: Record<string, string> = {};
+  for (const m of slice) {
+    const base = m.id.split("#")[0]!;
+    const n = /^p(\d+)$/.exec(base)?.[1];
+    if (!n) continue;
+    const ref = `m${n.padStart(5, "0")}`;
+    byRaw[m.id] = ref;
+    byRaw[base] = ref;
+    byRef[ref] = base;
+  }
+  return { ...createInitialState(), messageRefs: { byRaw, byRef } };
+}
+
+
 export function parseSummary(text: string): string | null {
   const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
   try {
@@ -198,7 +220,7 @@ export async function summarizeMessages(
     if (custom) instructions += `\n\nUser instructions for this compaction: ${custom}`;
     const userText =
       `ENTIRE conversation to compress (${slice.length} messages, ~${tokens} tokens). Compress it:\n\n` +
-      formatSlice(slice, createInitialState());
+      formatSlice(slice, positionalRefState(slice));
     const response = await run(
       model,
       { systemPrompt: [instructions], messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
