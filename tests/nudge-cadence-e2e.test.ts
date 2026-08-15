@@ -71,6 +71,51 @@ test("context handler: ignored nudge re-delivers after +growthFloor within the s
   assert.equal(nudgeCount(r2), 1, "second nudge at +20K in the SAME user turn (was swallowed by per-turn dedup)");
 });
 
+test("over-limit nudge does not re-inject on back-to-back LLM calls (issue #22)", async () => {
+  const { api, handlers } = capture();
+  createAcpExtension({} as never)(api as unknown as ExtensionAPI);
+
+  const ctx = {
+    mode: "rpc",
+    hasUI: false,
+    cwd: "/tmp",
+    ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+    model: { contextWindow: 200_000 }, // over-limit at 150K, emergency at 190K
+    getContextUsage: () => ({ tokens: 0, percent: 0, contextWindow: 200_000 }),
+    sessionManager: { getSessionId: () => "issue22-e2e", getSessionFile: () => "/tmp/issue22-e2e.json" },
+  } as unknown as ExtensionContext;
+
+  // ~146K sent view (73% — below the 75% over-limit line).
+  const stream: any[] = [msg("user", "start " + MID)];
+  for (let i = 1; i <= 32; i++) stream.push(msg(i % 2 ? "assistant" : "user", `f${i} ` + MID));
+  const fire = () => handlers.get("context")![0]!({ type: "context", messages: [...stream] }, ctx);
+  const nudgeCount = (r: any) => r.messages.filter((m: any) => m.role === "user" && JSON.stringify(m.content).includes("compress(")).length;
+  const grow = (tag: string, n: number) => { for (let i = 0; i < n; i++) stream.push(msg(i % 2 ? "assistant" : "user", `${tag}${i} ` + MID)); };
+
+  await fire(); // baseline at 73% — no nudge
+  grow("a", 1);
+  const r1 = (await fire()) as { messages: any[] };
+  assert.equal(nudgeCount(r1), 1, "first over-limit nudge injects");
+  // Model ignores the nudge — same turn, next LLM calls, +4.5K growth each.
+  // Kernel over-limit branch has no cadence; the adapter re-applies its own
+  // growth floor so an ignored nudge does not re-inject every LLM call.
+  grow("b", 1);
+  const r2 = (await fire()) as { messages: any[] };
+  assert.equal(nudgeCount(r2), 0, "no re-inject at +4.5K growth");
+  grow("c", 1);
+  const r3 = (await fire()) as { messages: any[] };
+  assert.equal(nudgeCount(r3), 0, "still suppressed at +9K growth");
+  // +22.5K more crosses the kernel's growth floor since the last SHOWN nudge.
+  grow("d", 5);
+  const r4 = (await fire()) as { messages: any[] };
+  assert.equal(nudgeCount(r4), 1, "re-injects after +growthFloor growth (~91%, pre-emergency)");
+  // Emergency (>=95%) is exempt from the cadence guard: the overflow reminder
+  // must keep firing on every call while usage stays critical.
+  grow("e", 2);
+  const r5 = (await fire()) as { messages: any[] };
+  assert.equal(nudgeCount(r5), 1, "emergency re-injects despite small growth (~96%)");
+});
+
 test("nudge never lists degenerate ranges that would fail the summary floor atomically", async () => {
   const { api, handlers } = capture();
   createAcpExtension({ compress: { nudgeGrowthTokens: 20000 } } as never)(api as unknown as ExtensionAPI);

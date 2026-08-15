@@ -160,6 +160,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     }
     debug.event("context-in-raw", { sid, msgs: input.length });
     const { state, coreMessages, originalById, streamLen } = runtime.foldStream(ctx, input);
+    // Nudge stamps as of the last context event. The pipeline never mutates
+    // the pre-turn nudge object (nudgeNode spreads into a fresh one), so
+    // these values drive the over-limit cadence guard below (issue #22).
+    const preTurnNudgeBaseline = state.nudge.lastPerMessageNudgeTokens;
+    const preTurnNudgeShownTokens = state.nudge.lastNudgeShownTokens;
+    const preTurnNudgeShownByTier = state.nudge.lastShownByTier;
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
       // Nudge arbitration MUST run on the SENT-VIEW scale (chars/4 estimate
@@ -234,42 +240,60 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // the stream (not the tree) is our single source of truth, so no tail
     // salvage is needed.
     const debugOn = debug.enabled;
+    let nudgeInjected = false;
 
     if (turn.nudge?.shouldInject) {
-      // Two independent channels for the nudge:
-      //  1. CONTEXT injection (always on): the nudge is appended to the
-      //     messages returned to the LLM so the model sees it and compresses.
-      //     This is a per-turn append — the next context event rebuilds the
-      //     array from scratch, so it does NOT permanently pollute context.
-      //  2. TERMINAL echo (debug only): when debug is on, also print the exact
-      //     text via ctx.ui.notify so the user can observe what is being
-      //     injected while debugging. The model never sees terminal output.
-      // Dedup is the KERNEL's job, not ours: its cadence stamps
-      // (lastShownByTier / lastNudgeShownTokens, written by processTurn on
-      // every shouldInject) guarantee the same tokenCount cannot fire twice,
-      // and allow a re-fire exactly after +growthFloor of growth. A per-turn
-      // dedup here would only ever swallow LEGAL re-nudges of a long agentic
-      // turn (an ignored nudge re-firing after another +20K) while the stamp
-      // is still consumed — silencing the model exactly when it should be
-      // reminded again (observed live: one 3h turn, nudge at 45K, kernel
-      // re-fired at 65.7K and 86.4K, both swallowed, nothing until 106K+).
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
-      {
-        // Hide degenerate ranges (<200 tokens) before rendering: they cannot
-        // carry the 50-char minimum summary and turn "compress all ranges in
-        // one call" into an atomic-rejection trap.
-        turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
-        const rendered = renderNudgeText(turn.nudge, runtime.prompts);
-        const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
-        const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
-        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, example));
-        if (emergency) {
-          logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
+      // The kernel's over-limit branch (usage >= maxContextLimitPct) applies no
+      // growth cadence — it re-fires on every context event, i.e. every LLM
+      // call of an agentic turn (issue #22: the nudge injects twice in a row).
+      // Re-apply the kernel's own floor at the injection point: suppress unless
+      // the sent view grew >= growthFloor since the last nudge the model
+      // actually saw. Every legal re-nudge still passes: growth-path re-fires
+      // already satisfy the kernel's per-tier floor, and a compress or
+      // epoch-shrink reset zeroes the stamps (fresh epoch → prevShown 0).
+      // Emergency stays unguarded: while usage >= emergencyThresholdPct the
+      // overflow reminder must keep firing on every call.
+      const epochReset = turn.state.nudge.lastPerMessageNudgeTokens !== preTurnNudgeBaseline;
+      const prevShown = epochReset ? 0 : preTurnNudgeShownTokens;
+      const cadenceFloor = turn.nudge.breakdown?.growthFloor ?? 0;
+      const suppressed = !emergency && prevShown > 0 && tokenCount - prevShown < cadenceFloor;
+      if (suppressed) {
+        // processTurn already stamped lastNudgeShownTokens/lastShownByTier with
+        // this suppressed event — roll both back so the stamps keep pointing
+        // at the last nudge the model actually saw. turn.state IS the committed
+        // slot state (commitFoldState stores the reference), so this lands.
+        turn.state.nudge.lastNudgeShownTokens = prevShown;
+        turn.state.nudge.lastShownByTier = preTurnNudgeShownByTier;
+        logInfo("nudge", { sid, event: "cadence-suppressed", growth: tokenCount - prevShown, floor: cadenceFloor, pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
+        debug.event("nudge-suppressed", { sid, growth: tokenCount - prevShown, floor: cadenceFloor, pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
+      } else {
+        nudgeInjected = true;
+        // Two independent channels for the nudge:
+        //  1. CONTEXT injection (always on): the nudge is appended to the
+        //     messages returned to the LLM so the model sees it and compresses.
+        //     This is a per-turn append — the next context event rebuilds the
+        //     array from scratch, so it does NOT permanently pollute context.
+        //  2. TERMINAL echo (debug only): when debug is on, also print the exact
+        //     text via ctx.ui.notify so the user can observe what is being
+        //     injected while debugging. The model never sees terminal output.
+        {
+          // Hide degenerate ranges (<200 tokens) before rendering: they cannot
+          // carry the 50-char minimum summary and turn "compress all ranges in
+          // one call" into an atomic-rejection trap.
+          turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
+          const rendered = renderNudgeText(turn.nudge, runtime.prompts);
+          const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
+          const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
+          rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, example));
+          if (emergency) {
+            logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
+          }
+          if (debugOn && ctx.hasUI) {
+            ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
+          }
+          debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, text: rendered.text + example });
         }
-        if (debugOn && ctx.hasUI) {
-          ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
-        }
-        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, text: rendered.text + example });
       }
     }
 
@@ -277,7 +301,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // tag applied, so there is no meaningful "no change" case to short-circuit.
     dumpContextMessages(rebuilt, {
       sid,
-      injected: turn.nudge?.shouldInject ?? false,
+      injected: nudgeInjected,
       emergency: turn.nudge?.breakdown?.emergencyOverride === 1,
     });
     // Also check for updates here (not only on session_start): resuming a
