@@ -7,23 +7,25 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 const FILLER = "filler ".repeat(1200);
 
 function makeStream(withCompression: boolean): AgentMessage[] {
+  const assistantBase = { api: "anthropic" as const, provider: "anthropic" as const, model: "test-model", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop" as const, timestamp: Date.now() };
   const stream: AgentMessage[] = [
-    { role: "user", content: [{ type: "text", text: "kick " + FILLER }] },
+    { role: "user", content: [{ type: "text", text: "kick " + FILLER }], timestamp: Date.now() },
   ];
   if (withCompression) {
     stream.push(
       {
         role: "assistant",
-        content: [{ type: "toolCall", id: "call_c1", name: "compress", arguments: JSON.stringify({ content: [{ startId: "m00001", endId: "m00001", summary: "Opener consumed by compression for the test harness run. ".repeat(4) }] }) }],
+        ...assistantBase,
+        content: [{ type: "toolCall", id: "call_c1", name: "compress", arguments: { content: [{ startId: "m00001", endId: "m00001", summary: "Opener consumed by compression for the test harness run. ".repeat(4) }] } as Record<string, unknown> }],
       },
-      { role: "tool", content: [{ type: "toolResult", id: "call_c1", content: [{ type: "text", text: "Compressed 1 range — 1.2k tokens saved" }] }] },
+      { role: "toolResult", content: [{ type: "text", text: "Compressed 1 range — 1.2k tokens saved" }], toolName: "compress", toolCallId: "call_c1", isError: false, timestamp: Date.now() },
     );
   }
-  stream.push({ role: "assistant", content: [{ type: "text", text: "done" }] });
+  stream.push({ role: "assistant", ...assistantBase, content: [{ type: "text", text: "done" }] });
   for (let i = 0; i < 6; i++) {
     stream.push(
-      { role: "user", content: [{ type: "text", text: `turn ${i} ` + FILLER }] },
-      { role: "assistant", content: [{ type: "text", text: `ack ${i}` }] },
+      { role: "user", content: [{ type: "text", text: `turn ${i} ` + FILLER }], timestamp: Date.now() },
+      { role: "assistant", ...assistantBase, content: [{ type: "text", text: `ack ${i}` }] },
     );
   }
   return stream;

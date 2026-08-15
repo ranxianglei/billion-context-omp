@@ -19,6 +19,10 @@ export interface UserAcpConfig {
   compress?: CompressConfig;
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
+  /** Acknowledge the risks of user-supplied compression prompts (system-prompt
+   *  injection surface). Only honored from the GLOBAL config — a project-local
+   *  acp-omp.json under agent control cannot pre-acknowledge its own risk gate. */
+  acknowledgePromptsRisk?: boolean;
   /** Model for /compact summaries, as "provider:modelId" (e.g.
    *  "zhipuai:glm-5.2"). Shortcut for compress.compressModel — normalized
    *  into the nested path at load time. */

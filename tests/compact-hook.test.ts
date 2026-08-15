@@ -172,3 +172,24 @@ test("/compact falls back when no model resolves", async () => {
   assert.equal(result, undefined, "unresolvable configured model → native fallback");
   assert.equal(llmCalls, callsBefore, "no LLM call when model does not resolve");
 });
+
+test("summarizeMessages renders stable mNNNNN refs when fold refs are provided (issue #14 Minor1)", async () => {
+  const { summarizeMessages } = await import("../src/auto-compress.js");
+  const stream = [
+    { role: "user", content: [{ type: "text", text: "hello world message body" }], timestamp: Date.now() },
+  ];
+  const prompts = { compressPhilosophy: "P", howToCompressRules: "R" } as never;
+  const result = await summarizeMessages(compactCtx() as never, stream as never, prompts, undefined, {
+    completeFn: (async (_m: unknown, payload: { systemPrompt: string[]; messages: { content: { type: string; text: string }[] }[] }) => {
+      captured = {
+        systemPrompt: payload.systemPrompt,
+        userText: payload.messages[0]!.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"),
+      };
+      return { content: [{ type: "text", text: '{"summary": "FULL DIGEST COVERING EVERYTHING"}' }] };
+    }) as never,
+    messageRefs: { byRaw: { p1: "m00001" }, byRef: { m00001: "p1" } },
+  });
+  assert.ok(result, "summarize succeeds");
+  assert.match(captured!.userText, /\[m00001\] user: hello world/, "stable m-ref rendered");
+  assert.doesNotMatch(captured!.userText, /\[p1\]/, "raw position id must not be shown");
+});

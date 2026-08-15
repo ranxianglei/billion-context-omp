@@ -12,7 +12,9 @@ const PACKAGE_NAME = "billion-context-omp";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
-const THROTTLE_FILE = join(homeDir(), CONFIG_DIR_NAME, ".billion-context-omp-update-check");
+// Lazy on purpose: homeDir() at import time would freeze HOME before tests
+// (or embedders) can redirect it; resolve the path per call instead.
+const throttleFile = (): string => join(homeDir(), CONFIG_DIR_NAME, ".billion-context-omp-update-check");
 
 // Guards against concurrent checks: the context event fires on every LLM call,
 // so several can race past the throttle read before any writes the timestamp.
@@ -34,7 +36,7 @@ function isNewer(latest: string, current: string): boolean {
 
 async function readLastCheck(): Promise<number> {
   try {
-    const data = await readFile(THROTTLE_FILE, "utf-8");
+    const data = await readFile(throttleFile(), "utf-8");
     return parseInt(data.trim(), 10) || 0;
   } catch {
     return 0;
@@ -43,8 +45,8 @@ async function readLastCheck(): Promise<number> {
 
 async function writeLastCheck(timestamp: number): Promise<void> {
   try {
-    await mkdir(dirname(THROTTLE_FILE), { recursive: true });
-    await writeFile(THROTTLE_FILE, String(timestamp), "utf-8");
+    await mkdir(dirname(throttleFile()), { recursive: true });
+    await writeFile(throttleFile(), String(timestamp), "utf-8");
   } catch {
     // best-effort
   }
@@ -156,14 +158,18 @@ export async function checkForUpdate(
     const lastCheck = await readLastCheck();
     if (now - lastCheck < CHECK_INTERVAL_MS) return;
 
-    await writeLastCheck(now);
-
     const runtimeVersion = await getRuntimeVersion();
 
     const res = await fetch(REGISTRY_URL, {
       signal: AbortSignal.timeout(5000),
       headers: { Accept: "application/json" },
     });
+    // Stamp the throttle only once the request has actually gone out and
+    // resolved: writing it before the fetch burns the whole 3-minute window
+    // on a failed attempt (issue #14 Minor3). If the fetch throws (network
+    // down) no stamp is written — the next context event retries, bounded by
+    // the 5s timeout above.
+    await writeLastCheck(now);
     if (!res.ok) {
       logWarn("update", { event: "check-http", status: res.status });
       return;
