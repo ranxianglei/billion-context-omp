@@ -109,16 +109,22 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const nudge = turn.nudge;
   const bd = nudge?.contextBreakdown;
   const limit = config.modelContextLimit;
-  // displayTotal must reflect the REAL context size (what the footer shows),
-  // not just the sum of message-text categories. contextBreakdown only
-  // classifies message text via chars/4 and never sees pi's system prompt
-  // or tool schemas, so summing its fields undercounts. Split the gap into
-  // the real system prompt (measured) and the rest (tool schemas + the
-  // inevitable chars/4-vs-real-tokenizer drift).
+  // Two different token accountings, honestly labeled:
+  //  - Session accounting (omp getContextUsage): the append-only session tree
+  //    INCLUDING compressed originals. It never shrinks — our pruning is a
+  //    per-request transform view omp cannot see. The footer reads this.
+  //  - Sent view: what actually reaches the LLM after compression (kernel's
+  //    chars/4 classification over the pruned projection + measured system
+  //    prompt). This is the number compression controls.
+  // The old panel subtracted one from the other and dumped the difference
+  // into a fake "Framework" bucket — on a well-compressed session that read
+  // as "Framework 390K / 430K total" (90%!), which is just the compressed
+  // originals still sitting in the session tree.
   const classified = bd ? bd.system + bd.tool + bd.summaries + bd.code + bd.text : 0;
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
-  const framework = bd ? Math.max(0, tokenCount - classified - systemPromptTokens) : 0;
+  const sentTotal = classified + systemPromptTokens;
+  const sessionOnly = Math.max(0, tokenCount - sentTotal);
   const displayTotal = tokenCount;
   const displayPct = limit > 0 ? Math.round((displayTotal / limit) * 100) : 0;
   const activeBlocksList = state.blocks.filter((b) => b.active);
@@ -133,32 +139,34 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   lines.push("╰─────────────────────────────────────────────╯");
   if (versionStr) lines.push(versionStr);
   lines.push("");
-  lines.push(`Context: ${displayPct}% (${fmtTokens(displayTotal)} / ${fmtTokens(limit)})`);
+  lines.push(`Context (session accounting): ${displayPct}% (${fmtTokens(displayTotal)} / ${fmtTokens(limit)})`);
 
   if (nudge && bd) {
     const growth = bd.growth;
     if (growth > 0 && displayTotal > 0) {
       lines.push(`Growth: +${fmtTokens(growth)} since last nudge`);
     }
-    if (displayTotal > 0) {
-      lines.push("");
-      lines.push("Token Breakdown:");
+    lines.push("");
+    lines.push(`Sent to LLM (after compression): ${fmtTokens(sentTotal)}`);
+    if (sessionOnly > 0) {
+      lines.push(`Session-only (compressed originals + host overhead): ${fmtTokens(sessionOnly)} — pruned from every request; the footer counts it`);
+    }
+    lines.push("");
+    lines.push("Token Breakdown (sent view):");
 
-      const categories: Array<{ label: string; value: number }> = [
-        { label: "Tool", value: bd.tool },
-        { label: "SysPrompt", value: systemPromptTokens },
-        { label: "Framework", value: framework },
-        { label: "Text", value: bd.text },
-        { label: "Code", value: bd.code },
-        { label: "Summaries", value: bd.summaries },
-      ];
+    const categories: Array<{ label: string; value: number }> = [
+      { label: "Tool", value: bd.tool },
+      { label: "SysPrompt", value: systemPromptTokens },
+      { label: "Text", value: bd.text },
+      { label: "Code", value: bd.code },
+      { label: "Summaries", value: bd.summaries },
+    ];
 
-      for (const cat of categories) {
-        if (cat.value <= 0) continue;
-        const pct = displayTotal > 0 ? Math.round((cat.value / displayTotal) * 100) : 0;
-        const b = bar(cat.value, displayTotal);
-        lines.push(`  ${cat.label.padEnd(10)} ${b} ${String(pct).padStart(3)}%  ${fmtTokens(cat.value)}`);
-      }
+    for (const cat of categories) {
+      if (cat.value <= 0) continue;
+      const pct = sentTotal > 0 ? Math.round((cat.value / sentTotal) * 100) : 0;
+      const b = bar(cat.value, sentTotal);
+      lines.push(`  ${cat.label.padEnd(10)} ${b} ${String(pct).padStart(3)}%  ${fmtTokens(cat.value)}`);
     }
   }
 
