@@ -200,6 +200,12 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return { state: slot.state, coreMessages, originalById, streamLen: stream.length };
   }
 
+  /** Read the fold slot. Safe WITHOUT the lock only because this returns
+   *  `Promise.resolve` over the live slot — fully synchronous, no await
+   *  between read and use, so no concurrent fold can interleave. The
+   *  read-only tools (decompress/search/acp_status) rely on this invariant;
+   *  if this ever becomes genuinely async, take `acquireLock` in every
+   *  caller or here (issue #32). */
   function stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }> {
     const slot = slotFor(sidOf(ctx));
     return Promise.resolve({ state: slot.state, coreMessages: slot.coreMessages });

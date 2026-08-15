@@ -90,7 +90,7 @@ Rich status display for the user:
 ╭─────────────────────────────────────────────╮
 │           ACP Context Analysis              │
 ╰─────────────────────────────────────────────╯
- billion-context-omp@0.2.0
+ billion-context-omp@0.1.7
 
  Context (session accounting, host footer scale): 9% (93k / 1.0M) — never shrinks; includes compressed originals
 

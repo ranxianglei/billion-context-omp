@@ -1,10 +1,30 @@
-import { mkdirSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import * as path from "node:path";
 import { homeDir } from "./home.js";
 import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 import { debug } from "./log.js";
 
 const counters: Record<string, number> = {};
+
+/** Keep only the newest MAX_FILES_PER_PREFIX dumps per file prefix. Debug
+ *  dumps are fire-and-forget diagnostics; without rotation a long-lived
+ *  debug session grows ~/.omp/acp-omp-dumps/ without bound (issue #32). */
+const MAX_FILES_PER_PREFIX = 200;
+
+function pruneDumps(dir: string, prefixTest: (f: string) => boolean, seqOf: (f: string) => number): void {
+  try {
+    const files = readdirSync(dir).filter(prefixTest).map((f) => ({ f, n: seqOf(f) })).filter((x) => !Number.isNaN(x.n));
+    if (files.length <= MAX_FILES_PER_PREFIX) return;
+    files.sort((a, b) => a.n - b.n);
+    const excess = files.slice(0, files.length - MAX_FILES_PER_PREFIX);
+    for (const { f } of excess) {
+      try { unlinkSync(path.join(dir, f)); } catch { /* best effort */ }
+    }
+    debug.event("dump-pruned", { dir, removed: excess.length });
+  } catch {
+    /* best effort — rotation failure must never break the dump path */
+  }
+}
 
 export function dumpDir(): string {
   return path.join(homeDir(), CONFIG_DIR_NAME, "acp-omp-dumps");
@@ -53,6 +73,7 @@ export function dumpContextMessages(messages: unknown[], meta: DumpMeta): string
       }),
     );
     debug.event("context-out-dump", { path: fullPath, msgs: messages.length });
+    pruneDumps(dir, (f) => /^\d{4}\.json$/.test(f), (f) => parseInt(f, 10));
     return fullPath;
   } catch (e) {
     debug.event("context-out-dump-error", { error: e instanceof Error ? e.message : String(e) });
@@ -156,6 +177,7 @@ export function dumpProviderRequest(payload: unknown, meta: { sid: string }): st
       }),
     );
     debug.event("provider-request-dump", { path: fullPath, ...summary });
+    pruneDumps(dir, (f) => /^req_\d+\.json$/.test(f), (f) => parseInt(f.slice(4, -5), 10));
     return fullPath;
   } catch (e) {
     debug.event("provider-request-dump-error", { error: e instanceof Error ? e.message : String(e) });

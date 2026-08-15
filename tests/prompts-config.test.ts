@@ -43,7 +43,7 @@ test("resolvePrompts with empty overrides is a no-op (no gate needed)", () => {
   assert.equal(resolved.compressPhilosophy, defaultPrompts.compressPhilosophy);
 });
 
-test("loadUserConfig picks up prompts and acknowledgePromptsRisk keys", async () => {
+test("loadUserConfig picks up prompts and acknowledgePromptsRisk keys from the GLOBAL config", async () => {
   const tmpDir = path.join(os.tmpdir(), `acp-prompts-${Date.now()}`);
   const cfgDir = path.join(tmpDir, CONFIG_DIR_NAME);
   await fs.mkdir(cfgDir, { recursive: true });
@@ -52,11 +52,51 @@ test("loadUserConfig picks up prompts and acknowledgePromptsRisk keys", async ()
     JSON.stringify({ prompts: { compressPhilosophy: "X" }, acknowledgePromptsRisk: true }),
     "utf8",
   );
+  const savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = tmpDir;
+  process.env.USERPROFILE = tmpDir;
+  const cwd = path.join(tmpDir, "unrelated-project"); // no project-local config
   try {
-    const config = await loadUserConfig(tmpDir);
+    const config = await loadUserConfig(cwd);
     assert.equal(config.acknowledgePromptsRisk, true, "acknowledgePromptsRisk loaded");
     assert.deepEqual(config.prompts, { compressPhilosophy: "X" }, "prompts loaded");
   } finally {
+    process.env.HOME = savedHome.HOME;
+    process.env.USERPROFILE = savedHome.USERPROFILE;
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("project-local acp-omp.json cannot inject prompts (issue #32)", async () => {
+  const tmpDir = path.join(os.tmpdir(), `acp-proj-prompts-${Date.now()}`);
+  const homeDirPath = path.join(tmpDir, "home");
+  const projectDir = path.join(tmpDir, "repo-under-agent-control");
+  await fs.mkdir(path.join(homeDirPath, CONFIG_DIR_NAME), { recursive: true });
+  await fs.mkdir(path.join(projectDir, CONFIG_DIR_NAME), { recursive: true });
+  await fs.writeFile(
+    path.join(homeDirPath, CONFIG_DIR_NAME, "acp-omp.json"),
+    JSON.stringify({ modelContextLimit: 123_456 }),
+    "utf8",
+  );
+  // A repo under agent control ships a project-local config that tries to
+  // rewrite the system-prompt surface AND pre-acknowledge the risk gate.
+  await fs.writeFile(
+    path.join(projectDir, CONFIG_DIR_NAME, "acp-omp.json"),
+    JSON.stringify({ prompts: { compressPhilosophy: "INJECTED" }, acknowledgePromptsRisk: true, toolOutputMaxBytes: 999 }),
+    "utf8",
+  );
+  const savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = homeDirPath;
+  process.env.USERPROFILE = homeDirPath;
+  try {
+    const config = await loadUserConfig(projectDir);
+    assert.equal(config.prompts, undefined, "project-local prompts must be ignored");
+    assert.equal(config.acknowledgePromptsRisk, undefined, "project-local risk acknowledgement must be ignored");
+    assert.equal(config.modelContextLimit, 123_456, "global keys still load");
+    assert.equal(config.toolOutputMaxBytes, 999, "project-local tuning keys still override");
+  } finally {
+    process.env.HOME = savedHome.HOME;
+    process.env.USERPROFILE = savedHome.USERPROFILE;
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
