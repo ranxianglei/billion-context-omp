@@ -499,3 +499,46 @@ test("mixed message/block boundary batch keeps fingerprint index alignment on re
   const status = (await statusTool.execute("tc-mixed", {}, undefined, undefined, ctx)).content[0].text;
   assert.ok(status.includes("b3"), `both ranges of the mixed call must replay (b1, b2, b3):\n${status}`);
 });
+
+// Issue #32 item 2b: a mid-stream content mutation (host rewriting a
+// system-reminder or any message before the tail) breaks the identity LCP
+// below the folded length → full re-fold. The contract: the fold rebuilds
+// deterministically, refs are re-assigned by position, and in-stream
+// compress calls STILL replay (their spans sit before the mutation point,
+// so the boundary fingerprints match) — no block loss, no double-apply.
+test("mid-stream mutation triggers re-fold and the in-stream compress call still replays", async () => {
+  const cap = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(cap.api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+
+  const fillers = (s: string) => [...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} ${s} `.repeat(400)))];
+  const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...fillers("v1")];
+  const r1 = await cap.handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  const start = refOf(r1.messages[0]);
+  const end = refOf(r1.messages[1]);
+
+  const call = assistantCompressCall("call_mut", [{ startId: start, endId: end, summary: "Both large messages were compressed before the mid-stream mutation." }]);
+  const applied = [...stream, call, toolResult("call_mut", "compressed 1 block")];
+  await cap.handlers.get("context")![0]!({ type: "context", messages: applied }, ctx);
+
+  // Mutate a filler that sits AFTER the covered range but BEFORE the tail:
+  // the LCP check fails at that position → freshSlot → full re-fold →
+  // the compress call replays from scratch on the new projection.
+  const mutated = [applied[0], applied[1], ...applied.slice(2).map((m: any, i: number) =>
+    i === 2 ? { ...m, content: [{ type: "text", text: m.content[0].text.replaceAll("filler c v1", "filler c REWRITTEN v2") }] } : m,
+  ), userMsg("post-mutation turn")];
+  const r3 = await cap.handlers.get("context")![0]!({ type: "context", messages: mutated }, ctx);
+
+  const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
+  assert.ok(!texts.includes("second large enough"), "covered original stays pruned after re-fold (call replayed)");
+  assert.ok(texts.includes("compressed before the mid-stream mutation"), "summary visible via the replayed in-stream call");
+  assert.ok(texts.includes("filler c REWRITTEN v2"), "mutated content present in the rebuilt view");
+  assert.ok(!texts.includes("filler c v1"), "pre-mutation content replaced");
+  assert.ok(texts.includes("post-mutation turn"), "tail intact");
+  assert.equal(refOf(r3.messages[0]), start, "positional refs re-assigned identically for the unchanged prefix");
+
+  const statusTool = cap.api.tools.find((t) => t.name === "acp_status")!;
+  const status = await statusTool.execute("tc-verify-mutation", {}, undefined, undefined, ctx);
+  const statusText = (status as { content: Array<{ type: string; text: string }> }).content[0].text;
+  assert.ok(/1 active/.test(statusText), `exactly one active block after re-fold:\n${statusText}`);
+});

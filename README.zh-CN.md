@@ -90,7 +90,7 @@ omp 内置的 `/compact` 被拦截，替换为 ACP 模型摘要式 compaction，
 ╭─────────────────────────────────────────────╮
 │           ACP Context Analysis              │
 ╰─────────────────────────────────────────────╯
- billion-context-omp@0.2.0
+ billion-context-omp@0.1.7
 
  Context (session accounting, host footer scale): 9% (93k / 1.0M) — never shrinks; includes compressed originals
 

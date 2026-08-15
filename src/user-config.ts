@@ -26,17 +26,24 @@ export interface UserAcpConfig {
 }
 
 /** Read global + project acp-omp.json, project overrides global. Returns {} on any
- *  error (missing file, bad JSON) — never throws. */
+ *  error (missing file, bad JSON) — never throws.
+ *
+ *  `prompts` / `acknowledgePromptsRisk` are accepted from the GLOBAL config
+ *  only (issue #32): a repo under agent control can ship a project-local
+ *  .omp/acp-omp.json, and letting it inject arbitrary system-prompt text
+ *  every turn is a prompt-injection surface. Project-local files may tune
+ *  everything else (thresholds, models, timeouts) but not the prompts. */
 export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
   const home = homeDir();
   const merged: UserAcpConfig = {};
   for (const base of [join(home, CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
     const file = join(base, "acp-omp.json");
+    const allowPrompts = base.startsWith(home);
     try {
       const raw = await fs.readFile(file, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object") {
-        Object.assign(merged, pickKnown(parsed));
+        Object.assign(merged, pickKnown(parsed, allowPrompts));
         debug.event("config-loaded", { file });
       }
     } catch (e) {
@@ -60,12 +67,16 @@ const KNOWN = new Set([
   "prompts", "acknowledgePromptsRisk",
 ]);
 
-function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
-  const out: UserAcpConfig = {};
+function pickKnown(parsed: Record<string, unknown>, allowPrompts: boolean): UserAcpConfig {
+  const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(parsed)) {
     if (KNOWN.has(k)) (out as Record<string, unknown>)[k] = v;
   }
-  return out;
+  if (!allowPrompts) {
+    delete out.prompts;
+    delete out.acknowledgePromptsRisk;
+  }
+  return out as UserAcpConfig;
 }
 
 /** Merge user config onto an adapter config: user config wins for the keys it

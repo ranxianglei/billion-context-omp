@@ -35,13 +35,12 @@ billion-context-omp/
 ├── src/
 │   ├── index.ts              # Extension entry: wire hooks, tools, commands
 │   ├── config.ts             # AdapterConfig: wraps kernel defaultConfig
-│   ├── runtime.ts            # AcpRuntime: state store, lock, stateFor()
-│   ├── state.ts              # State persistence (~/.omp/agent/sessions/*.acp-omp.json)
+│   ├── runtime.ts            # Fold architecture: foldStream, FoldSlot, primeFold
 │   ├── messages.ts           # omp ↔ kernel message conversion + ref tag patching
 │   ├── compress-tool.ts      # compress tool handler
 │   ├── decompress-tool.ts    # decompress tool handler
 │   ├── search-tool.ts        # search_context tool
-│   ├── search-index.ts       # Builds SearchDoc[] from session log + ACP blocks
+│   ├── search-index.ts       # Builds SearchDoc[] from the fold projection + ACP blocks
 │   ├── status-tool.ts        # acp_status tool
 │   ├── commands.ts           # /acp slash command
 │   ├── system-prompt.ts      # System prompt with compression philosophy
@@ -50,12 +49,12 @@ billion-context-omp/
 │   ├── footer-status.ts      # formatCompactTokens (delegate footer is a no-op in omp)
 │   ├── user-config.ts        # ~/.omp/acp-omp.json loader
 │   ├── compat.ts             # system-prompt normalization for omp event shape (string[])
-│   ├── sequence-match.ts     # live↔persisted message alignment (omp path)
+│   ├── dump.ts               # Debug dumps: context-out + provider-request (rotating)
 │   ├── home.ts               # homeDir(): HOME||USERPROFILE||os.homedir() (Bun quirk)
 │   ├── tokens.ts             # Token estimation utilities
 │   ├── log.ts                # Debug logging (~/.omp/acp-omp.log)
 │   └── update.ts             # Auto-update: checks npm, auto-installs latest
-├── tests/                    # 189 tests
+├── tests/                    # 198 tests
 ├── tsup.config.ts
 └── package.json
 ```
@@ -67,7 +66,7 @@ billion-context-omp/
 3. **Assistant messages skip tag injection** — prevents model echo of XML tags.
 4. **Tags appended to END of text** — matches opencode-acp / billion-context-pi pattern.
 5. **Auto-update on session_start** — checks npm registry (throttled), auto-installs if newer.
-6. **acp-kernel MUST be pinned to an exact version** (e.g. `"acp-kernel": "0.0.23"`, NEVER `"^0.0.23"`). It is a build-time dependency that tsup bundles inline; a caret range makes the resolved version drift if `package-lock.json` is regenerated or absent, breaking reproducible builds. **billion-context-kit follows the same rule** — currently a git tag pin (`git+https://…#v0.1.1`, CI-friendly over https); the release PR swaps it to the exact npm version once the kit is published.
+6. **acp-kernel MUST be pinned to an exact version** (e.g. `"acp-kernel": "0.0.23"`, NEVER `"^0.0.23"`). It is a build-time dependency that tsup bundles inline; a caret range makes the resolved version drift if `package-lock.json` is regenerated or absent, breaking reproducible builds. **billion-context-kit follows the same rule** — exact npm version (e.g. `"billion-context-kit": "0.2.0"`), also bundled inline.
 7. **Delegate subsystem deferred** — omp provides its own multi-agent orchestration. This package does NOT register `acp_delegate*` tools to avoid conflicts. The `DelegateConfig` type is retained in `config.ts` as an inert, forward-compatible surface.
 8. **Paths are omp-scoped via `CONFIG_DIR_NAME`** — imported from `@oh-my-pi/pi-utils` (resolves to `.omp`). Config: `~/.omp/acp-omp.json`, log: `~/.omp/acp-omp.log`, state: `<session>.acp-omp.json`. These never collide with anything else.
 9. **Schemas use arktype, not TypeBox** — omp's `ToolDefinition.parameters` accepts omp's `TSchema` (= arktype `Type`), re-exported from `@oh-my-pi/omptype`. TypeBox schemas are structurally incompatible. The 4 tool schemas use arktype's `type({...})` builder.
