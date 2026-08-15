@@ -54,7 +54,7 @@ billion-context-omp/
 │   ├── tokens.ts             # Token estimation utilities
 │   ├── log.ts                # Debug logging (~/.omp/acp-omp.log)
 │   └── update.ts             # Auto-update: checks npm, auto-installs latest
-├── tests/                    # 198 tests
+├── tests/                    # 209 tests
 ├── tsup.config.ts
 └── package.json
 ```
