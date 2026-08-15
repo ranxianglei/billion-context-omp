@@ -73,6 +73,7 @@ billion-context-omp/
 10. **`complete` import** — omp moved it to `@oh-my-pi/pi-ai` root (no `/compat` subpath). `auto-compress.ts` imports `complete` from there.
 11. **`homeDir()` helper** — `src/home.ts`. omp's host runs under Bun, whose `os.homedir()` ignores `HOME`/`USERPROFILE` env. All home-dir reads in src go through `homeDir()` (respects env first) for cross-platform correctness.
 12. **Tests run under Bun** — omp host packages import the Bun runtime, which Node cannot resolve. Use `bun test` (supports `node:test`/`node:assert` imports). Tests hardcode `.omp` (matching billion-context-pi's hardcoded-`.pi` pattern) rather than importing `CONFIG_DIR_NAME` (which would drag omp's module graph into the test process).
+13. **ACP tools are `loadMode: "essential"`** — all four (compress/decompress/search_context/acp_status) declare it so the host keeps them top-level. Extension tools default to `"discoverable"`, which omp's tools.xdev mounts under xd:// (invoked via write with JSON-in-JSON); the device protocol caused issue #21's parse failures, and device descriptions are capped at 200 chars (XDEV_EXTERNAL_DESCRIPTION_CAP), hiding the tool guidance. Legacy xd://compress calls still replay (src/messages.ts). [#36/#43]
 
 ## 3. Development Standards
 

@@ -38,6 +38,10 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
     // model to hand-write JSON-inside-a-JSON-string via the write tool. That
     // double-escaping layer was the direct cause of issue #21's parse errors
     // and truncated write calls; top-level structured args eliminate it.
+    // (Found independently in #36, which also surfaced that device-mounted
+    // descriptions are capped at 200 chars — XDEV_EXTERNAL_DESCRIPTION_CAP in
+    // the host — so the escaping guidance in this description never even
+    // reached the model while device-mounted.)
     loadMode: "essential",
     description:
       "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ \"topic\": \"Session Opener\", \"startId\": \"m00004\", \"endId\": \"m00022\", \"summary\": \"...\" }] }) — a short topic label is recommended but optional. Batch: one entry per range in content[].",
