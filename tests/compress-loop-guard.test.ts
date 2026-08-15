@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createAcpExtension } from "../src/index.js";
+import { createRuntime } from "../src/runtime.js";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 interface MockApi {
@@ -50,6 +51,36 @@ function fakeCtx() {
 function userMsg(text: string) {
   return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
 }
+
+// Regression (port of #48 onto #50): the reject streak must survive a
+// view-flip re-fold. omp re-feeds our rebuilt output as the next context
+// event (observed live, 411 of 1286 context events); the re-fold replaces
+// the FoldSlot — if rejectStreak lived only on the replaced slot, every view
+// flip mid-loop would reset it to 0 and the escalation threshold (3) would
+// never be reached. That was exactly the issue-47 amplifier.
+test("reject streak survives a view-flip re-fold", () => {
+  const runtime = createRuntime({ modelContextLimit: 200_000 });
+  const ctx = fakeCtx();
+
+  const FILL = "lorem ipsum dolor sit amet consectetur. ".repeat(40);
+  const raw = [{ role: "user", content: [{ type: "text", text: "s " + FILL }], timestamp: Date.now() }];
+  for (let i = 1; i <= 6; i++) raw.push(i % 2 ? { role: "assistant", content: [{ type: "text", text: `a${i}` }] } : { role: "user", content: [{ type: "text", text: `u${i} ` + FILL }], timestamp: Date.now() });
+
+  runtime.foldStream(ctx, raw);
+  assert.equal(runtime.noteCompressOutcome(ctx, false), 1);
+  assert.equal(runtime.noteCompressOutcome(ctx, false), 2);
+
+  // Feedback view: identities diverge at the first position → forced freshSlot.
+  const rebuilt = [{ role: "user", content: [{ type: "text", text: "[Compressed conversation section 1 — gone]" }], timestamp: Date.now() }, ...raw.slice(2)];
+  runtime.foldStream(ctx, rebuilt);
+  // The streak must still be 2 — one more rejection escalates to the STOP
+  // directive (threshold 3), instead of starting over from 0.
+  assert.equal(runtime.noteCompressOutcome(ctx, false), 3, "streak carried across the re-fold");
+  // A success clears it — even across a subsequent re-fold.
+  assert.equal(runtime.noteCompressOutcome(ctx, true), 0);
+  runtime.foldStream(ctx, raw);
+  assert.equal(runtime.noteCompressOutcome(ctx, false), 1, "reset sticks after another re-fold");
+});
 
 function assistantCompressCall(callId: string, ranges: Array<{ startId: string; endId: string; summary: string }>) {
   return {
