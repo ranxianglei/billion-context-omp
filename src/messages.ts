@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
-import type { CoreMessage } from "acp-kernel";
+import { SUMMARY_HEADER, type CoreMessage } from "acp-kernel";
 import { debug } from "./log.js";
 type AgentMessage = SessionMessageEntry["message"];
 export type { AgentMessage };
@@ -125,6 +125,18 @@ function compressToolArgs(call: { name: string; arguments?: unknown }): { conten
 function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
   const msg = message as AnyMessage;
   const role = msg.role;
+  if (role === "compactionSummary" || role === "branchSummary") {
+    // omp-native compaction/branch records are themselves already-compressed
+    // summaries, not raw conversation. Project them with the kernel's
+    // synthetic marker so ACP accounts for them exactly like its own block
+    // summaries: never compressible or recommended (issue #35), counted
+    // under `summaries` in the context breakdown, and always kept in the
+    // rebuilt view.
+    const text = (msg.summary ?? "").trim();
+    if (text.length === 0) return [];
+    const label = role === "branchSummary" ? "branch summary" : "compaction summary";
+    return [{ id, role: "user", contentType: "text", text: `${SUMMARY_HEADER} — omp ${label}\n${text}` }];
+  }
   if (role === "user") {
     return [{ id, role: "user", contentType: "text", text: extractText(msg.content) }];
   }
