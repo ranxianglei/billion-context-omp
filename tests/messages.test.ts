@@ -512,6 +512,42 @@ test("streamToCoreMessages keeps plain position id for single-tool assistants", 
   assert.deepEqual(cores.map((c) => c.id), ["p1", "p2", "p3"]);
 });
 
+test("streamToCoreMessages projects compactionSummary with the synthetic marker (issue #35: never compressible)", () => {
+  const stream = [
+    { role: "compactionSummary", summary: "  prior work summarized here  ", shortSummary: "s", tokensBefore: 80000, timestamp: Date.now() },
+    userBlocks("after compaction"),
+  ] as SessionMessageEntry["message"][];
+  const cores = streamToCoreMessages(stream);
+  const [first, second] = cores;
+  assert.ok(first, "compaction message projected");
+  assert.ok(first.text, "projected as text");
+  assert.ok(first.text.startsWith("[Compressed conversation section]"), "summary carries the kernel synthetic marker");
+  assert.ok(first.text.includes("prior work summarized here"), "summary text preserved");
+  assert.equal(second?.text, "after compaction");
+});
+
+test("streamToCoreMessages projects branchSummary with the synthetic marker", () => {
+  const stream = [
+    { role: "branchSummary", summary: "abandoned branch recap", fromId: "x", timestamp: Date.now() },
+  ] as SessionMessageEntry["message"][];
+  const cores = streamToCoreMessages(stream);
+  const first = cores[0];
+  assert.ok(first, "branch summary projected");
+  assert.ok(first.text, "projected as text");
+  assert.ok(first.text.startsWith("[Compressed conversation section]"));
+  assert.ok(first.text.includes("abandoned branch recap"));
+});
+
+test("streamToCoreMessages drops compactionSummary with empty summary", () => {
+  const stream = [
+    { role: "compactionSummary", summary: "   ", tokensBefore: 1, timestamp: Date.now() },
+    userBlocks("next"),
+  ] as SessionMessageEntry["message"][];
+  const cores = streamToCoreMessages(stream);
+  assert.equal(cores.length, 1);
+  assert.equal(cores[0]?.id, "p2");
+});
+
 test("findCompressCalls extracts ranges from assistant compress tool calls", () => {
   const assistant = {
     role: "assistant",

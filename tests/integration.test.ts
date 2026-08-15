@@ -299,6 +299,36 @@ test("host compaction rewriting the prefix must NOT replay stale compress calls 
   assert.doesNotMatch(status.content[0].text, /\d+ active/, "stale call must NOT replay onto shifted positions");
 });
 
+test("issue #35: the compactionSummary message is itself already compressed and must never be recommended", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+
+  // After native /compact, the stream starts with the compaction entry
+  // re-projected as a role:"compactionSummary" message (summary field, no
+  // content). That message is itself an already-compressed record — ACP must
+  // account for it like its own block summaries, not recommend compressing it.
+  const compactionMsg = {
+    role: "compactionSummary",
+    summary: "Prior conversation summarized in detail. ".repeat(200),
+    shortSummary: "prior work",
+    tokensBefore: 80_000,
+    timestamp: Date.now(),
+  };
+  const stream = [compactionMsg, ...Array.from({ length: 7 }, (_, i) => userMsg(bigText(`kept ${i + 1}`)))];
+  const r = await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  assert.equal(refOf(r.messages[0]), "m00001", "compaction message takes the first ref");
+
+  const statusTool = api.tools.find((t) => t.name === "acp_status")!;
+  const status = await statusTool.execute("tc_i35", {}, undefined, undefined, ctx);
+  const text = (status as any).content[0].text;
+  const idx = text.indexOf("Compressible ranges");
+  assert.ok(idx >= 0, "status reports compressible ranges");
+  const rangesSection = text.slice(idx);
+  assert.doesNotMatch(rangesSection, /m00001/, "compaction summary must not appear in any compressible range");
+  assert.match(rangesSection, /m00002/, "kept messages are still recommended");
+});
+
 test("live-rejected compress call stays rejected on the next INCREMENTAL context event", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
