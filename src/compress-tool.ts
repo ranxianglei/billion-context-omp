@@ -62,6 +62,15 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const ranges = args.content ?? [];
   if (ranges.length === 0) return "No ranges provided.";
+  // Defensive validation (live issue, 2026-08-15 provider-mode e2e: a range
+  // without a summary threw `r.summary.length` deep in the handler). Weak
+  // models occasionally emit {startId,endId} only — answer with a precise,
+  // correctable error instead of a TypeError string.
+  const invalid = ranges.filter((r) => !r || typeof r.summary !== "string" || !r.summary.trim() || !r.startId || !r.endId);
+  if (invalid.length > 0) {
+    logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "invalid-ranges", count: invalid.length });
+    return `Every range needs startId, endId and a summary (min 50 chars) — got ${invalid.length} range(s) missing fields. Re-send the FULL ranges array with summaries included.`;
+  }
   const releaseLock = await runtime.acquireLock(ctx.sessionManager.getSessionId());
   try {
     const { state: initialState, coreMessages } = await runtime.stateFor(ctx);

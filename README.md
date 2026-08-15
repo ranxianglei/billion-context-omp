@@ -145,6 +145,7 @@ Create `~/.omp/acp-omp.json` (global) and/or `<project>/.omp/acp-omp.json` (proj
 | Key | Default | Description |
 |-----|---------|-------------|
 | `debug` | `false` | Enable verbose **debug-level** events in the log. The always-on log (lifecycle events, errors, warnings) is written regardless; `debug` only adds extra diagnostics. Also enabled by env `ACP_DEBUG=1`. |
+| `transformMode` | `"context"` (default) or `"provider"` — where the compression surgery intercepts. `provider` transforms the provider wire payload (no feedback re-entry; experimental). |
 | `autoUpdate` | `true` | On session start (throttled to one check per 3 minutes), check npm for a newer version and auto-install it. Disable to avoid all startup network calls. |
 | `modelContextLimit` | *(auto)* | Override the context limit (in tokens). Defaults to the model's `contextWindow`. |
 | `compressModel` | *(session model)* | `provider:modelId` used for `/compact` model-summarized compaction (e.g. `"zhipuai:glm-5.2"`). Defaults to the current session model when omitted. |
