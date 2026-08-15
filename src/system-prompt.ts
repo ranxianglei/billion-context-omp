@@ -42,6 +42,8 @@ WHEN NOT TO COMPRESS
 - Content the current task step is actively reading or reasoning about.
 - Important user messages — preserve their exact intent, constraints, and acceptance criteria. If a message in the range must stay verbatim, exclude it from the compress range instead of compressing it.
 - Protected tool outputs — hard-excluded from compression ranges, survive intact in visible context.
+- Nothing left worth compressing — if no compressible range can meet the minimum size, do NOT call compress at all. Compression is maintenance, never the task goal; when there is nothing to compress, do the task.
+- A rejected compress call — never retry a rejected range unchanged. Re-check acp_status first; after 3 rejections, stop compressing and continue the task.
 
 ${prompts.howToCompressRules}
 
