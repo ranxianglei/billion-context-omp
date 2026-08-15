@@ -33,8 +33,14 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
   return {
     name: "compress",
     label: "Compress",
+    // Stay a top-level tool. Extension tools default to "discoverable", which
+    // omp's tools.xdev mounts behind the xd://compress device — forcing the
+    // model to hand-write JSON-inside-a-JSON-string via the write tool. That
+    // double-escaping layer was the direct cause of issue #21's parse errors
+    // and truncated write calls; top-level structured args eliminate it.
+    loadMode: "essential",
     description:
-      "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ \"topic\": \"Session Opener\", \"startId\": \"m00004\", \"endId\": \"m00022\", \"summary\": \"...\" }] }) — a short topic label is recommended but optional. Batch: one entry per range in content[]. The JSON you write must be strict: escape every double quote inside summaries.",
+      "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ \"topic\": \"Session Opener\", \"startId\": \"m00004\", \"endId\": \"m00022\", \"summary\": \"...\" }] }) — a short topic label is recommended but optional. Batch: one entry per range in content[].",
     parameters: CompressParams,
     async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       let result: string;
