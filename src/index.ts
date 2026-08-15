@@ -18,11 +18,11 @@ import { summarizeMessages } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, setDebugEnabled, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTextTokens, estimateTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { dumpContextMessages, dumpProviderRequest } from "./dump.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
-import { formatSystemPromptForEvent } from "./compat.js";
+import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -162,14 +162,19 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const { state, coreMessages, originalById, streamLen } = runtime.foldStream(ctx, input);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
-      // Prefer pi's real token count (anchored on provider usage) over our
-      // chars/4 estimate — it includes the system prompt, tool schemas, and
-      // trailing messages pi has not yet received a usage for. This is what the
-      // footer percentage reflects, so nudge usage/growth will match what the
-      // user sees.
-      const realUsage = ctx.getContextUsage?.();
-      const estimated = estimateTokens(coreMessages, coveredIds);
-      const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : estimated;
+      // Nudge arbitration MUST run on the SENT-VIEW scale (chars/4 estimate
+      // over the pruned projection + measured system prompt). The host's
+      // getContextUsage() is SESSION-TREE accounting: append-only, includes
+      // compressed originals, never shrinks — on a session where the tree
+      // outgrew the model's context window (e.g. 366K tree vs 180K window
+      // after switching models), it reads as a permanent "204%" emergency
+      // while the real sent view is ~5%. The tree number stays in the log
+      // and the panel (labeled "host footer scale") — it must not drive
+      // emergency decisions for the sent view.
+      const systemPromptTokens = estimateTextTokens(getSystemPromptText(ctx) ?? "");
+      const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
+      const sessionTokens = ctx.getContextUsage?.()?.tokens ?? null;
+      const tokenCount = sentTokens;
 
       debug.event("context-in", {
         sid,
@@ -177,9 +182,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         streamLen,
         coreMsgs: coreMessages.length,
         tokenCount,
-        estimatedTokens: estimated,
-        realTokens: realUsage?.tokens ?? null,
-        realPercent: realUsage?.percent ?? null,
+        sessionTokens,
         limit: config.modelContextLimit,
         blocksBefore: state.blocks.length,
         activeBefore: state.blocks.filter((b) => b.active).length,
@@ -193,7 +196,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         inMsgs: coreMessages.length,
         outMsgs: turn.messages.length,
         tokens: tokenCount,
-        pct: realUsage?.percent ?? (config.modelContextLimit > 0 ? Math.round((tokenCount / config.modelContextLimit) * 100) : null),
+        sessionTokens,
+        pct: config.modelContextLimit > 0 ? Math.round((tokenCount / config.modelContextLimit) * 100) : null,
         limit: config.modelContextLimit,
         nudge: turn.nudge?.shouldInject ? (turn.nudge.breakdown?.emergencyOverride === 1 ? "emergency" : "active") : "idle",
         nudgeReason: turn.nudge?.reason ?? null,

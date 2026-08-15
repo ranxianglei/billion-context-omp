@@ -7,6 +7,10 @@ export function estimateTextTokens(text: string): number {
   return cjkCount + Math.ceil((text.length - cjkCount) / 4);
 }
 
+/** Union of message ids covered by ACTIVE compression blocks. Messages in
+ *  this set are already pruned from the sent view — token estimates for the
+ *  sent view skip them (their summary mass is counted by the kernel
+ *  breakdown as `summaries`). */
 export function collectCoveredMessageIds(state: { blocks: { active: boolean; effectiveMessageIds: string[] }[] }): Set<string> {
   const ids = new Set<string>();
   for (const b of state.blocks) {
@@ -16,6 +20,15 @@ export function collectCoveredMessageIds(state: { blocks: { active: boolean; eff
   return ids;
 }
 
+/** Estimate the SENT-VIEW token mass (chars/4, CJK-aware) of a core-message
+ *  projection: skips compress tool-calls and messages already covered by
+ *  active blocks. This is the same estimation scale as the kernel's
+ *  contextBreakdown, so its output can feed nudge decisions and panel lines
+ *  without scale mixing. The host footer's session-tree accounting
+ *  (provider-anchored, includes compressed originals, never shrinks) is a
+ *  DIFFERENT scale and must never drive emergency arbitration for the sent
+ *  view — a 180K-context model with a 366K tree reads as "204%" here while
+ *  the real sent view is ~5%. */
 export function estimateTokens(messages: CoreMessage[], coveredIds?: Set<string>): number {
   let tokens = 0;
   for (const m of messages) {
