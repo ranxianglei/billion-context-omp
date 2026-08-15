@@ -6,7 +6,7 @@ import type {
   ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { debug, logError, logInfo, logThrow } from "./log.js";
+import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { rangeFingerprints } from "./messages.js";
 import { estimateTokens, collectCoveredMessageIds, formatTokens } from "./tokens.js";
 
@@ -94,7 +94,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     const invalidRanges = rangeSpecs.filter((r) => !r.startRef || !r.endRef || typeof r.startRef !== "string" || typeof r.endRef !== "string");
     if (invalidRanges.length > 0) {
       logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "invalid-ranges", count: invalidRanges.length, ranges: invalidRanges.map((r) => `${r.startRef}..${r.endRef}`) });
-      return `Rejected: ${invalidRanges.length} range(s) have invalid startId or endId (missing or non-string). All ranges must have valid message refs (e.g. "m00005") or block IDs (e.g. "b3"). No changes applied — run acp_status for current refs.`;
+      return rejectionMessage(ctx, runtime, `Rejected: ${invalidRanges.length} range(s) have invalid startId or endId (missing or non-string). All ranges must have valid message refs (e.g. "m00005") or block IDs (e.g. "b3"). No changes applied — run acp_status for current refs.`);
     }
 
     let applied: ApplyCompressionResult;
@@ -107,12 +107,13 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
       });
     } catch (e) {
       logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), phase: "applyCompression", ranges: rangeSpecs.length });
-      return `Compression failed: ${e instanceof Error ? e.message : String(e)}. No changes applied — state is unchanged.`;
+      return rejectionMessage(ctx, runtime, `Compression failed: ${e instanceof Error ? e.message : String(e)}. No changes applied — state is unchanged.`);
     }
     if (applied.result.errors.length > 0) {
       logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "apply-errors", count: applied.result.errors.length, errors: applied.result.errors.slice(0, 5) });
-      return `Compression rejected: ${applied.result.errors.join("; ")}. No changes applied — run acp_status to verify current state.`;
+      return rejectionMessage(ctx, runtime, `Compression rejected: ${applied.result.errors.join("; ")}. No changes applied — run acp_status to verify current state.`);
     }
+    runtime.noteCompressOutcome(ctx, true);
     await runtime.commitFoldState(ctx, applied.state, toolCallId);
     const { blocksCreated, tokensCompressed, warnings } = applied.result;
 
@@ -160,4 +161,25 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     if (fps.some((fp) => fp !== "-")) lines.push(`[fp=${fps.join(",")}]`);
     return lines.join("\n");
   } finally { releaseLock(); }
+}
+
+const LOOP_GUARD_STOP = 3;
+const LOOP_GUARD_SUPPRESS = 4;
+
+// Consecutive-rejection guard: weak models treat an identical error as a
+// fresh prompt and re-issue the same doomed compress call dozens of times
+// (observed: 33 rejections over 48 minutes on one range). Escalate at the
+// third rejection with an explicit STOP directive, then suppress the kernel
+// detail entirely — the repetition itself is the poison.
+function rejectionMessage(ctx: ExtensionContext, runtime: AcpRuntime, base: string): string {
+  const streak = runtime.noteCompressOutcome(ctx, false);
+  if (streak >= LOOP_GUARD_SUPPRESS) {
+    logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "loop-guard", streak, mode: "suppressed" });
+    return `Compression rejected (again — ${streak} consecutive rejections). No changes applied. STOP calling compress; it is not converging. Continue the task. Compress stays available: a fresh attempt works when acp_status shows a range that can meet the minimum size.`;
+  }
+  if (streak >= LOOP_GUARD_STOP) {
+    logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "loop-guard", streak, mode: "stop-directive" });
+    return `${base}\n\nSTOP: ${streak} compress calls rejected in a row. Do NOT retry the same range. Run acp_status to see what is actually compressible now; if no range can meet the minimum size, nothing is left to compress — stop and continue the actual task.`;
+  }
+  return base;
 }

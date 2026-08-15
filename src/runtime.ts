@@ -30,6 +30,7 @@ interface FoldSlot {
   state: CompressionState;
   coreMessages: CoreMessage[];
   appliedCallIds: Set<string>;
+  rejectStreak: number;
 }
 
 export interface AcpRuntime {
@@ -43,6 +44,10 @@ export interface AcpRuntime {
   foldStream(ctx: ExtensionContext, stream: AgentMessage[]): FoldResult;
   stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }>;
   commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void;
+  /** Track the per-session streak of consecutively REJECTED compress calls.
+   *  `ok=false` increments and returns the new streak; `ok=true` resets to 0.
+   *  A re-fold (rewritten stream prefix) drops the slot and starts at 0. */
+  noteCompressOutcome(ctx: ExtensionContext, ok: boolean): number;
   forgetSession(sid: string): void;
   /** Rebuild blocks from the persisted session view at session_start so /acp
  *  and acp_status show them BEFORE the first LLM call of a resumed session.
@@ -53,19 +58,27 @@ export interface AcpRuntime {
   acquireLock(sid: string): Promise<() => void>;
 }
 
-function freshSlot(preserveNudgeFrom?: FoldSlot): FoldSlot {
-  const slot: FoldSlot = { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set() };
-  // Cadence stamps are SESSION-level accounting ("when was the model last
-  // reminded"), not stream-derived state. A re-fold rebuilds blocks and refs
-  // deterministically from the stream, but must not forget the reminder
-  // history: omp fires back-to-back context events on DIFFERENT views of the
-  // same session (its recap/subagent pipelines re-feed our own rebuilt
-  // output; observed live: context-out msgs=78 at 13:41:11.430 became
-  // context-in msgs=78 the same millisecond). Clearing stamps there armed the
+function freshSlot(preserveFrom?: FoldSlot): FoldSlot {
+  const slot: FoldSlot = { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set(), rejectStreak: 0 };
+  // Cadence stamps and the reject streak are SESSION-level accounting ("when
+  // was the model last reminded" / "how many compress calls has it had
+  // rejected in a row"), not stream-derived state. A re-fold rebuilds blocks
+  // and refs deterministically from the stream, but must not forget either:
+  // omp fires back-to-back context events on DIFFERENT views of the same
+  // session (its recap/subagent pipelines re-feed our own rebuilt output;
+  // observed live: context-out msgs=78 at 13:41:11.430 became context-in
+  // msgs=78 the same millisecond). Clearing stamps there armed the
   // growth-floor gate from zero and re-fired the nudge 4ms after the previous
-  // one. Kernel-side epoch resets (a real compression clears the stamps via
-  // applyCompression) are unaffected — they act on the state we preserve.
-  if (preserveNudgeFrom) slot.state = { ...slot.state, nudge: preserveNudgeFrom.state.nudge };
+  // one; clearing the streak would likewise disarm the issue-47 loop guard
+  // mid-loop (each view flip resets it to 0 and the guard never reaches its
+  // escalation threshold). Kernel-side epoch resets (a real compression
+  // clears the stamps via applyCompression) are unaffected — they act on the
+  // state we preserve. A successful compression resets the streak explicitly
+  // via noteCompressOutcome.
+  if (preserveFrom) {
+    slot.state = { ...slot.state, nudge: preserveFrom.state.nudge };
+    slot.rejectStreak = preserveFrom.rejectStreak;
+  }
   return slot;
 }
 
@@ -255,6 +268,12 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     if (toolCallId) slot.appliedCallIds.add(toolCallId);
   }
 
+  function noteCompressOutcome(ctx: ExtensionContext, ok: boolean): number {
+    const slot = slotFor(sidOf(ctx));
+    slot.rejectStreak = ok ? 0 : slot.rejectStreak + 1;
+    return slot.rejectStreak;
+  }
+
   return {
     core,
     get adapter() { return adapterRef; },
@@ -266,6 +285,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     foldStream,
     stateFor,
     commitFoldState,
+    noteCompressOutcome,
     forgetSession,
     primeFold,
     acquireLock,
