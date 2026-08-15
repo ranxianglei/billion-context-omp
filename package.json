@@ -1,6 +1,6 @@
 {
 	"name": "billion-context-omp",
-	"version": "0.1.7",
+	"version": "0.1.8",
 	"description": "One billion, not one million. Model-driven context management for the oh-my-pi (omp) coding agent.",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -68,7 +68,7 @@
 		"@oh-my-pi/pi-coding-agent": "17.3.2",
 		"@oh-my-pi/pi-utils": "17.3.2",
 		"@types/node": "^26.1.2",
-		"acp-kernel": "0.0.23",
+		"acp-kernel": "0.0.24",
 		"billion-context-kit": "0.2.0",
 		"tsup": "^8.5.1",
 		"tsx": "^4.23.1",
