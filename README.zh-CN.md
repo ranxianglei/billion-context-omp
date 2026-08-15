@@ -90,7 +90,7 @@ omp 内置的 `/compact` 被拦截，替换为 ACP 模型摘要式 compaction，
 ╭─────────────────────────────────────────────╮
 │           ACP Context Analysis              │
 ╰─────────────────────────────────────────────╯
- billion-context-omp@0.1.1
+ billion-context-omp@0.1.4
 
  Context: 6% (57k / 1.0M)
 
@@ -154,6 +154,8 @@ billion-context-omp 开箱即用，无需配置。可选键写入 JSON 配置文
 | `acknowledgePromptsRisk` | `false` | `prompts` 覆盖的安全门。设 `true` 表示知悉替换调优过的压缩规则可能降低摘要质量，并使覆盖生效。 |
 
 三个提醒阈值（`maxContextLimit`、`emergencyThresholdPercent`、`nudgeGrowthTokens`）构成三级升级：增长驱动的软提醒 → `maxContextLimit` 处的强制提醒 → `emergencyThresholdPercent` 处的紧急截断。
+> **安全说明：** 项目级配置文件（`<project>/.omp/acp-omp.json`）由仓库控制，`prompts` / `acknowledgePromptsRisk` 在其中同样生效。在不受信任的目录中打开 agent 会话，可能通过这些键覆盖压缩系统提示。请像对待仓库本身一样对待项目级 `acp-omp.json`；若提示词覆盖只信任自己，请只写在全局 `~/.omp/acp-omp.json`。
+
 
 ### 环境变量
 

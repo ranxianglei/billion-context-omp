@@ -90,7 +90,7 @@ Rich status display for the user:
 ╭─────────────────────────────────────────────╮
 │           ACP Context Analysis              │
 ╰─────────────────────────────────────────────╯
- billion-context-omp@0.1.1
+ billion-context-omp@0.1.4
 
  Context: 6% (57k / 1.0M)
 
@@ -154,6 +154,8 @@ Create `~/.omp/acp-omp.json` (global) and/or `<project>/.omp/acp-omp.json` (proj
 | `acknowledgePromptsRisk` | `false` | Safety gate for `prompts` overrides. Set `true` to acknowledge that replacing the tuned compression rules may reduce summary quality, and to make overrides take effect. |
 
 The three nudge thresholds (`maxContextLimit`, `emergencyThresholdPercent`, `nudgeGrowthTokens`) form a three-tier escalation: growth-driven soft nudges → forced nudges at `maxContextLimit` → emergency truncation at `emergencyThresholdPercent`.
+> **Security note:** the project-local config (`<project>/.omp/acp-omp.json`) is under repo control, and `prompts` / `acknowledgePromptsRisk` are honored from it. Opening an agent session in an untrusted directory can therefore override the compression system prompt via those keys. Treat a project-local `acp-omp.json` with the same trust level as the repo itself; keep prompt overrides in your global `~/.omp/acp-omp.json` if they must be trusted-only.
+
 
 ### Environment variables
 

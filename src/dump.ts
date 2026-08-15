@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, statSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import { homeDir } from "./home.js";
 import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
@@ -8,6 +8,24 @@ const counters: Record<string, number> = {};
 
 export function dumpDir(): string {
   return path.join(homeDir(), CONFIG_DIR_NAME, "acp-omp-dumps");
+}
+
+const PRUNE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Dumps are unbounded by design (sequential, diff-friendly); prune files
+ *  older than 7 days so the directory cannot grow forever. Best-effort: a
+ *  failure here must never break the dump itself. */
+function pruneOldDumps(dir: string): void {
+  try {
+    for (const f of readdirSync(dir)) {
+      if (!/\d{4}\.json$/.test(f) && !/^req_\d+\.json$/.test(f)) continue;
+      if (Date.now() - statSync(path.join(dir, f)).mtimeMs > PRUNE_MAX_AGE_MS) {
+        rmSync(path.join(dir, f), { force: true });
+      }
+    }
+  } catch {
+    // best-effort
+  }
 }
 
 export interface DumpMeta {
@@ -25,6 +43,7 @@ export function dumpContextMessages(messages: unknown[], meta: DumpMeta): string
   try {
     const dir = dumpDir();
     mkdirSync(dir, { recursive: true });
+    pruneOldDumps(dir);
 
     if (!(dir in counters)) {
       try {
@@ -127,6 +146,7 @@ export function dumpProviderRequest(payload: unknown, meta: { sid: string }): st
   try {
     const dir = dumpDir();
     mkdirSync(dir, { recursive: true });
+    pruneOldDumps(dir);
 
     if (!("req" in counters)) {
       try {

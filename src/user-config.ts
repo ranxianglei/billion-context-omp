@@ -53,17 +53,22 @@ function join(... parts: string[]): string {
   return path.join(...parts);
 }
 
-const KNOWN = new Set([
-  "debug", "autoUpdate", "modelContextLimit",
-  "toolBashDefaultTimeout", "toolOutputMaxBytes",
-  "delegate", "compress", "compressModel", "displayUsage",
-  "prompts", "acknowledgePromptsRisk",
-]);
+// SECURITY: project-local files are under repo control. Honoring `prompts` /
+// `acknowledgePromptsRisk` from `<cwd>` therefore lets a repo the agent
+// operates in override the compression system prompt — a documented,
+// deliberate trade-off for per-project overrides (see the security note in
+// README.md). Trusted-only prompt overrides belong in the global file.
+const KNOWN: Record<string, true> = {
+  debug: true, autoUpdate: true, modelContextLimit: true,
+  toolBashDefaultTimeout: true, toolOutputMaxBytes: true,
+  delegate: true, compress: true, compressModel: true, displayUsage: true,
+  prompts: true, acknowledgePromptsRisk: true,
+};
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
   const out: UserAcpConfig = {};
   for (const [k, v] of Object.entries(parsed)) {
-    if (KNOWN.has(k)) (out as Record<string, unknown>)[k] = v;
+    if (KNOWN[k]) (out as Record<string, unknown>)[k] = v;
   }
   return out;
 }

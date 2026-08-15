@@ -469,3 +469,132 @@ test("mixed message/block boundary batch keeps fingerprint index alignment on re
   const status = (await statusTool.execute("tc-mixed", {}, undefined, undefined, ctx)).content[0].text;
   assert.ok(status.includes("b3"), `both ranges of the mixed call must replay (b1, b2, b3):\n${status}`);
 });
+
+// Host-injection contract (issue #32): host-injected messages (omp's
+// <system-reminder>) can be inserted mid-stream, or mutate in place between
+// turns. The stream is the only truth: a mid-stream change forces a full
+// re-fold, refs are re-derived from position, and in-stream compress blocks
+// survive only if their span fingerprints still match the pieces the
+// (possibly shifted) range now covers.
+
+test("mid-stream content mutation: unchanged refs stay stable, block replays by fingerprint", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+
+  const a = userMsg(bigText("first"));
+  const reminder1 = userMsg("<system-reminder>todo: 3 open tasks</system-reminder>");
+  const b = userMsg(bigText("second"));
+  const fillers = ["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)));
+  const r1 = await fire([a, reminder1, b, ...fillers]);
+  const aRef = refOf(r1.messages[0]);
+  const bRef = refOf(r1.messages[2]);
+  assert.equal(aRef, "m00001");
+  assert.equal(bRef, "m00003");
+
+  const compressTool = api.tools.find((t) => t.name === "compress")!;
+  const res = await compressTool.execute("call_c1", { content: [{ startId: bRef, endId: bRef, summary: "Second large message was compressed into this durable tier one summary for the record." }] }, undefined, undefined, ctx);
+  assert.match(res.content[0].text, /1 block/, res.content[0].text);
+
+  // Next turn: the reminder's content mutated IN PLACE (todo state advanced),
+  // the tail grew, and the live call is now part of the stream.
+  const reminder2 = userMsg("<system-reminder>todo: 2 open, 1 done</system-reminder>");
+  const r2 = await fire([
+    a, reminder2, b, ...fillers,
+    assistantCompressCall("call_c1", [{ startId: bRef, endId: bRef, summary: "Second large message was compressed into this durable tier one summary for the record." }]),
+    toolResult("call_c1", res.content[0].text),
+    userMsg("post-mutation turn"),
+  ]);
+
+  // The mutation breaks the LCP -> full re-fold, but every position before it
+  // keeps its numeric ref — no gratuitous renumbering for the model.
+  assert.equal(refOf(r2.messages[0]), aRef, "front of stream keeps its ref across the re-fold");
+  assert.equal(refOf(r2.messages[1]), "m00002", "mutated slot keeps its position's ref");
+
+  // The block's span (b) kept its position -> fingerprints still match ->
+  // the block replays and keeps pruning.
+  const texts = r2.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
+  assert.ok(!texts.includes("second large enough"), "in-stream block replays by fingerprint after mid-stream mutation");
+  assert.ok(texts.includes("post-mutation turn"), "tail intact");
+
+  const statusTool = api.tools.find((t) => t.name === "acp_status")!;
+  const status = (await statusTool.execute("tc-mutation", {}, undefined, undefined, ctx)).content[0].text;
+  assert.match(status, /1 active/, status);
+});
+
+test("mid-stream insertion: range straddling the insertion is fingerprint-rejected (safe)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+
+  const a = userMsg(bigText("first"));
+  const b = userMsg(bigText("second"));
+  const c = userMsg(bigText("third"));
+  const fillers = ["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)));
+  const r1 = await fire([a, b, c, ...fillers]);
+  const bRef = refOf(r1.messages[1]);
+  const cRef = refOf(r1.messages[2]);
+
+  const compressTool = api.tools.find((t) => t.name === "compress")!;
+  const res = await compressTool.execute("call_c1", { content: [{ startId: bRef, endId: cRef, summary: "Second and third large messages were compressed into this durable tier one summary." }] }, undefined, undefined, ctx);
+  assert.match(res.content[0].text, /1 block/, res.content[0].text);
+
+  // Host inserts a system-reminder between a and b: every message after it
+  // shifts one position, so the live call's refs (b..c) now point at
+  // (reminder..b) — the span fingerprints must not match.
+  const reminder = userMsg("<system-reminder>context warning: 75% used</system-reminder>");
+  const r2 = await fire([
+    a, reminder, b, c, ...fillers,
+    assistantCompressCall("call_c1", [{ startId: bRef, endId: cRef, summary: "Second and third large messages were compressed into this durable tier one summary." }]),
+    toolResult("call_c1", res.content[0].text),
+    userMsg("post-insertion turn"),
+  ]);
+
+  const texts = r2.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
+  assert.ok(texts.includes("second large enough"), "stale block must not prune — content stays visible");
+  assert.ok(texts.includes("third large enough"), "stale block must not prune — content stays visible");
+
+  const statusTool = api.tools.find((t) => t.name === "acp_status")!;
+  const status = (await statusTool.execute("tc-insert-straddle", {}, undefined, undefined, ctx)).content[0].text;
+  assert.doesNotMatch(status, /\d+ active/, `straddling block must be rejected, not mis-applied:\n${status}`);
+});
+
+test("mid-stream insertion: block entirely before the insertion point still replays", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+
+  const a = userMsg(bigText("first"));
+  const b = userMsg(bigText("second"));
+  const c = userMsg(bigText("third"));
+  const fillers = ["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)));
+  const r1 = await fire([a, b, c, ...fillers]);
+  const aRef = refOf(r1.messages[0]);
+  const bRef = refOf(r1.messages[1]);
+
+  // Compress a..b — entirely before where the host will insert the reminder
+  // (between b and c) — so a..b keep both their positions and their refs.
+  const compressTool = api.tools.find((t) => t.name === "compress")!;
+  const res = await compressTool.execute("call_c1", { content: [{ startId: aRef, endId: bRef, summary: "First and second large messages were compressed into this durable tier one summary." }] }, undefined, undefined, ctx);
+  assert.match(res.content[0].text, /1 block/, res.content[0].text);
+
+  const reminder = userMsg("<system-reminder>context warning: 75% used</system-reminder>");
+  const r2 = await fire([
+    a, b, reminder, c, ...fillers,
+    assistantCompressCall("call_c1", [{ startId: aRef, endId: bRef, summary: "First and second large messages were compressed into this durable tier one summary." }]),
+    toolResult("call_c1", res.content[0].text),
+    userMsg("post-insertion turn"),
+  ]);
+
+  const texts = r2.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
+  assert.ok(texts.includes("first large enough"), "first user message stays visible (kernel protection)");
+  assert.ok(!texts.includes("second large enough"), "pre-insertion block keeps pruning its range");
+  assert.ok(texts.includes("third large enough"), "content after the insertion point untouched and visible");
+
+  const statusTool = api.tools.find((t) => t.name === "acp_status")!;
+  const status = (await statusTool.execute("tc-insert-before", {}, undefined, undefined, ctx)).content[0].text;
+  assert.match(status, /1 active/, status);
+});

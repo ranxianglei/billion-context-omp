@@ -36,7 +36,6 @@ billion-context-omp/
 │   ├── index.ts              # Extension entry: wire hooks, tools, commands
 │   ├── config.ts             # AdapterConfig: wraps kernel defaultConfig
 │   ├── runtime.ts            # AcpRuntime: state store, lock, stateFor()
-│   ├── state.ts              # State persistence (~/.omp/agent/sessions/*.acp-omp.json)
 │   ├── messages.ts           # omp ↔ kernel message conversion + ref tag patching
 │   ├── compress-tool.ts      # compress tool handler
 │   ├── decompress-tool.ts    # decompress tool handler
@@ -50,12 +49,11 @@ billion-context-omp/
 │   ├── footer-status.ts      # formatCompactTokens (delegate footer is a no-op in omp)
 │   ├── user-config.ts        # ~/.omp/acp-omp.json loader
 │   ├── compat.ts             # system-prompt normalization for omp event shape (string[])
-│   ├── sequence-match.ts     # live↔persisted message alignment (omp path)
 │   ├── home.ts               # homeDir(): HOME||USERPROFILE||os.homedir() (Bun quirk)
 │   ├── tokens.ts             # Token estimation utilities
 │   ├── log.ts                # Debug logging (~/.omp/acp-omp.log)
 │   └── update.ts             # Auto-update: checks npm, auto-installs latest
-├── tests/                    # 189 tests
+├── tests/                    # 193 tests
 ├── tsup.config.ts
 └── package.json
 ```
@@ -69,11 +67,12 @@ billion-context-omp/
 5. **Auto-update on session_start** — checks npm registry (throttled), auto-installs if newer.
 6. **acp-kernel MUST be pinned to an exact version** (e.g. `"acp-kernel": "0.0.22"`, NEVER `"^0.0.22"`). It is a build-time dependency that tsup bundles inline; a caret range makes the resolved version drift if `package-lock.json` is regenerated or absent, breaking reproducible builds.
 7. **Delegate subsystem deferred** — omp provides its own multi-agent orchestration. This package does NOT register `acp_delegate*` tools to avoid conflicts. The `DelegateConfig` type is retained in `config.ts` as an inert, forward-compatible surface.
-8. **Paths are omp-scoped via `CONFIG_DIR_NAME`** — imported from `@oh-my-pi/pi-utils` (resolves to `.omp`). Config: `~/.omp/acp-omp.json`, log: `~/.omp/acp-omp.log`, state: `<session>.acp-omp.json`. These never collide with anything else.
+8. **Paths are omp-scoped via `CONFIG_DIR_NAME`** — imported from `@oh-my-pi/pi-utils` (resolves to `.omp`). Config: `~/.omp/acp-omp.json`, log: `~/.omp/acp-omp.log`, update throttle: `~/.omp/.billion-context-omp-update-check`. These never collide with anything else.
 9. **Schemas use arktype, not TypeBox** — omp's `ToolDefinition.parameters` accepts omp's `TSchema` (= arktype `Type`), re-exported from `@oh-my-pi/omptype`. TypeBox schemas are structurally incompatible. The 4 tool schemas use arktype's `type({...})` builder.
 10. **`complete` import** — omp moved it to `@oh-my-pi/pi-ai` root (no `/compat` subpath). `auto-compress.ts` imports `complete` from there.
 11. **`homeDir()` helper** — `src/home.ts`. omp's host runs under Bun, whose `os.homedir()` ignores `HOME`/`USERPROFILE` env. All home-dir reads in src go through `homeDir()` (respects env first) for cross-platform correctness.
 12. **Tests run under Bun** — omp host packages import the Bun runtime, which Node cannot resolve. Use `bun test` (supports `node:test`/`node:assert` imports). Tests hardcode `.omp` (matching billion-context-pi's hardcoded-`.pi` pattern) rather than importing `CONFIG_DIR_NAME` (which would drag omp's module graph into the test process).
+13. **Refs are re-derived from the stream every turn** — if a host-injected message (e.g. omp's `<system-reminder>`) is inserted or removed mid-stream, a full re-fold renumbers every ref after it, and in-flight compress calls referencing shifted positions are fingerprint-rejected (safe), never mis-applied. A same-position content mutation (a reminder updating in place) keeps unchanged positions' refs numerically stable, and in-stream blocks replay by fingerprint. Pinned by the host-injection contract tests in `tests/integration.test.ts`.
 
 ## 3. Development Standards
 

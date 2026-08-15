@@ -200,6 +200,13 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return { state: slot.state, coreMessages, originalById, streamLen: stream.length };
   }
 
+  /** Reads the live fold state. Lock-free BY DESIGN: the read is synchronous
+   *  (no await between read and use), so a concurrent fold cannot interleave
+   *  a torn write into it. Callers (decompress/search/acp_status) intentionally
+   *  do NOT take acquireLock — that would queue them behind the in-lock
+   *  checkForUpdate in the context handler (index.ts), stalling acp_status for
+   *  the duration of an npm check/install. If this ever becomes genuinely
+   *  async, acquire the per-sid lock first. */
   function stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }> {
     const slot = slotFor(sidOf(ctx));
     return Promise.resolve({ state: slot.state, coreMessages: slot.coreMessages });

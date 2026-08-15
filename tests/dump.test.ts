@@ -1,6 +1,6 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync, existsSync, mkdtempSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync, existsSync, mkdtempSync, utimesSync } from "node:fs";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { setDebugEnabled } from "../src/log.js";
@@ -71,5 +71,27 @@ describe("dump", () => {
 
     const p = dumpContextMessages([], { sid: "s1", injected: false, emergency: false });
     assert.ok(p!.endsWith("0006.json"));
+  });
+
+  test("prunes dump files older than 7 days", () => {
+    setDebugEnabled(true);
+    const dir = dumpDir();
+    mkdirSync(dir, { recursive: true });
+    const old = path.join(dir, "0000.json");
+    writeFileSync(old, JSON.stringify({ ts: "old" }));
+    const age = Date.now() / 1000 - 8 * 24 * 60 * 60;
+    utimesSync(old, age, age);
+    const fresh = path.join(dir, "0001.json");
+    writeFileSync(fresh, JSON.stringify({ ts: "fresh" }));
+
+    const p = dumpContextMessages([{ role: "user", content: "prune check" }], {
+      sid: "s1",
+      injected: false,
+      emergency: false,
+    });
+    assert.ok(p);
+    assert.equal(existsSync(old), false, "8-day-old dump file is pruned");
+    assert.equal(existsSync(fresh), true, "recent dump file is kept");
+    assert.ok(p.endsWith("0002.json"), `next counter continues after remaining files: ${p}`);
   });
 });
