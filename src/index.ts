@@ -1,5 +1,6 @@
 import type {
   ExtensionAPI,
+  ExtensionContext,
   ExtensionFactory,
   SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent";
@@ -13,6 +14,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
+import { detectWireFormat, synthesizeStream, rebuildWirePayload } from "./wire-transform.js";
 import { viableRanges } from "billion-context-kit";
 import { summarizeMessages } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -35,6 +37,10 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
+    // BEFORE wireProviderDebug: handlers fire in registration order, so the
+    // provider dumps capture the POST-transform payload (what actually goes
+    // to fetch), mirroring what context dumps show in context mode.
+    wireProviderTransform(pi, runtime);
     wireProviderDebug(pi);
     wireToolGuardrails(pi, runtime);
     pi.registerTool(makeCompressTool(runtime));
@@ -147,23 +153,34 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
 }
 
-// The core integration: Pi's `context` event fires before every LLM call with the
-// messages about to be sent. We run acp-kernel's processTurn (prune + ref-tag +
-// nudge decision) and return the transformed AgentMessage[].
-function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
-  pi.on("context", async (event, ctx) => {
-    const sid = ctx.sessionManager.getSessionId();
-    const release = await runtime.acquireLock(sid);
-    try {
-      // A transient empty message list must not wipe a non-empty fold — bypass
+// The core integration. Two interception points share one pipeline
+// (fold → processTurn → nudge → rebuild):
+//  - "context" (default): omp's `context` event fires before every LLM call
+//    with the messages about to be sent; we return the transformed
+//    AgentMessage[]. Known defect: omp's recap/subagent pipelines re-feed our
+//    output as INPUT on the next event (the feedback-view / two-truth-source
+//    problem, issues #22/#47/#52 and the 01a0059b loop).
+//  - "provider" (transformMode: "provider"): the context event is left
+//    untouched (observer) and the surgery runs at `before_provider_request`
+//    on the WIRE payload — request-local, structurally impossible to re-feed.
+//    See wireProviderTransform + wire-transform.ts.
+async function transformStream(
+  ctx: ExtensionContext,
+  runtime: AcpRuntime,
+  input: AgentMessage[],
+  mode: "context" | "provider",
+): Promise<{ rebuilt: AgentMessage[]; nudgeInjected: boolean } | undefined> {
+  const sid = ctx.sessionManager.getSessionId();
+  const release = await runtime.acquireLock(sid);
+  try {
+    // A transient empty message list must not wipe a non-empty fold — bypass
     // instead of rebuilding (an empty {messages} return would clear the LLM
     // context).
-    const input = event.messages ?? [];
     if (input.length === 0) {
       debug.event("empty-stream-bypass", { sid });
       return undefined;
     }
-    debug.event("context-in-raw", { sid, msgs: input.length });
+    debug.event("context-in-raw", { sid, msgs: input.length, mode });
     const { state, coreMessages, originalById, streamLen } = runtime.foldStream(ctx, input);
     // Nudge stamps as of the last context event. The pipeline never mutates
     // the pre-turn nudge object (nudgeNode spreads into a fresh one), so
@@ -189,7 +206,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
       debug.event("context-in", {
         sid,
-        eventMsgs: event.messages?.length ?? 0,
+        mode,
         streamLen,
         coreMsgs: coreMessages.length,
         tokenCount,
@@ -322,7 +339,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       }
     }
 
-    // Always return the transformed array: every message needs its [mNNNNN] ref
+    // Always rebuild the full array: every message needs its [mNNNNN] ref
     // tag applied, so there is no meaningful "no change" case to short-circuit.
     dumpContextMessages(rebuilt, {
       sid,
@@ -336,12 +353,66 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     await checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
-    return { messages: rebuilt };
+    return { rebuilt, nudgeInjected };
     } catch (e) {
-      logThrow("context", e, { sid, phase: "transform" });
+      logThrow("context", e, { sid, phase: "transform", mode });
       throw e;
     } finally {
       release();
+    }
+}
+
+function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  pi.on("context", async (event, ctx) => {
+    if ((runtime.adapter.transformMode ?? "context") === "provider") {
+      // Provider mode: the context event is an observer. The fold runs at
+      // before_provider_request instead (wireProviderTransform); touching the
+      // message array here is what creates the feedback-view loop.
+      debug.event("context-observer-skip", { sid: ctx.sessionManager.getSessionId(), msgs: event.messages?.length ?? 0 });
+      return undefined;
+    }
+    const result = await transformStream(ctx, runtime, event.messages ?? [], "context");
+    if (!result) return undefined;
+    return { messages: result.rebuilt };
+  });
+}
+
+// Provider mode (issue #52's structural fix): transform the WIRE payload at
+// the last boundary before fetch. omp fires `before_provider_request` after
+// convertToLlm (anthropic/openai/responses wire formats) — the body is
+// request-local, so a transform here can never re-enter as input. The fold
+// runs on a stream SYNTHESIZED from the wire messages (wire-transform.ts);
+// survivors are rebuilt from the original wire objects, so unknown fields
+// (cache_control, citations, provider extras) pass through untouched. Fail-open:
+// any error or unrecognized format returns the original payload.
+function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  pi.on("before_provider_request", async (event, ctx) => {
+    if ((runtime.adapter.transformMode ?? "context") !== "provider") return undefined;
+    const payload = (event as { payload?: unknown }).payload;
+    if (payload === null || typeof payload !== "object" || !Array.isArray((payload as { messages?: unknown }).messages)) return undefined;
+    const sid = ctx.sessionManager?.getSessionId?.() ?? "";
+    const fmt = detectWireFormat(payload);
+    if (fmt === "unknown") {
+      debug.event("provider-transform-unknown-format", { sid });
+      return undefined;
+    }
+    try {
+      const synth = synthesizeStream(payload, fmt);
+      if (synth.stream.length === 0) return undefined;
+      const result = await transformStream(ctx, runtime, synth.stream, "provider");
+      if (!result) return undefined;
+      const wireOut = rebuildWirePayload(result.rebuilt, payload, synth);
+      const outMsgs = (wireOut as { messages?: unknown[] }).messages?.length ?? 0;
+      const inMsgs = (payload as { messages?: unknown[] }).messages?.length ?? 0;
+      if (outMsgs !== inMsgs || wireOut !== payload) {
+        logInfo("provider-transform", { sid, fmt, inMsgs, outMsgs, nudge: result.nudgeInjected ? "injected" : "idle" });
+      }
+      debug.event("provider-transform", { sid, fmt, inMsgs, outMsgs, nudgeInjected: result.nudgeInjected });
+      return wireOut === payload ? undefined : wireOut;
+    } catch (e) {
+      // Fail-open: never break the request itself.
+      logThrow("provider-transform", e, { sid, fmt });
+      return undefined;
     }
   });
 }
