@@ -90,20 +90,23 @@ omp 内置的 `/compact` 被拦截，替换为 ACP 模型摘要式 compaction，
 ╭─────────────────────────────────────────────╮
 │           ACP Context Analysis              │
 ╰─────────────────────────────────────────────╯
- billion-context-omp@0.1.1
+ billion-context-omp@0.2.0
 
- Context: 6% (57k / 1.0M)
+ Context (session accounting, host footer scale): 9% (93k / 1.0M) — never shrinks; includes compressed originals
 
- Token Breakdown:
-   SysPrompt  ██░░░░░░░░░░░░░░░░░░  10%  5.9k
-   Framework  ██████████████████░░  90%  51k
+ Sent to LLM (after compression, est.): 63k (6% of limit)
+ Session-only (compressed originals, est.): 110k — pruned from every request; the footer/nudge still count them
 
- Nudge: idle — max compressible 0 < threshold 20000; growth 0 < floor 20000
+ Token Breakdown (sent view):
+   Tool       ██████████████████░░  88%  55k
+   SysPrompt  ██░░░░░░░░░░░░░░░░░   9%  5.9k
+   Text       ░░░░░░░░░░░░░░░░░░░░   1%  553
+   Summaries  ░░░░░░░░░░░░░░░░░░░░   2%  1.5k
 
- Blocks: 2 active / 2 total (21k tokens compressed)
-   [b1] T1 5.1k→1.0k: Fold architecture port
-   [b2] T1 15k→799: Replay guard hardening
+ Nudge: idle — growth 0 < floor 20000, ready: T1 50394
 
+ Blocks: 1 active / 1 total (112k tokens compressed)
+   [b1] T1 112k→1.5k: PR141 review + follow-up fixes
  Tag visibility: tags injected to LLM only (deep copy), not persisted in session, not shown in terminal.
 ```
 

@@ -107,7 +107,10 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: sentTokens });
 
   // The panel (shared kit surface) handles dual accounting, viability
-  // filtering, bars, and block rendering. Host-specific inputs only.
+  // filtering, bars, and block rendering. Host-specific inputs only:
+  // systemPromptTokens (measured) and unprunedTokens — the chars/4 estimate
+  // of the FULL fold projection, so the kit can derive Session-only on the
+  // same estimation scale as the sent view (never cross-scale; issue #18).
   const versionStr = typeof CURRENT_VERSION !== "undefined" && CURRENT_VERSION ? `billion-context-omp@${CURRENT_VERSION}` : undefined;
   return buildStatusPanel({
     version: versionStr,
@@ -116,5 +119,6 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     state: turn.state,
     nudge: turn.nudge,
     modelContextLimit: config.modelContextLimit,
+    unprunedTokens: coreMessages.reduce((sum, m) => sum + defaultCountTokens(m.text ?? ""), 0),
   });
 }
