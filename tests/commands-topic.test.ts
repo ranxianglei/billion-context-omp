@@ -49,3 +49,31 @@ test("/acp panel shows a topic for blocks without one (summary fallback)", async
   assert.match(blockLine, /: /, "topic column must render even without model-provided topic");
   assert.match(blockLine, /Database migration steps compl…/, "falls back to summary first slice (30-char cut)");
 });
+
+test("/acp panel separates session accounting from sent view (no fake Framework)", async () => {
+  const runtime = {
+    configFor: () => ({ modelContextLimit: 1_000_000, nudge: {}, compress: {} }),
+    stateFor: async () => ({
+      state: { blocks: [], stats: { tokensCompressed: 0 }, messageRefs: { byRaw: {}, byRef: {} } },
+      coreMessages: [],
+    }),
+    core: { processTurn: () => ({ messages: [], state: { blocks: [], stats: { tokensCompressed: 0 } }, nudge: { shouldInject: false, reason: "idle", contextBreakdown: { system: 100, tool: 20000, text: 3000, code: 500, summaries: 400, growth: 0 } } }) },
+  } as unknown as AcpRuntime;
+
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (text: string) => notified.push(text) },
+    getContextUsage: () => ({ tokens: 430_000 }), // raw session accounting
+    model: { contextWindow: 1_000_000 },
+    sessionManager: { getSessionId: () => "t3", getSessionFile: () => "/tmp/t3.json" },
+  } as unknown as ExtensionCommandContext;
+
+  const acp = makeCommands(runtime).find((c) => c.name === "acp")!;
+  await acp.options.handler!("", ctx);
+
+  const text = notified[0] ?? "";
+  assert.match(text, /Context \(session accounting\): 43% \(430k/, text);
+  assert.match(text, /Sent to LLM \(after compression\): /, text);
+  assert.match(text, /Session-only \(compressed originals \+ host overhead\)/, text);
+  assert.ok(!/Framework/.test(text), `fake Framework bucket must be gone:\n${text}`);
+});
