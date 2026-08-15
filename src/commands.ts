@@ -5,6 +5,7 @@ import { getSystemPromptText } from "./compat.js";
 import { topicFallback } from "./compress-tool.js";
 import { viableRanges } from "./messages.js";
 import { formatCompactTokens } from "./footer-status.js";
+import { estimateTokens, estimateTextTokens } from "./tokens.js";
 import { logThrow } from "./log.js";
 
 declare const CURRENT_VERSION: string;
@@ -102,7 +103,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const config = runtime.configFor(ctx);
   // Use pi's real context usage (anchored on provider usage) instead of a
   // chars/4 estimate — matches the footer percentage and the nudge decision
-  // the context transform computes.
+  // the context transform computes. NOTE: this is SESSION-tree accounting
+  // (never shrinks; includes compressed originals) — see the scale notes at
+  // the breakdown below.
   const realUsage = ctx.getContextUsage?.();
   const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
 
@@ -110,22 +113,29 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const nudge = turn.nudge;
   const bd = nudge?.contextBreakdown;
   const limit = config.modelContextLimit;
-  // Two different token accountings, honestly labeled:
-  //  - Session accounting (omp getContextUsage): the append-only session tree
-  //    INCLUDING compressed originals. It never shrinks — our pruning is a
-  //    per-request transform view omp cannot see. The footer reads this.
-  //  - Sent view: what actually reaches the LLM after compression (kernel's
+  // Three token accountings, each honestly labeled — they are measured at
+  // DIFFERENT scales and must never be subtracted from one another:
+  //  - Session accounting (omp getContextUsage): provider-token estimate of
+  //    the append-only session tree INCLUDING compressed originals. It never
+  //    shrinks — our pruning is a per-request view transform omp cannot see
+  //    (omp's recordAnchoredHistoryRewrite is not exposed to extensions), so
+  //    the footer percentage and nudge thresholds keep counting them.
+  //  - Sent view: what actually reaches the LLM after compression — kernel
   //    chars/4 classification over the pruned projection + measured system
-  //    prompt). This is the number compression controls.
-  // The old panel subtracted one from the other and dumped the difference
-  // into a fake "Framework" bucket — on a well-compressed session that read
-  // as "Framework 390K / 430K total" (90%!), which is just the compressed
-  // originals still sitting in the session tree.
+  //    prompt. This is the number compression controls.
+  //  - Session-only: compressed originals still in the tree, measured on the
+  //    SAME chars/4 scale as the sent view (full projection minus pruned
+  //    projection). The old panel subtracted provider-scale session tokens
+  //    from the chars/4 sent view, producing numbers that reconciled with
+  //    neither (#18).
   const classified = bd ? bd.system + bd.tool + bd.summaries + bd.code + bd.text : 0;
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const sentTotal = classified + systemPromptTokens;
-  const sessionOnly = Math.max(0, tokenCount - sentTotal);
+  const fullEstimate = estimateTokens(coreMessages);
+  const sentEstimate = turn.messages.reduce((n, m) => n + estimateTextTokens(m.text ?? ""), 0);
+  const sessionOnly = Math.max(0, fullEstimate - sentEstimate);
+  const sentPct = limit > 0 ? Math.round((sentTotal / limit) * 100) : 0;
   const displayTotal = tokenCount;
   const displayPct = limit > 0 ? Math.round((displayTotal / limit) * 100) : 0;
   const activeBlocksList = state.blocks.filter((b) => b.active);
@@ -140,7 +150,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   lines.push("╰─────────────────────────────────────────────╯");
   if (versionStr) lines.push(versionStr);
   lines.push("");
-  lines.push(`Context (session accounting): ${displayPct}% (${fmtTokens(displayTotal)} / ${fmtTokens(limit)})`);
+  lines.push(`Context (session accounting, provider tokens): ${displayPct}% (${fmtTokens(displayTotal)} / ${fmtTokens(limit)}) — never shrinks; includes compressed originals`);
 
   if (nudge && bd) {
     const growth = bd.growth;
@@ -148,9 +158,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
       lines.push(`Growth: +${fmtTokens(growth)} since last nudge`);
     }
     lines.push("");
-    lines.push(`Sent to LLM (after compression): ${fmtTokens(sentTotal)}`);
+    lines.push(`Sent to LLM (after compression, est.): ${fmtTokens(sentTotal)}${limit > 0 ? ` (${sentPct}% of limit)` : ""}`);
     if (sessionOnly > 0) {
-      lines.push(`Session-only (compressed originals + host overhead): ${fmtTokens(sessionOnly)} — pruned from every request; the footer counts it`);
+      lines.push(`Session-only (compressed originals, est.): ${fmtTokens(sessionOnly)} — pruned from every request; footer/nudge still count them`);
     }
     lines.push("");
     lines.push("Token Breakdown (sent view):");

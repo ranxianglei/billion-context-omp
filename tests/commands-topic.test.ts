@@ -63,7 +63,7 @@ test("/acp panel separates session accounting from sent view (no fake Framework)
   const notified: string[] = [];
   const ctx = {
     ui: { notify: (text: string) => notified.push(text) },
-    getContextUsage: () => ({ tokens: 430_000 }), // raw session accounting
+    getContextUsage: () => ({ tokens: 430_000 }), // raw session accounting (provider scale)
     model: { contextWindow: 1_000_000 },
     sessionManager: { getSessionId: () => "t3", getSessionFile: () => "/tmp/t3.json" },
   } as unknown as ExtensionCommandContext;
@@ -72,8 +72,44 @@ test("/acp panel separates session accounting from sent view (no fake Framework)
   await acp.options.handler!("", ctx);
 
   const text = notified[0] ?? "";
-  assert.match(text, /Context \(session accounting\): 43% \(430k/, text);
-  assert.match(text, /Sent to LLM \(after compression\): /, text);
-  assert.match(text, /Session-only \(compressed originals \+ host overhead\)/, text);
+  assert.match(text, /Context \(session accounting, provider tokens\): 43% \(430k/, text);
+  assert.match(text, /Sent to LLM \(after compression, est\.\): 24k \(2% of limit\)/, text);
+  assert.ok(!/Session-only/.test(text), `no originals to prune, line must be hidden:\n${text}`);
   assert.ok(!/Framework/.test(text), `fake Framework bucket must be gone:\n${text}`);
+});
+
+test("/acp panel: session-only is same-scale (chars/4), never provider-minus-estimate (#18)", async () => {
+  // 20k chars of tool output in the tree, all covered by an active block;
+  // processTurn prunes it to nothing. Session-only must read ~5.0k (chars/4
+  // estimate), NOT 430k provider tokens minus the sent view.
+  const covered = "x".repeat(20_000);
+  const runtime = {
+    configFor: () => ({ modelContextLimit: 1_000_000, nudge: {}, compress: {} }),
+    stateFor: async () => ({
+      state: {
+        blocks: [{ blockId: "b1", tier: 1, active: true, compressedTokens: 5000, effectiveMessageIds: ["p1"], directBlockIds: [] }],
+        stats: { tokensCompressed: 5000 },
+        messageRefs: { byRaw: {}, byRef: {} },
+      },
+      coreMessages: [{ id: "p1", role: "tool", contentType: "text", text: covered }],
+    }),
+    core: { processTurn: () => ({ messages: [], state: { blocks: [], stats: { tokensCompressed: 5000 } }, nudge: { shouldInject: false, reason: "idle", contextBreakdown: { system: 0, tool: 0, text: 0, code: 0, summaries: 0, growth: 0 } } }) },
+  } as unknown as AcpRuntime;
+
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (text: string) => notified.push(text) },
+    getContextUsage: () => ({ tokens: 430_000 }),
+    model: { contextWindow: 1_000_000 },
+    sessionManager: { getSessionId: () => "t4", getSessionFile: () => "/tmp/t4.json" },
+  } as unknown as ExtensionCommandContext;
+
+  const acp = makeCommands(runtime).find((c) => c.name === "acp")!;
+  await acp.options.handler!("", ctx);
+
+  const text = notified[0] ?? "";
+  const line = text.split("\n").find((l) => l.includes("Session-only"));
+  assert.ok(line, `session-only line missing:\n${text}`);
+  assert.match(line, /5\.0k/, `must be the chars/4 estimate of pruned originals:\n${line}`);
+  assert.ok(!/425k|426k|424k/.test(line), `cross-scale subtraction forbidden:\n${line}`);
 });
