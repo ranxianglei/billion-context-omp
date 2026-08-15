@@ -542,3 +542,21 @@ test("mid-stream mutation triggers re-fold and the in-stream compress call still
   const statusText = (status as { content: Array<{ type: string; text: string }> }).content[0].text;
   assert.ok(/1 active/.test(statusText), `exactly one active block after re-fold:\n${statusText}`);
 });
+
+// Issue #21: extension tools default to loadMode "discoverable", which omp's
+// tools.xdev (default ON) mounts behind xd:// devices — the model then calls
+// compress via write(path:"xd://compress", content:<JSON string>), and the
+// JSON-inside-a-JSON-string escaping layer produced the parse errors and
+// truncated write calls in that issue. All four ACP tools must stay
+// top-level ("essential") so the model calls them with structured args.
+test("all ACP tools are registered as essential (top-level, not xd:// devices)", async () => {
+  const cap = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(cap.api as unknown as ExtensionAPI);
+  const expected = ["compress", "decompress", "search_context", "acp_status"];
+  assert.equal(cap.api.tools.length, expected.length, `expected ${expected.length} tools`);
+  for (const name of expected) {
+    const tool = cap.api.tools.find((t) => t.name === name);
+    assert.ok(tool, `${name} registered`);
+    assert.equal((tool as any).loadMode, "essential", `${name} must be loadMode:"essential" — discoverable tools get xd://-mounted and reintroduce the issue #21 JSON-in-JSON trap`);
+  }
+});

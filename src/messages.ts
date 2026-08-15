@@ -92,12 +92,15 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
   return out;
 }
 
-/** Extract a compress tool's arguments from a stream toolCall. omp mounts
- *  extension tools as xd:// devices: the model invokes them through the write
- *  tool with path "xd://compress" and the tool args JSON-encoded in the
- *  content field — the session stream never shows a name:"compress" call.
- *  Sessions without a granted write tool expose compress top-level instead,
- *  so both shapes must replay. Returns normalized compress args (content array
+/** Extract a compress tool's arguments from a stream toolCall. Two call
+ *  shapes exist: (1) top-level — our tools are registered with
+ *  loadMode:"essential" so omp's tools.xdev does NOT mount them as xd://
+ *  devices; the stream shows name:"compress" directly. (2) legacy xd:// —
+ *  sessions recorded before that change (or hosts with tools.xdev forcing
+ *  discoverable mounting) invoked compress through the write tool with path
+ *  "xd://compress" and the tool args JSON-encoded in the content field. Both
+ *  shapes must replay from the stream. Returns normalized compress args
+ *  (content array
  *  plus optional topic / summaryMaxChars from wherever they live). */
 function compressToolArgs(call: { name: string; arguments?: unknown }): { content: unknown[]; topic?: unknown; summaryMaxChars?: unknown } | null {
   let args = call.arguments;
