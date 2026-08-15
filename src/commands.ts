@@ -2,6 +2,7 @@ import type { ExtensionCommandContext, RegisteredCommand } from "@oh-my-pi/pi-co
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
+import { collectCoveredMessageIds, estimateTokens } from "./tokens.js";
 import { buildStatusPanel } from "billion-context-kit";
 import { logThrow } from "./log.js";
 
@@ -91,18 +92,27 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // Host session accounting — the same number the omp footer displays
   // (anchored on provider usage when available, else chars/4 estimate).
   const realUsage = ctx.getContextUsage?.();
-  const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
+  const sessionTokens = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
 
-  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
+  // Nudge arbitration on the SENT-VIEW scale (must match the context
+  // transform and acp_status — see src/index.ts). The session-tree number
+  // above feeds only the panel's footer-scale line; letting it arbitrate
+  // here too would show "Nudge: EMERGENCY" on a panel whose real sent view
+  // is a few percent (issue #18 report: 366K tree vs 180K window, 204%).
+  const systemPromptText = getSystemPromptText(ctx);
+  const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
+  const coveredIds = collectCoveredMessageIds(state);
+  const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
+
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: sentTokens });
 
   // The panel (shared kit surface) handles dual accounting, viability
-  // filtering, bars, and block rendering. Host-specific inputs only:
-  const systemPromptText = getSystemPromptText(ctx);
+  // filtering, bars, and block rendering. Host-specific inputs only.
   const versionStr = typeof CURRENT_VERSION !== "undefined" && CURRENT_VERSION ? `billion-context-omp@${CURRENT_VERSION}` : undefined;
   return buildStatusPanel({
     version: versionStr,
-    tokenCount,
-    systemPromptTokens: systemPromptText ? defaultCountTokens(systemPromptText) : 0,
+    tokenCount: sessionTokens,
+    systemPromptTokens,
     state: turn.state,
     nudge: turn.nudge,
     modelContextLimit: config.modelContextLimit,

@@ -2,7 +2,8 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
-import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTextTokens, estimateTokens } from "./tokens.js";
+import { getSystemPromptText } from "./compat.js";
 import { viableRanges } from "billion-context-kit";
 import { logThrow } from "./log.js";
 
@@ -44,13 +45,16 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // model actually receives. Without this, consumed/hidden compress calls and
   // pruned messages showed up in acp_status even though they never reached
   // the model.
-  const tokenCount = estimateTokens(coreMessages, collectCoveredMessageIds(state));
-  const realUsage = ctx.getContextUsage?.();
+  const tokenCount = estimateTokens(coreMessages, collectCoveredMessageIds(state)) + estimateTextTokens(getSystemPromptText(ctx) ?? "");
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,
     config,
-    tokenCount: realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : tokenCount,
+    // Sent-view scale — see src/index.ts context handler. The session-tree
+    // number (ctx.getContextUsage) must never arbitrate emergencies for the
+    // sent view: a tree that outgrew the model window reads as a permanent
+    // 200%+ emergency while the real sent view is a few percent.
+    tokenCount,
   });
   const processed = turn.messages;
 
