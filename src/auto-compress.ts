@@ -165,6 +165,10 @@ export async function summarizeMessages(
     customInstructions?: string;
     signal?: AbortSignal;
     completeFn?: typeof complete;
+    /** Fold-slot messageRefs — when provided, formatSlice renders stable
+     *  mNNNNN refs instead of raw pN position ids (issue #14 Minor1: the
+     *  model was shown p-ids it must never echo back). */
+    messageRefs?: CompressionState["messageRefs"];
   },
 ): Promise<{ summary: string; model: string } | null> {
   const run = opts?.completeFn ?? complete;
@@ -198,7 +202,7 @@ export async function summarizeMessages(
     if (custom) instructions += `\n\nUser instructions for this compaction: ${custom}`;
     const userText =
       `ENTIRE conversation to compress (${slice.length} messages, ~${tokens} tokens). Compress it:\n\n` +
-      formatSlice(slice, createInitialState());
+      formatSlice(slice, opts?.messageRefs ? { ...createInitialState(), messageRefs: opts.messageRefs } : createInitialState());
     const response = await run(
       model,
       { systemPrompt: [instructions], messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },

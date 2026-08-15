@@ -69,11 +69,16 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const toSummarize = [...(prep.messagesToSummarize ?? []), ...(prep.turnPrefixMessages ?? [])];
       if (toSummarize.length === 0) return undefined;
 
+      // Fold-slot refs so the compaction prompt shows stable mNNNNN ids, not
+      // raw pN positions (issue #14 Minor1).
+      const slot = await runtime.stateFor(ctx);
+
       ctx.ui?.notify?.(`ACP: compacting ${toSummarize.length} messages…`, "info");
       const result = await summarizeMessages(ctx, toSummarize, runtime.prompts, runtime.adapter.compress?.compressModel, {
         previousSummary: prep.previousSummary,
         customInstructions: event.customInstructions,
         signal: event.signal,
+        messageRefs: slot.state.messageRefs,
       });
       if (!result) {
         ctx.ui?.notify?.("ACP: compression fell back to Pi native compaction", "warning");
