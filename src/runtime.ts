@@ -53,8 +53,20 @@ export interface AcpRuntime {
   acquireLock(sid: string): Promise<() => void>;
 }
 
-function freshSlot(): FoldSlot {
-  return { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set() };
+function freshSlot(preserveNudgeFrom?: FoldSlot): FoldSlot {
+  const slot: FoldSlot = { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set() };
+  // Cadence stamps are SESSION-level accounting ("when was the model last
+  // reminded"), not stream-derived state. A re-fold rebuilds blocks and refs
+  // deterministically from the stream, but must not forget the reminder
+  // history: omp fires back-to-back context events on DIFFERENT views of the
+  // same session (its recap/subagent pipelines re-feed our own rebuilt
+  // output; observed live: context-out msgs=78 at 13:41:11.430 became
+  // context-in msgs=78 the same millisecond). Clearing stamps there armed the
+  // growth-floor gate from zero and re-fired the nudge 4ms after the previous
+  // one. Kernel-side epoch resets (a real compression clears the stamps via
+  // applyCompression) are unaffected — they act on the state we preserve.
+  if (preserveNudgeFrom) slot.state = { ...slot.state, nudge: preserveNudgeFrom.state.nudge };
+  return slot;
 }
 
 function stateHasCompressCall(state: CompressionState, callId: string): boolean {
@@ -117,7 +129,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       // the first live context event always re-folds from scratch so the
       // authoritative stream (not the persisted projection) rules.
       debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp: 0, streamLen: stream.length, reason: "preview" });
-      slot = freshSlot();
+      slot = freshSlot(slot);
       slots.set(sid, slot);
     }
     const ids = stream.map(messageIdentity);
@@ -125,7 +137,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     while (lcp < Math.min(ids.length, slot.identities.length) && ids[lcp] === slot.identities[lcp]) lcp++;
     if (lcp < slot.foldedLen) {
       debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp, streamLen: ids.length });
-      slot = freshSlot();
+      slot = freshSlot(slot);
       slots.set(sid, slot);
       lcp = 0;
     }

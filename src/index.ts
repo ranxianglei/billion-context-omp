@@ -248,6 +248,25 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     let nudgeInjected = false;
 
     if (turn.nudge?.shouldInject) {
+      // Feedback-view guard (defense in depth): omp fires back-to-back
+      // context events on DIFFERENT views of the same session — its
+      // recap/subagent pipelines re-feed our own rebuilt output as the next
+      // event.messages (observed live: our 78-msg context-out at 13:41:11.430
+      // became context-in the same millisecond). The PRIMARY fix for the
+      // double-nudge is cadence-stamp preservation across re-folds
+      // (runtime.ts freshSlot) — with stamps intact the kernel's growth gate
+      // holds the line on its own. This guard covers the forms the cadence
+      // gate cannot (e.g. emergency-band re-fires on a feedback view): if the
+      // incoming stream already ENDS with our nudge text, the model has been
+      // reminded in this very turn; stacking a second copy is noise. Matched
+      // on stable kernel template phrases; historical nudges deeper in the
+      // stream are normal and ignored — only the trailing message counts.
+      const lastUser = [...input].reverse().find((m) => m.role === "user");
+      const tailText = lastUser ? JSON.stringify(lastUser.content ?? "") : "";
+      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached");
+      if (isFeedbackView) {
+        debug.event("nudge-feedback-skip", { sid: ctx.sessionManager.getSessionId(), msgs: input.length });
+      } else {
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       // The kernel's over-limit branch (usage >= maxContextLimitPct) applies no
       // growth cadence — it re-fires on every context event, i.e. every LLM
@@ -299,6 +318,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
           }
           debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, text: rendered.text + example });
         }
+      }
       }
     }
 
