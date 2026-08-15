@@ -500,18 +500,6 @@ export function boundaryRaw(ref: string, byRef: Record<string, string>, blocks: 
   return pick === "min" ? ids.reduce((a, b) => (pos(a) <= pos(b) ? a : b)) : ids.reduce((a, b) => (pos(a) >= pos(b) ? a : b));
 }
 
-/** Ranges too small to carry a meaningful summary (kernel minSummaryLength
- *  is 50 chars; a 16-token message can't support one and nets a LOSS). The
- * "compress all ranges in one call" nudge hint makes listing them a trap:
- * the model bundles them, the batch fails atomically, nothing gets applied
- * (observed live: 14-range batch rejected by a 43-char summary on a
- * 16-token range). 200 tokens ≈ 800 chars of substance — comfortably above
- * the summary floor while still listing every genuinely compressible range. */
-export const VIABLE_RANGE_MIN_TOKENS = 200;
-
-export function viableRanges<T extends { tokens: number }>(ranges: T[]): T[] {
-  return ranges.filter((r) => r.tokens >= VIABLE_RANGE_MIN_TOKENS);
-}
 
 /** One fingerprint per range (never filtered, "-" for unresolvable
  *  boundaries) so replay-side index lookup stays aligned even for mixed

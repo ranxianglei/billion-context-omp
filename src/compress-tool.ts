@@ -20,11 +20,6 @@ const RangeSpec = type({
 /** Label shown for a block when the model did not pass a topic: first
  *  sentence-ish slice of the summary (≤30 chars). Decorative only — never
  *  blocks compression. */
-export function topicFallback(summary: string): string {
-  const first = summary.split(/[.\n]/)[0] ?? "";
-  const t = first.trim().replace(/^["'`]+/, "").trim();
-  return t.length <= 30 ? t : `${t.slice(0, 30).trimEnd()}…`;
-}
 
 const CompressParams = type({
   "topic?": type("string").describe("Fallback topic for entries without their own. Omit when each content entry specifies its own topic."),

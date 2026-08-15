@@ -68,7 +68,8 @@
 		"@oh-my-pi/pi-coding-agent": "17.3.2",
 		"@oh-my-pi/pi-utils": "17.3.2",
 		"@types/node": "^26.1.2",
-		"acp-kernel": "0.0.22",
+		"acp-kernel": "0.0.23",
+		"billion-context-kit": "git+https://github.com/ranxianglei/billion-context-kit.git#v0.1.1",
 		"tsup": "^8.5.1",
 		"tsx": "^4.23.1",
 		"typescript": "^7.0.2"

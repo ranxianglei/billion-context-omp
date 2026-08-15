@@ -62,12 +62,12 @@ billion-context-omp/
 
 ### Key Design Decisions
 
-1. **acp-kernel is bundled inline** — tsup does NOT list it in `external`, so `dist/index.js` is self-contained (zero runtime deps).
+1. **acp-kernel is bundled inline** — tsup does NOT list it in `external`, so `dist/index.js` is self-contained (zero runtime deps). **billion-context-kit** (the host-agnostic shared surface: /acp panel, viableRanges, topicFallback) is likewise bundled inline from devDependencies.
 2. **Tags use XML format** `` — written with hex escapes (`\x3c`, `\x3e`) to avoid Write/Edit tool stripping.
 3. **Assistant messages skip tag injection** — prevents model echo of XML tags.
 4. **Tags appended to END of text** — matches opencode-acp / billion-context-pi pattern.
 5. **Auto-update on session_start** — checks npm registry (throttled), auto-installs if newer.
-6. **acp-kernel MUST be pinned to an exact version** (e.g. `"acp-kernel": "0.0.22"`, NEVER `"^0.0.22"`). It is a build-time dependency that tsup bundles inline; a caret range makes the resolved version drift if `package-lock.json` is regenerated or absent, breaking reproducible builds.
+6. **acp-kernel MUST be pinned to an exact version** (e.g. `"acp-kernel": "0.0.23"`, NEVER `"^0.0.23"`). It is a build-time dependency that tsup bundles inline; a caret range makes the resolved version drift if `package-lock.json` is regenerated or absent, breaking reproducible builds. **billion-context-kit follows the same rule** — currently a git tag pin (`git+https://…#v0.1.1`, CI-friendly over https); the release PR swaps it to the exact npm version once the kit is published.
 7. **Delegate subsystem deferred** — omp provides its own multi-agent orchestration. This package does NOT register `acp_delegate*` tools to avoid conflicts. The `DelegateConfig` type is retained in `config.ts` as an inert, forward-compatible surface.
 8. **Paths are omp-scoped via `CONFIG_DIR_NAME`** — imported from `@oh-my-pi/pi-utils` (resolves to `.omp`). Config: `~/.omp/acp-omp.json`, log: `~/.omp/acp-omp.log`, state: `<session>.acp-omp.json`. These never collide with anything else.
 9. **Schemas use arktype, not TypeBox** — omp's `ToolDefinition.parameters` accepts omp's `TSchema` (= arktype `Type`), re-exported from `@oh-my-pi/omptype`. TypeBox schemas are structurally incompatible. The 4 tool schemas use arktype's `type({...})` builder.
@@ -105,7 +105,7 @@ Same baseline as acp-kernel (branch naming, CI auto-publish, PR-merge-is-human-o
 
 ### Cross-repo dependency: acp-kernel MUST ship first
 
-`acp-kernel` is pinned in **devDependencies** (exact version, no `^`) and **bundled inline** at build time. ⚠️ Publishing order is strict: release `acp-kernel` first, verify `npm view acp-kernel version`, THEN release billion-context-omp.
+`acp-kernel` is pinned in **devDependencies** (exact version, no `^`) and **bundled inline** at build time. `billion-context-kit` likewise (exact pin). ⚠️ Publishing order is strict: release `acp-kernel` first, then `billion-context-kit` (verify each `npm view <pkg> version`), THEN release billion-context-omp.
 
 ### Release commit
 
