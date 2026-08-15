@@ -73,8 +73,42 @@ test("/acp panel separates session accounting from sent view (no fake Framework)
   await acp.options.handler!("", ctx);
 
   const text = notified[0] ?? "";
-  assert.match(text, /Context \(session accounting\): 43% \(430k/, text);
-  assert.match(text, /Sent to LLM \(after compression\): /, text);
-  assert.match(text, /Session-only \(compressed originals \+ host overhead\)/, text);
+  assert.match(text, /Context \(session accounting, host footer scale\): 43% \(430k/, text);
+  assert.match(text, /Sent to LLM \(after compression, est\.\): /, text);
   assert.ok(!/Framework/.test(text), `fake Framework bucket must be gone:\n${text}`);
+});
+
+test("/acp panel session-only uses the estimation scale, never cross-scale (issue #18)", async () => {
+  // Full fold projection estimates at 134k on the chars/4 scale; the pruned
+  // sent view is 24k. Session-only must read 110k (estimate − estimate),
+  // NOT 430k − 24k (provider-scale footer minus estimate).
+  const coreMessages = Array.from({ length: 60 }, (_, i) =>
+    i % 2 === 0
+      ? { role: "user", contentType: "text", text: `u${i} ${"lorem ipsum dolor ".repeat(140)}` }
+      : { role: "assistant", contentType: "text", text: `a${i} ${"sit amet consectetur ".repeat(120)}` },
+  );
+  const runtime = {
+    configFor: () => ({ modelContextLimit: 1_000_000, nudge: {}, compress: {} }),
+    stateFor: async () => ({
+      state: { blocks: [], stats: { tokensCompressed: 0 }, messageRefs: { byRaw: {}, byRef: {} } },
+      coreMessages,
+    }),
+    core: { processTurn: () => ({ messages: [], state: { blocks: [], stats: { tokensCompressed: 0 } }, nudge: { shouldInject: false, reason: "idle", contextBreakdown: { system: 0, tool: 20_000, text: 4_000, code: 0, summaries: 0, growth: 0 } } }) },
+  } as unknown as AcpRuntime;
+
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (text: string) => notified.push(text) },
+    getContextUsage: () => ({ tokens: 430_000 }), // provider-scale footer number
+    model: { contextWindow: 1_000_000 },
+    sessionManager: { getSessionId: () => "t4", getSessionFile: () => "/tmp/t4.json" },
+  } as unknown as ExtensionCommandContext;
+
+  const acp = makeCommands(runtime).find((c) => c.name === "acp")!;
+  await acp.options.handler!("", ctx);
+
+  const text = notified[0] ?? "";
+  const line = text.split("\n").find((l) => l.startsWith("Session-only"));
+  assert.ok(line, `Session-only line missing:\n${text}`);
+  assert.doesNotMatch(line!, /406k/, "cross-scale subtraction must not appear");
 });
