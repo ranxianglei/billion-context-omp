@@ -30,6 +30,11 @@ interface FoldSlot {
   state: CompressionState;
   coreMessages: CoreMessage[];
   appliedCallIds: Set<string>;
+  /** Messages dropped from the live view by a host-side rewrite (native
+   * compaction, rewind): kept restorable for decompress under archived ids
+   * (a1..aN) so blocks survive even though their compress calls left the
+   * stream. Never fed to processTurn. */
+  archive: CoreMessage[];
 }
 
 export interface AcpRuntime {
@@ -41,20 +46,56 @@ export interface AcpRuntime {
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
   foldStream(ctx: ExtensionContext, stream: AgentMessage[]): FoldResult;
-  stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }>;
+  stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[]; archive: CoreMessage[] }>;
   commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void;
   forgetSession(sid: string): void;
+  acquireLock(sid: string): Promise<() => void>;
   /** Rebuild blocks from the persisted session view at session_start so /acp
  *  and acp_status show them BEFORE the first LLM call of a resumed session.
- *  The slot is marked preview and always re-folded authoritatively at the
- *  first context event (the live stream is the truth source, not the
- *  persisted view). */
+ *  The slot is marked preview; the first live context event keeps it when the
+ *  projection matches the live stream, otherwise carries it over (the live
+ *  stream is the truth source, not the persisted view). */
   primeFold(ctx: ExtensionContext): void;
-  acquireLock(sid: string): Promise<() => void>;
+}
+function freshSlot(): FoldSlot {
+  return { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set(), archive: [] };
 }
 
-function freshSlot(): FoldSlot {
-  return { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set() };
+/** Survive a host-side prefix rewrite (native `/compact` truncates the LLM
+ * view at firstKeptEntryId, removing the in-stream compress calls blocks
+ * replay from — #19). The old stream is archived under `a`-prefixed ids and
+ * the block ledger is carried over: blocks stay findable/decompressable, m-refs
+ * keep their meaning, and new blocks continue the b-id sequence. Kernel
+ * syncBlocks deactivates carried blocks whose covered messages left the live
+ * view, so they never prune or tag anything. */
+function carryOverFold(old: FoldSlot): FoldSlot {
+  const offset = old.archive.length;
+  const remapId = (id: string): string => {
+    const m = /^p(\d+)(.*)$/.exec(id);
+    return m ? `a${offset + Number(m[1])}${m[2]}` : id;
+  };
+  const byRaw: Record<string, string> = {};
+  for (const [raw, ref] of Object.entries(old.state.messageRefs.byRaw)) byRaw[remapId(raw)] = ref;
+  const byRef: Record<string, string> = {};
+  for (const [ref, raw] of Object.entries(old.state.messageRefs.byRef)) byRef[ref] = remapId(raw);
+  return {
+    identities: [],
+    foldedLen: 0,
+    preview: false,
+    state: {
+      ...old.state,
+      messageRefs: { byRaw, byRef },
+      blocks: old.state.blocks.map((b) => ({
+        ...b,
+        directMessageIds: b.directMessageIds.map(remapId),
+        effectiveMessageIds: b.effectiveMessageIds.map(remapId),
+        directBlockIds: [...b.directBlockIds],
+      })),
+    },
+    coreMessages: [],
+    appliedCallIds: new Set(old.appliedCallIds),
+    archive: [...old.archive, ...old.coreMessages.map((m) => ({ ...m, id: remapId(m.id) }))],
+  };
 }
 
 function stateHasCompressCall(state: CompressionState, callId: string): boolean {
@@ -112,22 +153,48 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function foldStream(ctx: ExtensionContext, stream: AgentMessage[]): FoldResult {
     const sid = sidOf(ctx);
     let slot = slotFor(sid);
-    if (slot.preview) {
-      // A primed slot is a disposable preview built from the persisted view —
-      // the first live context event always re-folds from scratch so the
-      // authoritative stream (not the persisted projection) rules.
-      debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp: 0, streamLen: stream.length, reason: "preview" });
-      slot = freshSlot();
-      slots.set(sid, slot);
-    }
     const ids = stream.map(messageIdentity);
     let lcp = 0;
     while (lcp < Math.min(ids.length, slot.identities.length) && ids[lcp] === slot.identities[lcp]) lcp++;
-    if (lcp < slot.foldedLen) {
-      debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp, streamLen: ids.length });
-      slot = freshSlot();
-      slots.set(sid, slot);
-      lcp = 0;
+    if (slot.preview && lcp < slot.identities.length) {
+      // The primed projection diverges from the live stream. A full prefix
+      // rewrite (first message replaced — native compaction before the first
+      // live event) carries the primed blocks over (#19); any other
+      // divergence falls back to a scratch re-fold so the preview never
+      // leaks.
+      if (lcp === 0 && slot.foldedLen > 0) {
+        debug.event("fold-carryover", { sid, foldedLen: slot.foldedLen, lcp, streamLen: ids.length, reason: "preview-divergence" });
+        slot = carryOverFold(slot);
+        slots.set(sid, slot);
+        lcp = 0;
+      } else {
+        debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp, streamLen: ids.length, reason: "preview-divergence" });
+        slot = freshSlot();
+        slots.set(sid, slot);
+      }
+      slot.preview = false;
+    } else if (slot.preview) {
+      // The live stream extends the primed prefix — promote the preview to
+      // authoritative; incremental folding continues from foldedLen.
+      slot.preview = false;
+    } else if (lcp < slot.foldedLen) {
+      if (lcp > 0) {
+        // Tail rewind (retry): the prefix is intact and only the tail
+        // changed. Re-fold from scratch — position-based refs stay
+        // deterministic for the untouched prefix.
+        debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp, streamLen: ids.length });
+        slot = freshSlot();
+        slots.set(sid, slot);
+      } else {
+        // Host-side prefix rewrite (native /compact): the live stream no
+        // longer contains the pre-truncation compress calls, so a scratch
+        // re-fold would erase every block (#19). Archive the old stream and
+        // carry the block ledger over instead.
+        debug.event("fold-carryover", { sid, foldedLen: slot.foldedLen, lcp, streamLen: ids.length });
+        slot = carryOverFold(slot);
+        slots.set(sid, slot);
+        lcp = 0;
+      }
     }
 
     const coreMessages = streamToCoreMessages(stream);
@@ -200,22 +267,29 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return { state: slot.state, coreMessages, originalById, streamLen: stream.length };
   }
 
-  function stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }> {
+  function stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[]; archive: CoreMessage[] }> {
     const slot = slotFor(sidOf(ctx));
-    return Promise.resolve({ state: slot.state, coreMessages: slot.coreMessages });
+    return Promise.resolve({ state: slot.state, coreMessages: slot.coreMessages, archive: slot.archive });
   }
 
   function primeFold(ctx: ExtensionContext): void {
     const sid = sidOf(ctx);
     try {
-      // ReadonlySessionManager's type omits buildSessionContext, but the
-      // runtime object has it — it builds exactly the view omp feeds the
-      // agent on resume. Purely a preview: discarded at the first context
-      // event, so a mismatching projection can never leak into live state.
-      const sm = ctx.sessionManager as unknown as {
-        buildSessionContext?: () => { messages?: AgentMessage[] };
-      };
-      const stream = sm.buildSessionContext?.().messages ?? [];
+      // Replay from the FULL branch, not the collapsed context view: after a
+      // native compaction the collapsed view omits the pre-truncation
+      // compress calls, and blocks would be unrecoverable on resume. The
+      // branch is append-only and contains every entry ever appended.
+      // ReadonlySessionManager's type omits buildSessionContext (the legacy
+      // fallback below); getBranch is typed.
+      const branch = typeof ctx.sessionManager.getBranch === "function" ? ctx.sessionManager.getBranch() : [];
+      const stream: AgentMessage[] = [];
+      for (const entry of branch) {
+        if (entry.type === "message" && entry.message) stream.push(entry.message);
+      }
+      if (stream.length === 0) {
+        const build = (ctx.sessionManager as unknown as { buildSessionContext?: () => { messages?: AgentMessage[] } }).buildSessionContext;
+        stream.push(...(build?.().messages ?? []));
+      }
       if (stream.length === 0) return;
       const r = foldStream(ctx, stream);
       slotFor(sid).preview = true;

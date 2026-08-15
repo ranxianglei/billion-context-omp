@@ -4,6 +4,7 @@ import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges 
 import { getSystemPromptText } from "./compat.js";
 import { topicFallback } from "./compress-tool.js";
 import { viableRanges } from "./messages.js";
+import { handleSearch } from "./search-tool.js";
 import { formatCompactTokens } from "./footer-status.js";
 import { logThrow } from "./log.js";
 
@@ -48,13 +49,13 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
             ctx.ui.notify('Usage: /acp-decompress <blockId> (e.g. "b3")');
             return;
           }
-          const { state, coreMessages } = await runtime.stateFor(ctx);
+          const { state, coreMessages, archive } = await runtime.stateFor(ctx);
           const block = state.blocks.find((b) => b.blockId === blockId);
           if (!block) {
             ctx.ui.notify(`Block ${blockId} not found.`);
             return;
           }
-          const { text, count } = collectBlockContent(state, block, coreMessages, { full: false });
+          const { text, count } = collectBlockContent(state, block, [...archive, ...coreMessages], { full: false });
           if (count === 0) {
             ctx.ui.notify(`Block ${blockId} has no restorable message content.`);
             return;
@@ -73,14 +74,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
             ctx.ui.notify("Usage: /acp-search <query>");
             return;
           }
-          const { state } = await runtime.stateFor(ctx);
-          const hits = runtime.core.search(query, state);
-          if (hits.length === 0) {
-            ctx.ui.notify("No matching blocks.");
-            return;
-          }
-          const lines = hits.map((b) => `[${b.blockId}] (t${b.tier}) ${b.topic ?? ""}`.trim());
-          ctx.ui.notify(lines.join("\n"));
+          ctx.ui.notify(await handleSearch({ query }, runtime, ctx));
         }),
       },
     },

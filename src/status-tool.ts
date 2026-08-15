@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
+import { buildStatusReport, defaultCountTokens, formatRanges, type CompressionState, type CoreMessage } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
 import { viableRanges } from "./messages.js";
 import { logThrow } from "./log.js";
@@ -37,7 +37,7 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
 }
 
 async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
-  const { state, coreMessages } = await runtime.stateFor(ctx);
+  const { state, coreMessages, archive } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
   // Run the same pipeline (assign-refs → prune → hide-compress-calls → ...) that
   // the context transform runs, so what acp_status reports matches what the
@@ -65,7 +65,8 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // Overview mode additionally surfaces the nudge decision and compressible
   // ranges — the same info the /acp slash command shows. Drill-down modes
   // (scope: compressed/uncompressed) return the base report as-is.
-  if (args.scope) return base;
+  const report = appendArchivedBlocks(base, turn.state, archive);
+  if (args.scope) return report;
 
   const nudge = turn.nudge;
   // Same viability filter as the nudge path: never list ranges too small to
@@ -89,5 +90,31 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
     // (merged oldest-first, with mixed-range breakdowns).
     extra.push(formatRanges(ranges, protectedRanges));
   }
-  return extra.length > 0 ? `${base}\n${extra.join("\n")}` : base;
+  return extra.length > 0 ? `${report}\n${extra.join("\n")}` : report;
+}
+
+/** Native compaction (#19) carries folded blocks into the archive. The
+ *  kernel report only lists ACTIVE blocks, so without this section the
+ *  carried blocks would read as "No compressed blocks" — exactly the
+ *  "compressed blocks unfindable" regression the issue reports. */
+function appendArchivedBlocks(report: string, state: CompressionState, archive: CoreMessage[]): string {
+  const archiveIds = new Set(archive.map((m) => m.id));
+  const archived = state.blocks
+    .filter((b) => !b.active && b.effectiveMessageIds.some((id) => archiveIds.has(id)))
+    .sort((a, b) => numericPart(a.blockId) - numericPart(b.blockId));
+  if (archived.length === 0) return report;
+  const lines = [
+    "",
+    `ARCHIVED BLOCKS \u2014 ${archived.length} archived by native compaction (restorable via decompress)`,
+  ];
+  for (const b of archived) {
+    const topic = b.topic ?? "(no topic)";
+    lines.push(`  ${b.blockId} (T${b.tier})  ${b.effectiveMessageIds.length} msgs  "${topic}"`);
+  }
+  return `${report}\n${lines.join("\n")}`;
+}
+
+function numericPart(blockId: string): number {
+  const match = /^b(\d+)$/.exec(blockId);
+  return match ? Number(match[1]) : 0;
 }

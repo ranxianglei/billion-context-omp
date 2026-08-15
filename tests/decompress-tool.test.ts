@@ -134,13 +134,16 @@ test("decompress still restores after the stream grew (append-only turns)", asyn
     "covered original still restorable from the full stream projection");
 });
 
-test("decompress degrades gracefully when the covered message left the stream (host compaction rewrite)", async () => {
+test("decompress still restores after a host compaction rewrite (archive carry-over — #19)", async () => {
   const { decompressTool, ctx, fire } = await setupWithCompressedBlock();
-  // omp native compaction rewrote history: the covered message is gone.
+  // omp native compaction rewrote history: the covered message is gone from
+  // the live stream. The fold must carry the block over with an archive
+  // instead of erasing it.
   await fire([{ role: "user", content: [{ type: "text", text: "compacted history placeholder" }], timestamp: Date.now() }]);
   const res = await decompressTool.execute("tc9", { blockId: "b1", inline: true }, undefined, undefined, ctx);
   const text = (res.content[0] as any).text as string;
-  assert.match(text, /not found/i, "tool-executed block does not survive a full stream rewrite");
+  assert.ok(text.includes("This is a detailed message that needs to be compressed."),
+    "covered original restored from the carry-over archive after a full stream rewrite");
 });
 
 test("decompress restores multi tool-call assistant messages (split refs carry # suffix)", async () => {

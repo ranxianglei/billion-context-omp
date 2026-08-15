@@ -329,6 +329,47 @@ test("live-rejected compress call stays rejected on the next INCREMENTAL context
   assert.doesNotMatch(status.content[0].text, /\bb2\b/, "no resurrection block");
 });
 
+test("native /compact rewrite keeps blocks decompressable and blockIds continuous (#19)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+
+  const stream = [userMsg(bigText("keep me")), userMsg(bigText("compact target one")), userMsg(bigText("compact target two")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
+  const r1 = await fire([...stream]);
+  const compress = api.tools.find((t) => t.name === "compress")!;
+  const resA = await compress.execute("tc19a", { content: [{ startId: refOf(r1.messages[1]), endId: refOf(r1.messages[2]), summary: "The two compact targets are preserved in this durable block summary." }] }, undefined, undefined, ctx);
+  assert.match(resA.content[0].text, /1 block/, `setup: compression must succeed:\n${resA.content[0].text}`);
+
+  // Host native compaction: summary message replaces the whole prefix — the
+  // in-stream compress call and its result are gone from the live view.
+  const rewritten = [userMsg("native compaction summary of the discarded turns"), userMsg("post-compact turn")];
+  const r2 = await fire(rewritten);
+  assert.ok(!JSON.stringify(r2.messages).includes("compact target one"), "compacted content stays folded out of the live view");
+
+  // The block survives the rewrite and its content is restorable from the
+  // carry-over archive — the exact regression reported in #19.
+  const statusTool = api.tools.find((t) => t.name === "acp_status")!;
+  const status = await statusTool.execute("tc19s", {}, undefined, undefined, ctx);
+  assert.ok(status.content[0].text.includes("b1"), `carried-over block must stay listed:\n${status.content[0].text}`);
+
+  const decompressTool = api.tools.find((t) => t.name === "decompress")!;
+  const res = await decompressTool.execute("tc19d", { blockId: "b1", inline: true }, undefined, undefined, ctx);
+  const text = (res as any).content[0].text as string;
+  assert.ok(text.includes("compact target one") && text.includes("compact target two"),
+    `archived originals must be restorable after native compaction:\n${text}`);
+
+  // Block numbering continues after carry-over: the next live compression is
+  // b2, never a collision with the archived b1.
+  const tail = [...rewritten, ...["x", "y", "z", "w", "v", "u"].map((n) => userMsg(`post-compact ${n} `.repeat(400)))];
+  const r3 = await fire(tail);
+  const ok = await compress.execute("tc19b", { content: [{ startId: refOf(r3.messages[2]), endId: refOf(r3.messages[2]), summary: "Post-compaction turn folded into a fresh durable summary block b2." }] }, undefined, undefined, ctx);
+  assert.match(ok.content[0].text, /reclaimed/, `next compression must succeed after carry-over:\n${ok.content[0].text}`);
+  const status2 = await statusTool.execute("tc19s2", {}, undefined, undefined, ctx);
+  assert.ok(status2.content[0].text.includes("b2"), `next block must continue numbering after carry-over:\n${status2.content[0].text}`);
+  assert.ok(status2.content[0].text.includes("b1"), `archived b1 must still be listed:\n${status2.content[0].text}`);
+});
+
 test("tail rewind (retry) re-folds deterministically without losing prefix refs", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);

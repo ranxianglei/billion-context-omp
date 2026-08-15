@@ -113,25 +113,15 @@ function headPreview(text: string): string {
 }
 
 /** Locate a single message's original text by its raw id (CoreMessage.id).
- *  The fold slot's coreMessages is the full projected input stream — the
- *  stream never shrinks within a session, so compressed-away messages are
- *  still there for restoration. */
+ *  Callers pass archive + live coreMessages: the live stream is truncated by
+ *  native compaction (#19), but carry-over archives keep every covered
+ *  original restorable under a-prefixed ids. */
 function findMessageContent(ref: string, coreMessages: CoreMessage[]): { text: string; role: string } | null {
   for (const cm of coreMessages) {
     if (cm.id === ref) return { text: cm.text ?? "", role: cm.role };
   }
   return null;
 }
-
-/** The fold slot's coreMessages already covers the whole input stream, so no
- *  tree fallback is needed — messages missing from the stream (e.g. after an
- *  omp compaction rewrote history) simply have no restorable content. */
-function resolveBlockMessages(
-  coreMessages: CoreMessage[],
-): CoreMessage[] {
-  return coreMessages;
-}
-
 /** Decompress a single message by its ref. Unlike block decompression (which
  *  defaults to file — blocks can be huge), a single message is usually small,
  *  so it defaults to inline. Oversized messages still go to a file. */
@@ -178,7 +168,10 @@ async function handleMessageRef(
 }
 
 async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
-  const { state, coreMessages } = await runtime.stateFor(ctx);
+  const { state, coreMessages, archive } = await runtime.stateFor(ctx);
+  // Archived messages (dropped from the live view by a native compaction —
+  // #19) resolve first: their ids (a1..) no longer exist in the live stream.
+  const restorable = [...archive, ...coreMessages];
   const arg = args.blockId.trim();
 
   // Resolve what `arg` refers to. Check message-ref FIRST (data-driven: a ref
@@ -190,7 +183,7 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   const rawArg = state.messageRefs.byRef[arg] ?? arg;
   const owner = state.blocks.find((b) => b.effectiveMessageIds.includes(rawArg));
   if (owner) {
-    return handleMessageRef(rawArg, owner.blockId, args, ctx, coreMessages);
+    return handleMessageRef(rawArg, owner.blockId, args, ctx, restorable);
   }
 
   // Otherwise treat as a block id.
@@ -203,12 +196,9 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   }
 
   const full = args.full ?? false;
-  // Resolve the block's message refs against the FULL session tree (falling
-  // back to getEntry for refs missing from the active branch), so decompress
-  // still restores original text after a tree navigation (undo/redo//tree).
-  const resolved = resolveBlockMessages(coreMessages);
-  const { text, count } = collectBlockContent(state, block, resolved, { full });
-
+  // Archived messages resolve first: a native compaction (#19) removes the
+  // originals from the live stream, but carry-over keeps them restorable.
+  const { text, count } = collectBlockContent(state, block, restorable, { full });
   if (count === 0) return `Block ${blockId} has no restorable message content.`;
 
   // inline mode: return content directly. Model explicitly accepts the context

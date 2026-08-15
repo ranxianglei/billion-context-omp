@@ -33,9 +33,11 @@ export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof Searc
     };
 }
 
-async function handleSearch(args: SearchArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
-    const { state, coreMessages } = await runtime.stateFor(ctx);
-    const docs = buildSearchDocs(coreMessages, state);
+export async function handleSearch(args: SearchArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
+    const { state, coreMessages, archive } = await runtime.stateFor(ctx);
+    // Archived messages fold under a-ids after a native compaction (#19);
+    // including them keeps their text searchable via block ownership.
+    const docs = buildSearchDocs([...archive, ...coreMessages], state);
     const msgCount = docs.filter((d) => d.kind === "message").length;
     const blockCount = docs.filter((d) => d.kind === "block").length;
     const results = searchBlocks(docs, args.query, { limit: args.limit });
