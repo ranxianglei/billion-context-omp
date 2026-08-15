@@ -1,6 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { topicFallback } from "../src/compress-tool.js";
+import { topicFallback } from "billion-context-kit";
 import { makeCommands } from "../src/commands.js";
 import type { AcpRuntime } from "../src/runtime.js";
 import type { ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
@@ -12,6 +12,16 @@ test("topicFallback: summary first slice, ≤30 chars, decorative only", () => {
   assert.equal(topicFallback(""), "");
 });
 
+function topicState() {
+  return {
+    blocks: [
+      { blockId: "b1", tier: 1, active: true, topic: undefined, summary: "Database migration steps completed successfully today", compressedTokens: 5100, effectiveMessageIds: [], directBlockIds: [] },
+    ],
+    stats: { tokensCompressed: 5100 },
+    messageRefs: { byRaw: {}, byRef: {} },
+  };
+}
+
 test("/acp panel shows a topic for blocks without one (summary fallback)", async () => {
   const runtime = {
     configFor: () => ({
@@ -19,17 +29,8 @@ test("/acp panel shows a topic for blocks without one (summary fallback)", async
       nudge: { growthFloorTokens: 20_000, thresholdPct: 0.2 },
       compress: { minCompressRange: 5000 },
     }),
-    stateFor: async () => ({
-      state: {
-        blocks: [
-          { blockId: "b1", tier: 1, active: true, topic: undefined, summary: "Database migration steps completed successfully today", compressedTokens: 5100, effectiveMessageIds: [], directBlockIds: [] },
-        ],
-        stats: { tokensCompressed: 5100 },
-        messageRefs: { byRaw: {}, byRef: {} },
-      },
-      coreMessages: [],
-    }),
-    core: { processTurn: () => ({ messages: [], state: { blocks: [], stats: { tokensCompressed: 0 } }, nudge: undefined }) },
+    stateFor: async () => ({ state: topicState(), coreMessages: [] }),
+    core: { processTurn: () => ({ messages: [], state: topicState(), nudge: undefined }) },
   } as unknown as AcpRuntime;
 
   const notified: string[] = [];

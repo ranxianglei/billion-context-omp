@@ -3,7 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-p
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
-import { viableRanges } from "./messages.js";
+import { viableRanges } from "billion-context-kit";
 import { logThrow } from "./log.js";
 
 const StatusParams = type({
