@@ -82,6 +82,38 @@ function freshSlot(preserveFrom?: FoldSlot): FoldSlot {
   return slot;
 }
 
+/** Is this re-fold a VIEW FLIP rather than a real history change? A view
+ *  flip keeps the stream's identity prefix — omp's variant pipelines
+ *  (recap/subagent/advisor) rebuild the same history with a different
+ *  projection granularity, so LCP stays high and only the tail differs. A
+ *  host compaction (/compact) rewrites the HEAD: the summary message is
+ *  first, LCP collapses to ~0. Live evidence: post-compress variant request
+ *  at 02:05:06 had foldedLen=198 lcp=197 streamLen=197 (flip, blocks must
+ *  survive); post-/compact at 02:27:55 had foldedLen=269 lcp=1 streamLen=40
+ *  (compaction, fresh fold is correct). */
+function isViewFlip(foldedLen: number, lcp: number): boolean {
+  return foldedLen > 0 && lcp >= Math.floor(foldedLen / 2);
+}
+
+/** Fold the same session through a different view. Compression blocks are
+ *  SESSION-level state on a view flip: the model compressed against the
+ *  OTHER view's projection, whose positional ids (p1..pN) and boundary
+ *  fingerprints do not exist in this view's projection — replaying the call
+ *  here systematically fails the fingerprint guard (observed live:
+ *  "reason=fp m00001..m00100 want 24fba6b4 got 0fba5795 @p1..p88" 11ms
+ *  after `compress applied 5 blocks`) and freshSlot's createInitialState
+ *  threw the just-created blocks away — 3 consecutive live compressions
+ *  each evaporated within one request, the session re-nudged and re-paid
+ *  them every time. Carrying blocks/refs/appliedCallIds keeps the live
+ *  compression; the wrapped calls stay marked applied so this fold does not
+ *  try to re-run them against this view's projection. */
+function preserveCompressedSlot(prev: FoldSlot): FoldSlot {
+  const slot = freshSlot(prev);
+  slot.state = { ...slot.state, blocks: prev.state.blocks, messageRefs: prev.state.messageRefs, stats: prev.state.stats };
+  slot.appliedCallIds = new Set(prev.appliedCallIds);
+  return slot;
+}
+
 function stateHasCompressCall(state: CompressionState, callId: string): boolean {
   return state.blocks.some((b) => b.compressCallId === callId);
 }
@@ -149,8 +181,14 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     let lcp = 0;
     while (lcp < Math.min(ids.length, slot.identities.length) && ids[lcp] === slot.identities[lcp]) lcp++;
     if (lcp < slot.foldedLen) {
-      debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp, streamLen: ids.length });
-      slot = freshSlot(slot);
+      const flip = isViewFlip(slot.foldedLen, lcp);
+      debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp, streamLen: ids.length, flip });
+      // View flip (variant pipeline re-projecting the same history): carry
+      // the live compression blocks — they were earned against the session,
+      // not against this particular projection. Real prefix rewrite
+      // (compaction / rewind): deterministic full re-fold, blocks replay
+      // from the stream.
+      slot = flip ? preserveCompressedSlot(slot) : freshSlot(slot);
       slots.set(sid, slot);
       lcp = 0;
     }
@@ -187,6 +225,12 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
           debug.event("fold-replay-skipped", { sid, callId: call.id });
           continue;
         }
+        // Already applied (live tool call committed, or replayed on an
+        // earlier fold) — checked BEFORE the stale guard: a call applied
+        // against a sibling view is legitimately applied; running the
+        // fingerprint check first would log it as stale on every view
+        // flip (the block is carried by preserveCompressedSlot, not replay).
+        if (slot.appliedCallIds.has(call.id) || stateHasCompressCall(slot.state, call.id)) continue;
         // Guard against host-side prefix rewrites (native compaction, edits):
         // the call's ranges must resolve to messages that precede the call
         // itself in the stream, and the span fingerprint recorded in the
