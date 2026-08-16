@@ -12,12 +12,13 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/p
 //
 // 1. The nudge reaches the final wire as the trailing user message, with its
 //    compressible-range list, exactly once.
-// 2. Per-message m-ref tags reach the final wire message text. patchRefTag
-//    appends each tag as a SUFFIX to user/toolResult content; rebuildWirePayload
-//    must NOT strip them. Regression (issue #66): extractText's stripRefTag
-//    removed the tags the fold had just rendered, so the model was told by the
-//    ACP system prompt "each message has an <acp …> tag" while the wire
-//    carried none — refs were only visible via the nudge.
+// 2. Per-message m-ref tags reach the final wire message text. The kernel's
+//    render-refs prepends each tag to user text; applyWireTagContract adds
+//    them to tool-result pieces (issue #66) and coreToX must NOT strip
+//    them. Historical regression (#66): the old bridge's extractText
+//    stripRefTag removed the tags the fold had just rendered, so the model
+//    was told by the ACP system prompt "each message has an <acp …> tag"
+//    while the wire carried none — refs were only visible via the nudge.
 
 const SYSTEM = "You are a coding agent. " + "system context filler ".repeat(200);
 const FILLER = "filler content for compression minimums ".repeat(220); // ~8k chars ≈ 2k tokens
