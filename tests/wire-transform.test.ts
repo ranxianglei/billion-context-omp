@@ -187,18 +187,71 @@ test("fail-open: malformed payloads return undefined, never throw", async () => 
   assert.equal(await fire({ messages: [42, null] }), undefined, "garbage entries → empty synthesis → pass-through");
 });
 
-test("default (no transformMode given) resolves to provider mode", async () => {
-  const { api, handlers } = capture();
-  createAcpExtension({ autoUpdate: false } as never)(api as unknown as ExtensionAPI);
-  const ctx = fakeCtx();
-  // context handler must be an observer when no explicit mode is configured
-  const stream = [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }];
-  const r1 = await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
-  assert.equal(r1, undefined, "default mode: context handler is a no-op (provider)");
-  // provider handler must engage
-  const payload = anthropicPayload([{ role: "user", content: [{ type: "text", text: "hello" }] }]);
-  const r2 = (await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx)) as
-    | { messages: Array<Record<string, unknown>> }
+test("default (no transformMode given) resolves per model API (issue #79)", async () => {
+  const make = () => {
+    const { api, handlers } = capture();
+    createAcpExtension({ autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+    return handlers;
+  };
+  const model = (api: string | undefined) => fakeCtx({ model: { contextWindow: 1_000_000, ...(api ? { api } : {}) } });
+  const stream = () => [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }];
+  const wire = () => anthropicPayload([{ role: "user", content: [{ type: "text", text: "hello" }] }]);
+  type CtxOut = { messages: unknown[] } | undefined;
+  const fireCtx = (handlers: ReturnType<typeof capture>["handlers"], m: unknown): Promise<CtxOut> =>
+    handlers.get("context")![0]!({ type: "context", messages: stream() }, m) as Promise<CtxOut>;
+
+  // openai-completions (GLM/DeepSeek/vLLM): the host drops the wire-payload
+  // replacement — context must transform so the injections actually reach
+  // the model, and provider must stay a no-op.
+  {
+    const handlers = make();
+    const r1 = await fireCtx(handlers, model("openai-completions"));
+    assert.ok(r1?.messages, "default+openai-completions: context handler transforms");
+    const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("openai-completions"));
+    assert.equal(r2, undefined, "default+openai-completions: provider handler is a no-op");
+  }
+
+  // anthropic-messages + ollama-chat: the host applies the replacement → provider.
+  for (const api of ["anthropic-messages", "ollama-chat"] as const) {
+    const handlers = make();
+    const r1 = await fireCtx(handlers, model(api));
+    assert.equal(r1, undefined, `default+${api}: context handler is an observer`);
+    const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model(api));
+    assert.ok(r2, `default+${api}: provider handler transforms the wire payload`);
+  }
+
+  // Non-viable wire bodies (openai-responses `input`) and missing api → context.
+  for (const api of ["openai-responses", undefined] as const) {
+    const handlers = make();
+    const r1 = await fireCtx(handlers, model(api));
+    assert.ok(r1?.messages, `default+${api ?? "(no api)"}: context handler transforms`);
+    const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model(api));
+    assert.equal(r2, undefined, `default+${api ?? "(no api)"}: provider handler is a no-op`);
+  }
+});
+
+test("explicit transformMode wins over the per-API default", async () => {
+  const model = (api: string) => fakeCtx({ model: { contextWindow: 1_000_000, api } });
+  const stream = () => [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }];
+  const wire = () => anthropicPayload([{ role: "user", content: [{ type: "text", text: "hello" }] }]);
+
+  // Explicit provider on openai-completions (e.g. a patched host that honors
+  // the replacement): provider engages even though the default is context.
+  const a = capture();
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(a.api as unknown as ExtensionAPI);
+  const p1 = await a.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("openai-completions"));
+  assert.ok(p1, "explicit provider+openai-completions: provider handler transforms");
+  const c1 = await a.handlers.get("context")![0]!({ type: "context", messages: stream() }, model("openai-completions"));
+  assert.equal(c1, undefined, "explicit provider+openai-completions: context handler is an observer");
+
+  // Explicit context on anthropic-messages: context engages even though the
+  // per-API default is provider.
+  const b = capture();
+  createAcpExtension({ transformMode: "context", autoUpdate: false } as never)(b.api as unknown as ExtensionAPI);
+  const c2 = (await b.handlers.get("context")![0]!({ type: "context", messages: stream() }, model("anthropic-messages"))) as
+    | { messages: unknown[] }
     | undefined;
-  assert.ok(r2, "default mode: provider handler transforms the wire payload");
+  assert.ok(c2?.messages, "explicit context+anthropic-messages: context handler transforms");
+  const p2 = await b.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("anthropic-messages"));
+  assert.equal(p2, undefined, "explicit context+anthropic-messages: provider handler is a no-op");
 });

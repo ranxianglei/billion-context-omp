@@ -32,14 +32,18 @@ export interface CompressConfig {
  */
 export interface AdapterConfig {
   /** Where the compression surgery intercepts (issue #52). "provider"
-   *  (default since v0.2.6) leaves the agent array untouched and transforms
-   *  the WIRE payload at before_provider_request — request-local, no
-   *  re-entry, structurally immune to omp's feedback-view loops (the recap /
-   *  subagent re-feed pathology, issues #22/#52). Unknown provider formats
-   *  pass through untransformed (fail-open). "context" rewrites the context
-   *  event — battle-tested legacy mode, kept for compat.
-   *  Existing setups pin the mode explicitly via `transformMode` in
-   *  ~/.omp/acp-omp.json; unset now resolves to "provider". */
+   *  leaves the agent array untouched and transforms the WIRE payload at
+   *  before_provider_request — request-local, no re-entry, structurally
+   *  immune to omp's feedback-view loops (the recap / subagent re-feed
+   *  pathology, issues #22/#52). Unknown provider formats pass through
+   *  untransformed (fail-open). "context" rewrites the context event —
+   *  battle-tested legacy mode, kept for compat.
+   *  When omitted, the mode is resolved per model API (issue #79):
+   *  "provider" only where the host actually applies the wire-payload
+   *  replacement (anthropic-messages, ollama-chat), "context" everywhere
+   *  else (openai-completions & friends drop the replacement, so the
+   *  context event is the only channel that reaches the model). Explicit
+   *  pinning in ~/.omp/acp-omp.json always wins. */
   transformMode?: "context" | "provider";
   /** When omitted, the adapter reads `ctx.model.contextWindow` live each turn.
    *  Set explicitly for tests/headless runs. */
