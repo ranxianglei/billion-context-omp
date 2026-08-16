@@ -145,7 +145,15 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number):
 }
 
 export function parsePercent(v: number | string): number {
-  const n = typeof v === "number" ? v : v.trim().endsWith("%") ? Number(v.trim().slice(0, -1)) / 100 : Number(v);
-  if (!Number.isFinite(n)) return 0;
+  const raw = typeof v === "number" ? v : v.trim().endsWith("%") ? Number(v.trim().slice(0, -1)) : Number(v);
+  if (!Number.isFinite(raw)) return 0;
+  // A bare value above 1 cannot be a ratio (these thresholds cap at 100%) —
+  // read it as percent ("75" ≡ "75%"). The old clamp silently turned it
+  // into 1, so a user writing maxContextLimit: 75 got forced nudges only at
+  // a full context with no warning.
+  const n = raw > 1 ? raw / 100 : raw;
+  if (n > 1 || n < 0) {
+    logWarn("config", { event: "percent-clamped", value: String(v), clamped: Math.min(1, Math.max(0, n)) });
+  }
   return Math.min(1, Math.max(0, n));
 }
