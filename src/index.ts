@@ -16,7 +16,6 @@ import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { detectWireFormat, synthesizeStream, rebuildWirePayload } from "./wire-transform.js";
 import { viableRanges } from "billion-context-kit";
-import { summarizeMessages } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { stampAndDetect } from "./instance-guard.js";
@@ -34,7 +33,7 @@ declare const CURRENT_VERSION: string;
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
     const runtime = createRuntime(adapter);
-    wireCompactionDisable(pi, runtime);
+    wireSessionLifecycle(pi, runtime);
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
@@ -55,71 +54,6 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
 }
 
 export default createAcpExtension();
-
-// ACP owns compression. On `/compact` we intercept Pi's native compaction and
-// summarize the FULL set of messages omp is about to discard
-// (preparation.messagesToSummarize + turnPrefixMessages) with our compression
-// prompts, then hand the summary back as the compaction result. omp stores it
-// in a compaction entry — its own durable record — and truncates everything
-// before firstKeptEntryId from the LLM view, so the summary must cover ALL of
-// the discarded content (a span-only summary would drop the gap, and prior
-// in-stream compress calls carrying older block summaries would vanish with
-// it). Kernel blocks are NOT used here: fold blocks only replay from
-// in-stream compress tool calls, which this truncation removes.
-// ACP owns compression — there is NO native fallback. summarizeMessages
-// retries once internally; if it still fails we return {cancel: true} so
-// compaction aborts entirely (the session stays uncompressed, the nudge
-// pipeline keeps working, the user sees the error). Letting omp run its own
-// compaction instead would silently swap our summary philosophy for a
-// host-default one and evict the in-stream compress calls blocks replay
-// from — a worse outcome than a cancelled /compact (issue #19 lineage).
-function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
-  pi.on("session_before_compact", async (event, ctx) => {
-    try {
-      const sid = ctx.sessionManager?.getSessionId?.() ?? "";
-      const prep = event.preparation;
-      const toSummarize = [...(prep.messagesToSummarize ?? []), ...(prep.turnPrefixMessages ?? [])];
-      if (toSummarize.length === 0) return undefined;
-
-      // Fold-slot refs so the compaction prompt shows stable mNNNNN ids, not
-      // raw pN positions (issue #14 Minor1).
-      const slot = await runtime.stateFor(ctx);
-
-      ctx.ui?.notify?.(`ACP: compacting ${toSummarize.length} messages…`, "info");
-      const result = await summarizeMessages(ctx, toSummarize, runtime.prompts, runtime.adapter.compress?.compressModel, {
-        previousSummary: prep.previousSummary,
-        customInstructions: event.customInstructions,
-        signal: event.signal,
-        messageRefs: slot.state.messageRefs,
-      });
-      if (!result) {
-        ctx.ui?.notify?.("ACP: /compact aborted — summary generation failed after retry (details in ~/.omp/acp-omp.log)", "error");
-        return { cancel: true };
-      }
-
-      logInfo("compact", {
-        sid,
-        event: "acp-compaction",
-        messages: toSummarize.length,
-        model: result.model,
-        summaryLen: result.summary.length,
-      });
-      debug.event("compact-acp", { sid, messages: toSummarize.length, model: result.model });
-      ctx.ui?.notify?.(`ACP: compacted ${toSummarize.length} messages via ${result.model}`, "info");
-
-      return {
-        compaction: {
-          summary: result.summary,
-          firstKeptEntryId: prep.firstKeptEntryId,
-          tokensBefore: prep.tokensBefore,
-        },
-      };
-    } catch (e) {
-      logThrow("compact", e, { sid: ctx.sessionManager?.getSessionId?.() ?? "" });
-      return undefined;
-    }
-  });
-}
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {

@@ -84,16 +84,8 @@ test("factory registers the compress tool and 4 flat commands", () => {
   assert.ok(api.tools.some((t) => t.name === "compress"), "compress tool registered");
   assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-search", "acp-status"]);
   assert.ok(handlers.has("context"), "context event wired");
-  assert.ok(handlers.has("session_before_compact"), "compaction-disable wired");
+  assert.equal(handlers.has("session_before_compact"), false, "/compact interceptor fully removed — native compaction owns it");
   assert.ok(handlers.has("before_agent_start"), "system-prompt wired");
-});
-
-test("session_before_compact falls back to Pi native compaction on failure", async () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension()(api as unknown as ExtensionAPI);
-  const handler = handlers.get("session_before_compact")![0]!;
-  const result = await handler({ preparation: { firstKeptEntryId: "x", tokensBefore: 100 } }, fakeCtx());
-  assert.equal(result, undefined, "no usable state → undefined → Pi falls back to native compaction");
 });
 
 test("before_agent_start appends the ACP system prompt", () => {
