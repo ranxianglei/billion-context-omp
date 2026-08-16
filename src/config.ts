@@ -38,12 +38,14 @@ export interface AdapterConfig {
    *  pathology, issues #22/#52). Unknown provider formats pass through
    *  untransformed (fail-open). "context" rewrites the context event —
    *  battle-tested legacy mode, kept for compat.
-   *  When omitted, the mode is resolved per model API (issue #79):
-   *  "provider" only where the host actually applies the wire-payload
-   *  replacement (anthropic-messages, ollama-chat), "context" everywhere
-   *  else (openai-completions & friends drop the replacement, so the
-   *  context event is the only channel that reaches the model). Explicit
-   *  pinning in ~/.omp/acp-omp.json always wins. */
+   *  When omitted, the mode is resolved per model API by FORMAT support
+   *  (issue #79): "provider" wherever the wire body is parseable
+   *  (anthropic-messages, ollama-chat, openai-completions — the surgery
+   *  is synced onto the original payload in place, so hosts that drop
+   *  the returned replacement still deliver it), "context" everywhere
+   *  else (openai-responses / google / bedrock / cursor bodies cannot be
+   *  parsed; the context event is the only channel that reaches the
+   *  model). Explicit pinning in ~/.omp/acp-omp.json always wins. */
   transformMode?: "context" | "provider";
   /** When omitted, the adapter reads `ctx.model.contextWindow` live each turn.
    *  Set explicitly for tests/headless runs. */

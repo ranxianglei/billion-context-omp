@@ -108,10 +108,17 @@ test("provider mode: in-stream compress call replays and prunes the wire payload
   const payload = anthropicPayload(msgs);
 
   const fire = () => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx);
+  // Snapshot BEFORE firing: issue #79 syncs the surgery onto the original
+  // payload in place (hosts that discard the replacement still send it), so
+  // payload.messages no longer stays pristine after the call.
+  const srcLen = (payload.messages as Array<Record<string, unknown>>).length;
   const out = (await fire()) as { messages: Array<Record<string, any>> };
   assert.ok(out, "transformed payload returned");
   const srcMsgs = payload.messages as Array<Record<string, unknown>>;
-  assert.ok(out.messages.length < srcMsgs.length, `pruned: ${out.messages.length} < ${srcMsgs.length}`);
+  assert.ok(out.messages.length < srcLen, `pruned: ${out.messages.length} < ${srcLen}`);
+  // In-place mirror (issue #79): the original object the host serializes must
+  // carry the same pruned view as the returned replacement.
+  assert.equal(srcMsgs.length, out.messages.length, "original payload synced in place with the rebuilt view");
 
   const flat = JSON.stringify(out.messages);
   assert.ok(!flat.includes("cov3 "), "covered filler pruned from the wire payload");
@@ -200,18 +207,18 @@ test("default (no transformMode given) resolves per model API (issue #79)", asyn
   const fireCtx = (handlers: ReturnType<typeof capture>["handlers"], m: unknown): Promise<CtxOut> =>
     handlers.get("context")![0]!({ type: "context", messages: stream() }, m) as Promise<CtxOut>;
 
-  // openai-completions (GLM/DeepSeek/vLLM): the host drops the wire-payload
-  // replacement — context must transform so the injections actually reach
-  // the model, and provider must stay a no-op.
+  // openai-completions (GLM/DeepSeek/vLLM): the wire body is parseable and
+  // applyMessagesInPlace delivers the surgery even though the host drops
+  // the replacement — provider by default (issue #79 root-cause fix).
   {
     const handlers = make();
     const r1 = await fireCtx(handlers, model("openai-completions"));
-    assert.ok(r1?.messages, "default+openai-completions: context handler transforms");
+    assert.equal(r1, undefined, "default+openai-completions: context handler is an observer");
     const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("openai-completions"));
-    assert.equal(r2, undefined, "default+openai-completions: provider handler is a no-op");
+    assert.ok(r2, "default+openai-completions: provider handler transforms the wire payload");
   }
 
-  // anthropic-messages + ollama-chat: the host applies the replacement → provider.
+  // anthropic-messages + ollama-chat: parseable body + honoring host → provider.
   for (const api of ["anthropic-messages", "ollama-chat"] as const) {
     const handlers = make();
     const r1 = await fireCtx(handlers, model(api));
@@ -220,7 +227,7 @@ test("default (no transformMode given) resolves per model API (issue #79)", asyn
     assert.ok(r2, `default+${api}: provider handler transforms the wire payload`);
   }
 
-  // Non-viable wire bodies (openai-responses `input`) and missing api → context.
+  // Unparseable wire bodies (openai-responses `input`) and missing api → context.
   for (const api of ["openai-responses", undefined] as const) {
     const handlers = make();
     const r1 = await fireCtx(handlers, model(api));
@@ -235,14 +242,14 @@ test("explicit transformMode wins over the per-API default", async () => {
   const stream = () => [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }];
   const wire = () => anthropicPayload([{ role: "user", content: [{ type: "text", text: "hello" }] }]);
 
-  // Explicit provider on openai-completions (e.g. a patched host that honors
-  // the replacement): provider engages even though the default is context.
+  // Explicit provider on openai-responses (unparseable body, defaults to
+  // context): explicit config still forces the provider pipeline.
   const a = capture();
   createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(a.api as unknown as ExtensionAPI);
-  const p1 = await a.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("openai-completions"));
-  assert.ok(p1, "explicit provider+openai-completions: provider handler transforms");
-  const c1 = await a.handlers.get("context")![0]!({ type: "context", messages: stream() }, model("openai-completions"));
-  assert.equal(c1, undefined, "explicit provider+openai-completions: context handler is an observer");
+  const p1 = await a.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("openai-responses"));
+  assert.ok(p1, "explicit provider+openai-responses: provider handler transforms");
+  const c1 = await a.handlers.get("context")![0]!({ type: "context", messages: stream() }, model("openai-responses"));
+  assert.equal(c1, undefined, "explicit provider+openai-responses: context handler is an observer");
 
   // Explicit context on anthropic-messages: context engages even though the
   // per-API default is provider.
@@ -254,4 +261,97 @@ test("explicit transformMode wins over the per-API default", async () => {
   assert.ok(c2?.messages, "explicit context+anthropic-messages: context handler transforms");
   const p2 = await b.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("anthropic-messages"));
   assert.equal(p2, undefined, "explicit context+anthropic-messages: provider handler is a no-op");
+});
+
+// ---------------------------------------------------------------------------
+// Issue #79 — hosts that DISCARD the before_provider_request replacement.
+// @oh-my-pi/pi-ai's openai-completions provider (verified up to 17.3.5) runs
+// `options?.onPayload?.(params, model);` WITHOUT assigning the result, unlike
+// anthropic / openai-responses / azure / google which all honor the returned
+// replacement. OpenAI-compatible endpoints (GLM, DeepSeek, vLLM, OpenRouter
+// chat-completions) therefore never saw the nudge/summaries/pruned view — the
+// model never received the injected information and never compressed. The
+// transform must ALSO mirror the rebuilt messages onto the ORIGINAL payload
+// object: that exact reference is what such hosts serialize to fetch.
+// ---------------------------------------------------------------------------
+
+test("issue #79: openai payload carries the surgery even when the host drops the return value (nudge)", async () => {
+  const { api, handlers } = capture();
+  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx({ model: { contextWindow: 8_000 }, getContextUsage: () => ({ tokens: 0, contextWindow: 8_000 }) });
+
+  const msgs: Array<Record<string, unknown>> = [{ role: "system", content: "sys" }];
+  for (let i = 0; i < 8; i++) msgs.push({ role: i % 2 ? "assistant" : "user", content: `big${i} ${FILLER}` });
+  const payload = { model: "glm-x", max_completion_tokens: 4096, messages: msgs };
+  const messagesRef = payload.messages; // identity the host will serialize
+
+  // Simulate the openai-completions host: call the hook, DROP the return.
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx);
+
+  assert.equal(payload.messages, messagesRef, "same messages array reference (host serializes this object)");
+  const flat = JSON.stringify(payload.messages);
+  const last = payload.messages[payload.messages.length - 1] as Record<string, unknown>;
+  assert.equal(last.role, "user");
+  assert.match(JSON.stringify(last.content), /compress/i, "nudge reaches the ORIGINAL payload in place");
+  assert.ok(flat.length > 0, "payload still serializable");
+});
+
+test("issue #79: openai payload carries pruning in place too", async () => {
+  const { api, handlers } = capture();
+  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx({ model: { contextWindow: 1_000_000 } });
+
+  const msgs: Array<Record<string, unknown>> = [{ role: "system", content: "sys" }];
+  for (let i = 0; i < 8; i++) msgs.push({ role: i % 2 ? "assistant" : "user", content: `cov${i} ${FILLER}` });
+  msgs.push({ role: "assistant", content: "", tool_calls: [{ id: "call_c9", function: { name: "compress", arguments: JSON.stringify({ content: [{ startId: "m00002", endId: "m00009", summary: "ISSUE79 PRUNED RANGE: early filler turns compressed for context economy." }] }) } }] });
+  msgs.push({ role: "tool", tool_call_id: "call_c9", content: "Compressed 1 range — 8.8k tokens saved (b1, tier 1)." });
+  msgs.push({ role: "user", content: `tail ${FILLER}` });
+  const payload = { model: "glm-x", max_completion_tokens: 4096, messages: msgs };
+
+  // Host discards the replacement — pruning must still land on the original.
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx);
+
+  const flat = JSON.stringify(payload.messages);
+  assert.ok(!flat.includes("cov3 "), "covered filler pruned from the ORIGINAL payload in place");
+  assert.ok(flat.includes("ISSUE79 PRUNED RANGE"), "summary visible via surviving compress call args");
+  assert.ok(flat.includes("tail "), "protected tail kept");
+});
+
+test("issue #79: anthropic payloads also sync in place (identical content, honoring hosts unaffected)", async () => {
+  const { api, handlers } = capture();
+  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx({ model: { contextWindow: 1_000_000 } });
+
+  const msgs: Array<Record<string, unknown>> = [
+    { role: "user", content: [{ type: "text", text: "hello world" }] },
+  ];
+  const payload = anthropicPayload(msgs);
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx);
+  const flat = JSON.stringify(payload.messages);
+  assert.ok(flat.includes("hello world"), "original anthropic payload carries the transform in place");
+});
+
+test("issue #79: AWS Bedrock Converse payloads are unknown, never transformed (in-place corruption guard)", async () => {
+  const { api, handlers } = capture();
+  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx({ model: { contextWindow: 8_000 }, getContextUsage: () => ({ tokens: 0, contextWindow: 8_000 }) });
+
+  // Bedrock Converse shape: camelCase blocks + inferenceConfig/toolConfig. It
+  // has {system, messages} and was previously misdetected as "anthropic" —
+  // harmless while hosts discarded our replacement, dangerous now that the
+  // transform syncs in place (snake_case rebuild would corrupt the request).
+  const bedrock = {
+    modelId: "anthropic.claude-3-5-sonnet",
+    system: [{ text: "sys" }],
+    messages: [
+      { role: "user", content: [{ text: `big ${FILLER}` }] },
+    ],
+    inferenceConfig: { maxTokens: 4096 },
+    toolConfig: { tools: [{ toolSpec: { name: "bash" } }] },
+  };
+  assert.equal(detectWireFormat(bedrock), "unknown", "Bedrock Converse classified unknown");
+  const before = JSON.stringify(bedrock);
+  const ret = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: bedrock }, ctx);
+  assert.equal(ret, undefined, "unknown format passes through");
+  assert.equal(JSON.stringify(bedrock), before, "payload object untouched — even under emergency nudge pressure");
 });

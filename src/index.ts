@@ -15,7 +15,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { resolveTransformMode } from "./transform-mode.js";
-import { detectWireFormat, synthesizeStream, rebuildWirePayload } from "./wire-transform.js";
+import { detectWireFormat, synthesizeStream, rebuildWirePayload, applyMessagesInPlace } from "./wire-transform.js";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -375,8 +375,20 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const result = await transformStream(ctx, runtime, synth.stream, "provider");
       if (!result) return undefined;
       const wireOut = rebuildWirePayload(result.rebuilt, payload, synth);
-      const outMsgs = (wireOut as { messages?: unknown[] }).messages?.length ?? 0;
       const inMsgs = (payload as { messages?: unknown[] }).messages?.length ?? 0;
+      const outMsgs = (wireOut as { messages?: unknown[] }).messages?.length ?? 0;
+      // Issue #79 host-compat: some providers (openai-completions — GLM /
+      // DeepSeek / vLLM, the dominant local setups — plus bedrock/cursor, as
+      // of @oh-my-pi/pi-ai 17.3.5) call this hook but DISCARD the returned
+      // replacement, so the model never received the nudge/summaries and
+      // never compressed. Mirror the rebuilt messages onto the ORIGINAL
+      // payload object: that exact reference is what the host serializes to
+      // fetch, so the surgery lands even when the return value is dropped.
+      // Formats we do not understand were already bypassed above
+      // (detectWireFormat guarded against Bedrock misclassification).
+      if (applyMessagesInPlace(payload, wireOut)) {
+        debug.event("payload-in-place-sync", { sid, fmt, msgs: ((payload as { messages?: unknown[] }).messages ?? []).length });
+      }
       if (outMsgs !== inMsgs || wireOut !== payload) {
         logInfo("provider-transform", { sid, fmt, inMsgs, outMsgs, nudge: result.nudgeInjected ? "injected" : "idle" });
       }

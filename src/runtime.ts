@@ -338,9 +338,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       // request (issue #64). Fold the same wire mirror instead; the system
       // text mirrors what before_agent_start puts on the wire (base + ACP
       // block — not yet appended at session_start, so add it here).
-      // Only relevant for EXPLICITLY provider-mode openai-completions: the
-      // per-API default (issue #79) routes openai-completions to context
-      // mode, whose live fold runs on this very session view.
+      // Only for openai-completions in provider mode — now also the unset
+      // DEFAULT (transform-mode.ts, issue #79): applyMessagesInPlace
+      // delivers the surgery in place, so the host dropping the returned
+      // replacement no longer disqualifies the API.
       if (
         resolveTransformMode(adapterRef, ctx.model) === "provider" &&
         (ctx.model as { api?: string } | undefined)?.api === "openai-completions"

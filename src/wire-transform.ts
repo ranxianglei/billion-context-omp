@@ -60,6 +60,15 @@ export function detectWireFormat(payload: unknown): WireFormat {
   const p = payload as Record<string, unknown>;
   const messages = p.messages;
   if (!Array.isArray(messages)) return "unknown";
+  // AWS Bedrock Converse payloads (amazon-bedrock.ts) also carry
+  // {system, messages} but are NOT anthropic wire: camelCase content blocks
+  // (toolUse/toolResult), inferenceConfig/toolConfig/modelId instead of
+  // max_tokens/tools/model. Misdetecting them as "anthropic" was harmless
+  // while every host honored-or-discarded our REPLACEMENT object and Bedrock
+  // discarded it; now that the transform also syncs the payload in place
+  // (issue #79), a misdetected Bedrock request would get its blocks rebuilt
+  // in snake_case and be corrupted. Classify as unknown → pass-through.
+  if ("modelId" in p || "inferenceConfig" in p || "toolConfig" in p || "additionalModelRequestFields" in p) return "unknown";
   if ("system" in p || "anthropic_version" in p) return "anthropic";
   for (const m of messages as Array<Record<string, unknown>>) {
     if (m === null || typeof m !== "object") continue;
@@ -212,6 +221,28 @@ export function synthesizeStream(payload: unknown, format: WireFormat): Synthesi
     if (t) push({ role: "user", content: [{ type: "text", text: t }], timestamp: Date.now() } as AgentMessage, wi, "text");
   });
   return { stream, back, format };
+}
+
+/** Copy the rebuilt wire `messages` onto the ORIGINAL payload object in place
+ *  (issue #79). @oh-my-pi/pi-ai's openai-completions provider (verified up to
+ *  17.3.5) invokes the before_provider_request hook but DISCARDS the returned
+ *  replacement — `options?.onPayload?.(params, model);` with the result
+ *  unassigned, unlike anthropic / openai-responses / azure / google which all
+ *  do `nextParams = replacementPayload ?? nextParams`. For OpenAI-compatible
+ *  endpoints (GLM, DeepSeek, vLLM — the dominant local setups) every wire
+ *  surgery silently vanished: the model never saw the nudge or the summaries
+ *  and never compressed. The host serializes the SAME object reference it
+ *  handed us to fetch, so mutating `payload.messages` in place makes the
+ *  transform land regardless of whether the replacement is honored. The
+ *  replacement we still return carries identical content — honoring hosts
+ *  are unaffected. Guarded: only touches array-valued messages. */
+export function applyMessagesInPlace(original: unknown, rebuilt: unknown): boolean {
+  const src = (rebuilt as { messages?: unknown } | null | undefined)?.messages;
+  const dst = (original as { messages?: unknown[] } | null | undefined)?.messages;
+  if (!Array.isArray(src) || !Array.isArray(dst) || dst === src) return false;
+  dst.length = 0;
+  for (let i = 0; i < src.length; i++) dst.push(src[i]);
+  return true;
 }
 
 /** Rebuild the wire payload from the transformed stream. Survivors reuse the
