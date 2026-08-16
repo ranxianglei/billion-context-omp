@@ -60,7 +60,12 @@ export default createAcpExtension();
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
-    logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
+    // Model identity on every session start: diagnosing "which model loops on
+    // compress rejections" from user logs required cwd forensics (issue #47
+    // follow-up, 2026-08-17 log analysis) — the log never said which model it
+    // was. id + contextWindow also catch window misconfigurations.
+    const modelInfo = ctx.model as { id?: string; contextWindow?: number; api?: string } | undefined;
+    logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
     // Dual-instance guard (AGENTS.md #14): `omp install` + a manual
     // extensions path both loading this package fight over two fold
     // states — observed live as evaporating blocks. Warn once, loudly.
@@ -184,6 +189,7 @@ async function transformStream(
 
       logInfo("turn", {
         sid,
+        model: (ctx.model as { id?: string } | undefined)?.id ?? null,
         inMsgs: coreMessages.length,
         outMsgs: turn.messages.length,
         tokens: tokenCount,
