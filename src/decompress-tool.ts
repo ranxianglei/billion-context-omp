@@ -5,13 +5,18 @@ import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import type { CoreMessage } from "acp-kernel";
 import { writeFile, mkdir } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { realpathSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { resolve, relative, isAbsolute, join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { homeDir } from "./home.js";
 
-/** Directory for auto-generated decompress output files. */
-const AUTO_DIR = join(homeDir() || tmpdir(), ".cache", "omp", "acp-decompress");
+/** Directory for auto-generated decompress output files. Lazy per call —
+ *  homeDir() at import time would freeze HOME before tests (or embedders)
+  *  can redirect it; update.ts resolves its paths per call for the same
+  *  reason. */
+function autoDir(): string {
+  return join(homeDir() || tmpdir(), ".cache", "omp", "acp-decompress");
+}
 
 /** Maximum chars of a head preview included in the tool result for file mode. */
 const PREVIEW_CHARS = 600;
@@ -107,7 +112,37 @@ function resolveToFilePath(targetPath: string): string | { error: string } {
 function autoFilePath(blockId: string): string {
   // blockId already carries the "b" prefix (e.g. "b5"); use it as-is so the
   // filename reads "b5-<ts>.txt" rather than "bb5-<ts>.txt".
-  return join(AUTO_DIR, `${blockId}-${Date.now()}.txt`);
+  return join(autoDir(), `${blockId}-${Date.now()}.txt`);
+}
+
+/** Keep only the newest MAX_AUTO_FILES auto-generated restore files. Auto
+ *  output is disposable cache (the model re-reads via the read tool), so
+ *  without rotation a long-lived session grows the cache dir without bound —
+ *  same class of unbounded growth issue #32 fixed for debug dumps. */
+const MAX_AUTO_FILES = 100;
+
+export function pruneAutoFiles(): void {
+  const dir = autoDir();
+  try {
+    const files = readdirSync(dir)
+      .map((f) => {
+        try {
+          return { f, m: statSync(join(dir, f)).mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is { f: string; m: number } => x !== null);
+    if (files.length <= MAX_AUTO_FILES) return;
+    files.sort((a, b) => a.m - b.m);
+    const excess = files.slice(0, files.length - MAX_AUTO_FILES);
+    for (const { f } of excess) {
+      try { unlinkSync(join(dir, f)); } catch { /* best effort */ }
+    }
+    debug.event("decompress-pruned", { dir, removed: excess.length });
+  } catch {
+    /* best effort — rotation failure must never break a restore */
+  }
 }
 
 function headPreview(text: string): string {
@@ -167,8 +202,9 @@ async function handleMessageRef(
     return targetPath.error;
   }
 
-  await mkdir(AUTO_DIR, { recursive: true }).catch((e) => logError("decompress", { event: "mkdir-failed", dir: AUTO_DIR, error: e instanceof Error ? e.message : String(e) }));
+  await mkdir(autoDir(), { recursive: true }).catch((e) => logError("decompress", { event: "mkdir-failed", dir: autoDir(), error: e instanceof Error ? e.message : String(e) }));
   await writeFile(targetPath, text, "utf8");
+  if (!args.toFile) pruneAutoFiles();
 
   debug.event("decompress-message", { ref, ownerBlockId, mode: "file", path: targetPath, chars: text.length });
   logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "message", mode: "file", ref, ownerBlockId, path: targetPath, chars: text.length });
@@ -230,8 +266,9 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
     return targetPath.error;
   }
 
-  await mkdir(AUTO_DIR, { recursive: true }).catch((e) => logError("decompress", { event: "mkdir-failed", dir: AUTO_DIR, error: e instanceof Error ? e.message : String(e) }));
+  await mkdir(autoDir(), { recursive: true }).catch((e) => logError("decompress", { event: "mkdir-failed", dir: autoDir(), error: e instanceof Error ? e.message : String(e) }));
   await writeFile(targetPath, text, "utf8");
+  if (!args.toFile) pruneAutoFiles();
 
   debug.event("decompress", { blockId, full, count, mode: "file", path: targetPath, chars: text.length });
   logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "file", blockId, full, count, path: targetPath, chars: text.length });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveConfig, resolveDelegate, type AdapterConfig } from "../src/config.js";
+import { resolveConfig, resolveDelegate, parsePercent, type AdapterConfig } from "../src/config.js";
 
 const EMPTY: AdapterConfig = {};
 
@@ -136,4 +136,30 @@ test("resolveDelegate: legacy flat displayUsage still works with undefined deleg
 test("resolveDelegate: object displayUsage takes priority over legacy flat", () => {
   const r = resolveDelegate({ delegate: { displayUsage: "separate" }, displayUsage: "merged" });
   assert.equal(r.displayUsage, "separate");
+});
+
+test("parsePercent reads bare values above 1 as percent, not clamped ratios", () => {
+  assert.equal(parsePercent(75), 0.75);
+  assert.equal(parsePercent("75"), 0.75);
+  assert.equal(parsePercent(95), 0.95);
+  assert.equal(parsePercent("80"), 0.8);
+});
+
+test("parsePercent keeps ratios and percent strings unchanged", () => {
+  assert.equal(parsePercent(0.75), 0.75);
+  assert.equal(parsePercent("0.8"), 0.8);
+  assert.equal(parsePercent("75%"), 0.75);
+  assert.equal(parsePercent(1), 1);
+});
+
+test("parsePercent clamps out-of-range percents to [0, 1]", () => {
+  assert.equal(parsePercent(125), 1);
+  assert.equal(parsePercent("150%"), 1);
+  assert.equal(parsePercent(-0.5), 0);
+  assert.equal(parsePercent("not-a-number"), 0);
+});
+
+test("resolveConfig maps a bare-number compress.maxContextLimit as percent", () => {
+  const cfg = resolveConfig({ compress: { maxContextLimit: 75 } }, 1_000_000);
+  assert.equal(cfg.nudge.maxContextLimitPct, 0.75, "75 must mean 75%, not a ratio clamped to 100%");
 });

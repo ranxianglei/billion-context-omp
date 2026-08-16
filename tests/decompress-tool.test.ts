@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, mkdtemp } from "node:fs/promises";
+import { readFile, mkdtemp, readdir, rm, mkdir, writeFile, utimes } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
@@ -216,4 +217,43 @@ test("decompress accepts a model-facing mNNNNN message ref (not just raw ids)", 
   const text = (res.content[0] as any).text as string;
   assert.ok(text.includes("This is a detailed message that needs to be compressed."),
     `mNNNNN ref must resolve to the covered message's original text, got: ${text.slice(0, 200)}`);
+});
+
+test("auto-generated restore files rotate (cache dir stays bounded)", async () => {
+  // Redirect HOME so the rotation assertions hit an isolated cache dir.
+  const tmpHome = await mkdtemp(join(tmpdir(), "omp-decompress-rot-"));
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+  try {
+    const { decompressTool, ctx } = await setupWithCompressedBlock();
+    const cacheDir = join(tmpHome, ".cache", "omp", "acp-decompress");
+    // 105 stale restore files with strictly increasing mtimes. (Seeding
+    // directly instead of 100+ tool calls: autoFilePath names by Date.now(),
+    // so a tight loop overwrites within the same millisecond.)
+    await mkdir(cacheDir, { recursive: true });
+    const stale: string[] = [];
+    for (let i = 0; i < 105; i++) {
+      const p = join(cacheDir, `b1-${String(i).padStart(4, "0")}.txt`);
+      await writeFile(p, "stale");
+      const t = new Date(1_000_000 + i);
+      await utimes(p, t, t);
+      stale.push(p);
+    }
+    // One auto-path write through the tool must trigger the prune.
+    await decompressTool.execute("tc-rot", { blockId: "b1" }, undefined, undefined, ctx);
+    const files = (await readdir(cacheDir)).filter((f) => f.endsWith(".txt"));
+    assert.equal(files.length, 100, `auto files must rotate at the cap, found ${files.length}`);
+    assert.equal(existsSync(stale[0]!), false, "oldest stale file pruned");
+    assert.equal(existsSync(stale[5]!), false, "six oldest pruned (106 files → cap 100)");
+    assert.equal(existsSync(stale[6]!), true, "newest stale files kept");
+    assert.equal(existsSync(stale[104]!), true, "newest stale file kept");
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedProfile;
+    await rm(tmpHome, { recursive: true, force: true });
+  }
 });

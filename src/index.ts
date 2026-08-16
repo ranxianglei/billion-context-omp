@@ -188,6 +188,7 @@ async function transformStream(
 ): Promise<{ rebuilt: AgentMessage[]; nudgeInjected: boolean } | undefined> {
   const sid = ctx.sessionManager.getSessionId();
   const release = await runtime.acquireLock(sid);
+  let result: { rebuilt: AgentMessage[]; nudgeInjected: boolean } | undefined;
   try {
     // A transient empty message list must not wipe a non-empty fold — bypass
     // instead of rebuilding (an empty {messages} return would clear the LLM
@@ -362,20 +363,25 @@ async function transformStream(
       injected: nudgeInjected,
       emergency: turn.nudge?.breakdown?.emergencyOverride === 1,
     });
-    // Also check for updates here (not only on session_start): resuming a
-    // long-running session never re-fires session_start, so an update could
-    // go unnoticed for days. checkForUpdate throttles internally (3 min) and
-    // is guarded against concurrent calls, so firing it per LLM call is safe.
-    await checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
-      if (ctx.hasUI) ctx.ui.notify(msg);
-    });
-    return { rebuilt, nudgeInjected };
+    result = { rebuilt, nudgeInjected };
     } catch (e) {
       logThrow("context", e, { sid, phase: "transform", mode });
       throw e;
     } finally {
       release();
     }
+    // Also check for updates here (not only on session_start): resuming a
+    // long-running session never re-fires session_start, so an update could
+    // go unnoticed for days. checkForUpdate throttles internally (3 min) and
+    // is guarded against concurrent calls, so firing it per LLM call is safe.
+    // Must run OUTSIDE the fold lock: a discovered update awaits `npm install`
+    // for up to 60s (update.ts autoInstallLatest), and under the lock that
+    // would serialize every later context event / provider request of this
+    // session behind the install.
+    await checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
+      if (ctx.hasUI) ctx.ui.notify(msg);
+    });
+    return result;
 }
 
 function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
