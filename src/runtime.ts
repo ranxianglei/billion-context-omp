@@ -31,6 +31,9 @@ interface FoldSlot {
   coreMessages: CoreMessage[];
   appliedCallIds: Set<string>;
   rejectStreak: number;
+  /** Identity sequence of the last recorded rebuilt output (issue #52
+   *  feedback-view reuse). null = not yet recorded. */
+  lastRebuiltOutput: string[] | null;
 }
 
 export interface AcpRuntime {
@@ -44,6 +47,9 @@ export interface AcpRuntime {
   foldStream(ctx: ExtensionContext, stream: AgentMessage[]): FoldResult;
   stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }>;
   commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void;
+  /** Record the identity sequence of the last rebuilt output so the next
+   *  foldStream can recognize omp re-feeding it (issue #52). */
+  recordRebuiltOutput(ctx: ExtensionContext, rebuilt: AgentMessage[]): void;
   /** Track the per-session streak of consecutively REJECTED compress calls.
    *  `ok=false` increments and returns the new streak; `ok=true` resets to 0.
    *  A re-fold (rewritten stream prefix) drops the slot and starts at 0. */
@@ -59,7 +65,7 @@ export interface AcpRuntime {
 }
 
 function freshSlot(preserveFrom?: FoldSlot): FoldSlot {
-  const slot: FoldSlot = { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set(), rejectStreak: 0 };
+  const slot: FoldSlot = { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set(), rejectStreak: 0, lastRebuiltOutput: null };
   // Cadence stamps and the reject streak are SESSION-level accounting ("when
   // was the model last reminded" / "how many compress calls has it had
   // rejected in a row"), not stream-derived state. A re-fold rebuilds blocks
@@ -178,6 +184,28 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       slots.set(sid, slot);
     }
     const ids = stream.map(messageIdentity);
+    // Feedback-view reuse (issue #52): omp's recap/subagent pipelines re-feed
+    // our own rebuilt output as the next context event (411 of 1286 events
+    // measured). When the input stream's identity sequence exactly matches the
+    // last recorded rebuilt output, reuse the slot wholesale — blocks, message
+    // refs, cadence stamps and rejectStreak all stay continuous. Compress-call
+    // replay is skipped on this path: the fingerprint guard mis-fires against
+    // our own summary content (fold-replay-stale was the #52 symptom).
+    const lastOut = slot.lastRebuiltOutput;
+    if (
+      lastOut !== null &&
+      ids.length === lastOut.length &&
+      ids.every((id, i) => id === lastOut[i])
+    ) {
+      const coreMessages = streamToCoreMessages(stream);
+      const originalById = new Map<string, AgentMessage>();
+      stream.forEach((message, i) => originalById.set(`p${i + 1}`, message));
+      slot.identities = ids;
+      slot.foldedLen = ids.length;
+      slot.coreMessages = coreMessages;
+      debug.event("feedback-reuse", { sid, msgs: ids.length, blocks: slot.state.blocks.length });
+      return { state: slot.state, coreMessages, originalById, streamLen: ids.length };
+    }
     let lcp = 0;
     while (lcp < Math.min(ids.length, slot.identities.length) && ids[lcp] === slot.identities[lcp]) lcp++;
     if (lcp < slot.foldedLen) {
@@ -312,6 +340,11 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     if (toolCallId) slot.appliedCallIds.add(toolCallId);
   }
 
+  function recordRebuiltOutput(ctx: ExtensionContext, rebuilt: AgentMessage[]): void {
+    const slot = slotFor(sidOf(ctx));
+    slot.lastRebuiltOutput = rebuilt.map(messageIdentity);
+  }
+
   function noteCompressOutcome(ctx: ExtensionContext, ok: boolean): number {
     const slot = slotFor(sidOf(ctx));
     slot.rejectStreak = ok ? 0 : slot.rejectStreak + 1;
@@ -329,6 +362,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     foldStream,
     stateFor,
     commitFoldState,
+    recordRebuiltOutput,
     noteCompressOutcome,
     forgetSession,
     primeFold,

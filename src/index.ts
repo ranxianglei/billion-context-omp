@@ -355,6 +355,12 @@ async function transformStream(
       }
       }
     }
+    // Record the rebuilt output's identity sequence so the next context event
+    // can recognize omp re-feeding it (issue #52). Context mode only: the
+    // provider-mode wire payload is request-local and never re-enters.
+    if (mode === "context") {
+      runtime.recordRebuiltOutput(ctx, rebuilt);
+    }
 
     // Always rebuild the full array: every message needs its [mNNNNN] ref
     // tag applied, so there is no meaningful "no change" case to short-circuit.
