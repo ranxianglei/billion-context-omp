@@ -8,11 +8,14 @@ import { createInitialState, type CoreMessage, type CompressionState, type Compr
 import { debug, logInfo, logWarn } from "./log.js";
 import { streamToCoreMessages, type AgentMessage } from "./messages.js";
 
-const TIMEOUT_MS = 60_000;
-// 8000, not 3000: a 192-message /compact needs more than 3000 output tokens,
-// and a mid-JSON truncation parses as garbage (observed on qwen3.8-27b,
-// 2026-08-17 log: unparseable-summary messages=192 → native fallback).
-const MAX_OUTPUT_TOKENS = 8000;
+const TIMEOUT_MS = 120_000;
+// NO output cap: `maxTokens` is deliberately omitted from the complete() calls.
+// A capped side-channel summary gets cut mid-JSON/mid-sentence by the server
+// (finish_reason "length") — the model has no awareness of the cap and cannot
+// wrap up. The compaction model defaults to the ACTIVE model (262K-class
+// windows locally), so the physical constraint is the model's own window and
+// the 120s timeout, not an invented budget. Timeout raised 60s→120s because an
+// uncapped long summary legitimately takes longer than 60s on local models.
 const MAX_SLICE_CHARS = 150_000;
 const MAX_MSG_CHARS = 4000;
 
@@ -225,7 +228,7 @@ export async function summarizeMessages(
       const response = await run(
         model,
         { systemPrompt: [instructions], messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
-        { apiKey: auth.apiKey, headers: auth.headers, maxTokens: MAX_OUTPUT_TOKENS, signal: ac.signal },
+        { apiKey: auth.apiKey, headers: auth.headers, signal: ac.signal },
       );
       return parseSummary(
         response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n"),
@@ -299,7 +302,7 @@ export async function summarizeRange(
     const response = await complete(
       model,
       { systemPrompt: [instructions], messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
-      { apiKey: auth.apiKey, headers: auth.headers, maxTokens: MAX_OUTPUT_TOKENS, signal: ac.signal },
+      { apiKey: auth.apiKey, headers: auth.headers, signal: ac.signal },
     );
     const summary = parseSummary(
       response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n"),
