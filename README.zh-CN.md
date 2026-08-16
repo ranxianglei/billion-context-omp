@@ -77,7 +77,7 @@ omp 内置的 `/compact` 被拦截，替换为 ACP 模型摘要式 compaction，
 |------|------|
 | `compress` | 把一段连续消息区间替换为详细摘要 |
 | `decompress` | 恢复之前压缩的块内容（默认写文件；单条消息可 `inline:true`） |
-| `search_context` | 按关键字搜索压缩块摘要（及可见消息） |
+| `search_context` | 按关键字搜索压缩块摘要及被折叠其中的原始消息（可见消息不建索引） |
 | `acp_status` | 显示上下文用量、压缩块、可压缩区间 |
 
 > Pi 版中的 `acp_delegate` 子代理系统在此**有意不注册**——omp 自带多代理编排，重复的委派工具会冲突。

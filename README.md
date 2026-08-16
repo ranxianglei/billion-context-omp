@@ -77,7 +77,7 @@ omp's built-in `/compact` is intercepted and replaced by an ACP model-summarized
 |------|-------------|
 | `compress` | Replace a contiguous message range with a detailed summary |
 | `decompress` | Restore a previously compressed block's content (to file by default; `inline:true` for single messages) |
-| `search_context` | Search compressed block summaries (and visible messages) by keyword |
+| `search_context` | Search compressed block summaries and the original messages folded into them by keyword (visible messages are not indexed) |
 | `acp_status` | Show context usage, compressed blocks, compressible ranges |
 
 > The `acp_delegate` sub-agent subsystem from the Pi build is intentionally **not** registered — omp ships its own multi-agent orchestration, and duplicate delegation tools would conflict.
