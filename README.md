@@ -144,7 +144,7 @@ Create `~/.omp/acp-omp.json` (global) and/or `<project>/.omp/acp-omp.json` (proj
 | Key | Default | Description |
 |-----|---------|-------------|
 | `debug` | `false` | Enable verbose **debug-level** events in the log. The always-on log (lifecycle events, errors, warnings) is written regardless; `debug` only adds extra diagnostics. Also enabled by env `ACP_DEBUG=1`. |
-| `transformMode` | `"provider"` (default since v0.2.6) or `"context"` — where the compression surgery intercepts. `provider` transforms the provider wire payload (request-local, structurally immune to feedback re-entry). `context` is the legacy rewrite-in-place mode. |
+| `transformMode` | unset (resolved per API) or explicit `"provider"` / `"context"` — where the compression surgery intercepts. Unset: `provider` only where the host applies the wire-payload replacement (anthropic-messages, ollama-chat); `context` everywhere else (issue #79). Explicit: always honored. `provider` transforms the provider wire payload (request-local, structurally immune to feedback re-entry); `context` rewrites the context event (legacy mode). |
 | `autoUpdate` | `true` | On session start (throttled to one check per 3 minutes), check npm for a newer version and auto-install it. Disable to avoid all startup network calls. |
 | `modelContextLimit` | *(auto)* | Override the context limit (in tokens). Defaults to the model's `contextWindow`. |
 | `toolBashDefaultTimeout` | `60` | Seconds injected into the `bash` tool when the model omits `timeout`. Without this a forgotten timeout can hang for thousands of seconds. `0` restores unbounded behavior. |

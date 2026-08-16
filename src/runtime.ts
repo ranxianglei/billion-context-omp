@@ -17,6 +17,7 @@ import { debug, logInfo, logWarn } from "./log.js";
 import { getSystemPromptText } from "./compat.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { viewToWireStream } from "./wire-transform.js";
+import { resolveTransformMode } from "./transform-mode.js";
 import { boundaryRaw, findCompressCalls, isBlockRef, messageIdentity, rawPos, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage, type BlockLike } from "./messages.js";
 
 export interface FoldResult {
@@ -337,8 +338,11 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       // request (issue #64). Fold the same wire mirror instead; the system
       // text mirrors what before_agent_start puts on the wire (base + ACP
       // block — not yet appended at session_start, so add it here).
+      // Only relevant for EXPLICITLY provider-mode openai-completions: the
+      // per-API default (issue #79) routes openai-completions to context
+      // mode, whose live fold runs on this very session view.
       if (
-        (adapterRef.transformMode ?? "provider") === "provider" &&
+        resolveTransformMode(adapterRef, ctx.model) === "provider" &&
         (ctx.model as { api?: string } | undefined)?.api === "openai-completions"
       ) {
         const base = getSystemPromptText(ctx);

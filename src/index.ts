@@ -14,6 +14,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
+import { resolveTransformMode } from "./transform-mode.js";
 import { detectWireFormat, synthesizeStream, rebuildWirePayload } from "./wire-transform.js";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -109,15 +110,20 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
 }
 
 // The core integration. Two interception points share one pipeline
-// (fold → processTurn → nudge → rebuild):
-//  - "context" (default): omp's `context` event fires before every LLM call
-//    with the messages about to be sent; we return the transformed
-//    AgentMessage[]. Known defect: omp's recap/subagent pipelines re-feed our
-//    output as INPUT on the next event (the feedback-view / two-truth-source
-//    problem, issues #22/#47/#52 and the 01a0059b loop).
-//  - "provider" (transformMode: "provider"): the context event is left
-//    untouched (observer) and the surgery runs at `before_provider_request`
-//    on the WIRE payload — request-local, structurally impossible to re-feed.
+// (fold → processTurn → nudge → rebuild). The effective mode per API is
+// resolved in transform-mode.ts (issue #79): an explicit `transformMode`
+// always wins; the unset default is "provider" only where the host applies
+// the wire-payload replacement (anthropic-messages, ollama-chat) and "context"
+// everywhere else (openai-completions & friends drop the replacement, so the
+// context event is the only channel that reaches the model).
+//  - "context": omp's `context` event fires before every LLM call with the
+//    messages about to be sent; we return the transformed AgentMessage[].
+//    Known defect: omp's recap/subagent pipelines re-feed our output as INPUT
+//    on the next event (the feedback-view / two-truth-source problem, issues
+//    #22/#47/#52 and the 01a0059b loop).
+//  - "provider": the context event is left untouched (observer) and the
+//    surgery runs at `before_provider_request` on the WIRE payload —
+//    request-local, structurally impossible to re-feed.
 //    See wireProviderTransform + wire-transform.ts.
 async function transformStream(
   ctx: ExtensionContext,
@@ -331,10 +337,10 @@ async function transformStream(
 
 function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("context", async (event, ctx) => {
-    if ((runtime.adapter.transformMode ?? "provider") === "provider") {
-      // Provider mode (default since v0.2.6): the context event is an observer.
-      // The fold runs at before_provider_request instead (wireProviderTransform);
-      // touching the message array here is what creates the feedback-view loop.
+    if (resolveTransformMode(runtime.adapter, ctx.model) === "provider") {
+      // Provider mode: the context event is an observer. The fold runs at
+      // before_provider_request instead (wireProviderTransform); touching the
+      // message array here is what creates the feedback-view loop.
       debug.event("context-observer-skip", { sid: ctx.sessionManager.getSessionId(), msgs: event.messages?.length ?? 0 });
       return undefined;
     }
@@ -354,7 +360,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // any error or unrecognized format returns the original payload.
 function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_provider_request", async (event, ctx) => {
-    if ((runtime.adapter.transformMode ?? "provider") !== "provider") return undefined;
+    if (resolveTransformMode(runtime.adapter, ctx.model) !== "provider") return undefined;
     const payload = (event as { payload?: unknown }).payload;
     if (payload === null || typeof payload !== "object" || !Array.isArray((payload as { messages?: unknown }).messages)) return undefined;
     const sid = ctx.sessionManager?.getSessionId?.() ?? "";
