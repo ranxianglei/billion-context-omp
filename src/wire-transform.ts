@@ -317,6 +317,62 @@ export function rebuildWirePayload(rebuilt: AgentMessage[], payload: unknown, sy
   return { ...(payload as object), messages: out };
 }
 
+/** Rebuild the WIRE-SHAPE view of the persisted session (the mirror of the
+ *  host's convertToLlm) and run it through the SAME synthesizeStream the
+ *  live provider fold uses, so primeFold (provider mode) folds exactly the
+ *  authoritative projection. The raw session view is NOT equivalent: for
+ *  openai-style payloads the system prompt is a message in the wire body —
+ *  it becomes the first core piece and takes m00001 — and the openai
+ *  synthesis cannot recover tool names for `role:"tool"` entries (a
+ *  compress result gets toolName "" instead of "compress", so it is not
+ *  ref-BLOCKED there). Folding the raw view puts the fold in a different
+ *  ref/fingerprint space: stored span fingerprints mismatch, the guard
+ *  rejects every in-stream replay, and a resumed session shows
+ *  "Blocks: none" until the first provider request (issue #64).
+ *
+ *  Message shapes mirror the captured live payload (openai chat):
+ *  system first; assistant text and/or tool_calls (content "" when only
+ *  calls); one `role:"tool"` message per tool result; thinking dropped
+ *  (the host does not carry it in this format). */
+export function viewToWireStream(view: AgentMessage[], systemText: string): AgentMessage[] {
+  const messages: Array<Record<string, unknown>> = [{ role: "system", content: systemText }];
+  for (const message of view) {
+    const m = message as { role?: string; content?: unknown; toolCallId?: string; summary?: string };
+    if (m.role === "user") {
+      const text = extractText(m.content);
+      if (text) messages.push({ role: "user", content: text });
+    } else if (m.role === "assistant") {
+      const blocks = Array.isArray(m.content) ? m.content : [];
+      const calls = (blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown }>).filter(
+        (b) => b !== null && typeof b === "object" && b.type === "toolCall",
+      );
+      const text = extractText(m.content);
+      if (calls.length > 0) {
+        messages.push({
+          role: "assistant",
+          content: text,
+          tool_calls: calls.map((c) => ({
+            id: c.id,
+            type: "function",
+            function: { name: c.name ?? "", arguments: JSON.stringify(c.arguments ?? {}) },
+          })),
+        });
+      } else if (text) {
+        messages.push({ role: "assistant", content: text });
+      }
+    } else if (m.role === "toolResult") {
+      messages.push({ role: "tool", tool_call_id: m.toolCallId ?? "", content: extractText(m.content) });
+    } else {
+      // custom / developer / compactionSummary / branchSummary — the host
+      // renders these as message content in the wire body; synthesis maps
+      // them to user agents (user and developer both take the same path).
+      const text = extractText(m.content) || (typeof m.summary === "string" ? m.summary : "");
+      if (text) messages.push({ role: "developer", content: text });
+    }
+  }
+  return synthesizeStream({ model: "prime-fold", messages }, "openai").stream;
+}
+
 /** True when the payload carries no messages we could fold (e.g. an empty
  *  tools-only probe). The caller bypasses instead of transforming. */
 export function synthesisIsEmpty(synth: SynthesisResult): boolean {
