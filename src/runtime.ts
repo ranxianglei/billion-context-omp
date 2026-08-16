@@ -14,6 +14,9 @@ import {
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { debug, logInfo, logWarn } from "./log.js";
+import { getSystemPromptText } from "./compat.js";
+import { buildAcpSystemPrompt } from "./system-prompt.js";
+import { viewToWireStream } from "./wire-transform.js";
 import { boundaryRaw, findCompressCalls, isBlockRef, messageIdentity, rawPos, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage, type BlockLike } from "./messages.js";
 
 export interface FoldResult {
@@ -55,11 +58,13 @@ export interface AcpRuntime {
    *  A re-fold (rewritten stream prefix) drops the slot and starts at 0. */
   noteCompressOutcome(ctx: ExtensionContext, ok: boolean): number;
   forgetSession(sid: string): void;
-  /** Rebuild blocks from the persisted session view at session_start so /acp
- *  and acp_status show them BEFORE the first LLM call of a resumed session.
- *  The slot is marked preview and always re-folded authoritatively at the
- *  first context event (the live stream is the truth source, not the
- *  persisted view). */
+  /** Rebuild blocks from the persisted session at session_start so /acp and
+   *  acp_status show them BEFORE the first LLM call of a resumed session.
+   *  Provider mode folds the WIRE projection (viewToWireStream mirror — the
+   *  authoritative fold runs on the wire-synthesized stream, which differs
+   *  from the raw session view; issue #64). The slot is marked preview and
+   *  always re-folded authoritatively at the first live event (the live
+   *  stream is the truth source, not the persisted view). */
   primeFold(ctx: ExtensionContext): void;
   acquireLock(sid: string): Promise<() => void>;
 }
@@ -313,16 +318,37 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     try {
       // ReadonlySessionManager's type omits buildSessionContext, but the
       // runtime object has it — it builds exactly the view omp feeds the
-      // agent on resume. Purely a preview: discarded at the first context
+      // agent on resume. Purely a preview: discarded at the first live
       // event, so a mismatching projection can never leak into live state.
       const sm = ctx.sessionManager as unknown as {
         buildSessionContext?: () => { messages?: AgentMessage[] };
       };
-      const stream = sm.buildSessionContext?.().messages ?? [];
-      if (stream.length === 0) return;
+      const view = sm.buildSessionContext?.().messages ?? [];
+      if (view.length === 0) return;
+      let stream = view;
+      let wire = false;
+      // Provider mode: the authoritative fold runs on the wire-synthesized
+      // stream, a different projection than this view — openai payloads
+      // carry the system prompt as the first message (it takes m00001) and
+      // drop tool names on `role:"tool"` entries (the compress result is
+      // not ref-BLOCKED). Folding the raw view here lands refs/fingerprints
+      // in the wrong space, the span guard rejects every in-stream replay,
+      // and a resumed session shows "Blocks: none" until the first provider
+      // request (issue #64). Fold the same wire mirror instead; the system
+      // text mirrors what before_agent_start puts on the wire (base + ACP
+      // block — not yet appended at session_start, so add it here).
+      if (
+        (adapterRef.transformMode ?? "context") === "provider" &&
+        (ctx.model as { api?: string } | undefined)?.api === "openai-completions"
+      ) {
+        const base = getSystemPromptText(ctx);
+        const acp = buildAcpSystemPrompt(promptsRef);
+        stream = viewToWireStream(view, base.includes(acp) ? base : `${base}\n\n${acp}`);
+        wire = true;
+      }
       const r = foldStream(ctx, stream);
       slotFor(sid).preview = true;
-      logInfo("fold", { sid, event: "prime-fold", msgs: stream.length, blocks: r.state.blocks.length });
+      logInfo("fold", { sid, event: "prime-fold", msgs: stream.length, wire, blocks: r.state.blocks.length });
     } catch (e) {
       logWarn("fold", { sid, event: "prime-fold-failed", error: e instanceof Error ? e.message : String(e) });
     }
