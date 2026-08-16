@@ -101,6 +101,66 @@ test("project-local acp-omp.json cannot inject prompts (issue #32)", async () =>
   }
 });
 
+test("project-local config UNDER $HOME cannot inject prompts (prefix-match bypass)", async () => {
+  // Regression: allowPrompts used base.startsWith(home), and the default
+  // dev layout (project at ~/code/repo) puts the project config dir under
+  // $HOME too — the issue #32 gate only held for projects outside $HOME.
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-proj-home-"));
+  const homeDirPath = path.join(tmpDir, "home");
+  const projectDir = path.join(homeDirPath, "code", "repo-under-home");
+  await fs.mkdir(path.join(homeDirPath, CONFIG_DIR_NAME), { recursive: true });
+  await fs.mkdir(path.join(projectDir, CONFIG_DIR_NAME), { recursive: true });
+  await fs.writeFile(
+    path.join(homeDirPath, CONFIG_DIR_NAME, "acp-omp.json"),
+    JSON.stringify({ modelContextLimit: 123_456 }),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(projectDir, CONFIG_DIR_NAME, "acp-omp.json"),
+    JSON.stringify({ prompts: { compressPhilosophy: "INJECTED" }, acknowledgePromptsRisk: true, toolOutputMaxBytes: 999 }),
+    "utf8",
+  );
+  const savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = homeDirPath;
+  process.env.USERPROFILE = homeDirPath;
+  try {
+    const config = await loadUserConfig(projectDir);
+    assert.equal(config.prompts, undefined, "project-under-$HOME prompts must be ignored");
+    assert.equal(config.acknowledgePromptsRisk, undefined, "project-under-$HOME risk acknowledgement must be ignored");
+    assert.equal(config.modelContextLimit, 123_456, "global keys still load");
+    assert.equal(config.toolOutputMaxBytes, 999, "project-local tuning keys still override");
+  } finally {
+    process.env.HOME = savedHome.HOME;
+    process.env.USERPROFILE = savedHome.USERPROFILE;
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("global prompts still load when the project also sits under $HOME (no over-blocking)", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "acp-global-home-"));
+  const homeDirPath = path.join(tmpDir, "home");
+  const projectDir = path.join(homeDirPath, "code", "another-repo");
+  await fs.mkdir(path.join(homeDirPath, CONFIG_DIR_NAME), { recursive: true });
+  await fs.mkdir(projectDir, { recursive: true });
+  await fs.writeFile(
+    path.join(homeDirPath, CONFIG_DIR_NAME, "acp-omp.json"),
+    JSON.stringify({ prompts: { compressPhilosophy: "LEGIT" }, acknowledgePromptsRisk: true }),
+    "utf8",
+  );
+  const savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = homeDirPath;
+  process.env.USERPROFILE = homeDirPath;
+  try {
+    const config = await loadUserConfig(projectDir);
+    assert.deepEqual(config.prompts, { compressPhilosophy: "LEGIT" }, "global prompts still load");
+    assert.equal(config.acknowledgePromptsRisk, true, "global risk acknowledgement still loads");
+  } finally {
+    process.env.HOME = savedHome.HOME;
+    process.env.USERPROFILE = savedHome.USERPROFILE;
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("applyUserConfig flows prompts through to the adapter", () => {
   const adapter: AdapterConfig = { modelContextLimit: 200_000 };
   const user = { prompts: { tier3CondenseRules: "Y" }, acknowledgePromptsRisk: true };
