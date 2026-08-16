@@ -65,9 +65,14 @@ export default createAcpExtension();
 // the discarded content (a span-only summary would drop the gap, and prior
 // in-stream compress calls carrying older block summaries would vanish with
 // it). Kernel blocks are NOT used here: fold blocks only replay from
-// in-stream compress tool calls, which this truncation removes. On any
-// failure we return undefined so Pi falls back to its own compaction rather
-// than losing context.
+// in-stream compress tool calls, which this truncation removes.
+// ACP owns compression — there is NO native fallback. summarizeMessages
+// retries once internally; if it still fails we return {cancel: true} so
+// compaction aborts entirely (the session stays uncompressed, the nudge
+// pipeline keeps working, the user sees the error). Letting omp run its own
+// compaction instead would silently swap our summary philosophy for a
+// host-default one and evict the in-stream compress calls blocks replay
+// from — a worse outcome than a cancelled /compact (issue #19 lineage).
 function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_before_compact", async (event, ctx) => {
     try {
@@ -88,8 +93,8 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
         messageRefs: slot.state.messageRefs,
       });
       if (!result) {
-        ctx.ui?.notify?.("ACP: compression fell back to Pi native compaction", "warning");
-        return undefined;
+        ctx.ui?.notify?.("ACP: /compact aborted — summary generation failed after retry (details in ~/.omp/acp-omp.log)", "error");
+        return { cancel: true };
       }
 
       logInfo("compact", {

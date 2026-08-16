@@ -9,7 +9,10 @@ import { debug, logInfo, logWarn } from "./log.js";
 import { streamToCoreMessages, type AgentMessage } from "./messages.js";
 
 const TIMEOUT_MS = 60_000;
-const MAX_OUTPUT_TOKENS = 3000;
+// 8000, not 3000: a 192-message /compact needs more than 3000 output tokens,
+// and a mid-JSON truncation parses as garbage (observed on qwen3.8-27b,
+// 2026-08-17 log: unparseable-summary messages=192 → native fallback).
+const MAX_OUTPUT_TOKENS = 8000;
 const MAX_SLICE_CHARS = 150_000;
 const MAX_MSG_CHARS = 4000;
 
@@ -121,10 +124,14 @@ export function parseSummary(text: string): string | null {
   try {
     const obj = JSON.parse(cleaned) as { summary?: unknown };
     if (typeof obj.summary === "string" && obj.summary.length > 0) return obj.summary;
+    return null;
   } catch {
-    // never guess — fall back so the caller lets Pi do its native compaction
+    // Not JSON. Weak/local models often emit plain prose despite the JSON
+    // instruction — when it is long enough to be a real summary (kernel
+    // minSummaryLength parity), accept the prose instead of failing the
+    // whole compaction over formatting.
   }
-  return null;
+  return cleaned.length >= 50 ? cleaned : null;
 }
 
 /** Build the summary-generation system prompt FROM the kernel's load-bearing
@@ -153,8 +160,11 @@ export function buildSummaryPrompt(prompts: Prompts): string {
  *  deliberately NOT used here: fold blocks only replay from in-stream
  *  compress tool calls, which the truncation removes. `previousSummary` (an
  *  earlier compaction's summary) is folded in so iterative compactions never
- *  drop it. Returns null on any failure so the caller falls back to Pi's
- *  native compaction. */
+ *  drop it. On a failed attempt the LLM call is
+ *  retried ONCE (stochastic formatting failures recover on a fresh call);
+ *  returns null only when the retry also fails — the caller then CANCELS the
+ *  compaction (no native fallback: ACP owns compression, host-default
+ *  summaries are the failure mode this hook exists to prevent). */
 export async function summarizeMessages(
   ctx: ExtensionContext,
   messages: AgentMessage[],
@@ -203,14 +213,32 @@ export async function summarizeMessages(
     const userText =
       `ENTIRE conversation to compress (${slice.length} messages, ~${tokens} tokens). Compress it:\n\n` +
       formatSlice(slice, opts?.messageRefs ? { ...createInitialState(), messageRefs: opts.messageRefs } : createInitialState());
-    const response = await run(
-      model,
-      { systemPrompt: [instructions], messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
-      { apiKey: auth.apiKey, headers: auth.headers, maxTokens: MAX_OUTPUT_TOKENS, signal: ac.signal },
-    );
-    const summary = parseSummary(
-      response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n"),
-    );
+    const attempt = async (): Promise<string | null> => {
+      const response = await run(
+        model,
+        { systemPrompt: [instructions], messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
+        { apiKey: auth.apiKey, headers: auth.headers, maxTokens: MAX_OUTPUT_TOKENS, signal: ac.signal },
+      );
+      return parseSummary(
+        response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n"),
+      );
+    };
+    let summary: string | null = null;
+    try {
+      summary = await attempt();
+    } catch (e) {
+      if (opts?.signal?.aborted || ac.signal.aborted) throw e;
+      logWarn("summarize-messages", { event: "attempt-failed", model: label, error: String(e) });
+    }
+    if (!summary) {
+      try {
+        summary = await attempt();
+        if (summary) logInfo("summarize-messages", { event: "recovered-on-retry", model: label, messages: slice.length });
+      } catch (e) {
+        if (opts?.signal?.aborted || ac.signal.aborted) throw e;
+        logWarn("summarize-messages", { event: "retry-failed", model: label, error: String(e) });
+      }
+    }
     if (!summary) {
       logWarn("summarize-messages", { event: "unparseable-summary", model: label, messages: slice.length });
       return null;
@@ -227,11 +255,9 @@ export async function summarizeMessages(
   }
 }
 
-/** Generate a summary for a message range using the compression model. Shared
- *  entry point for the `/compact` handler. Returns null when no model is
- *  usable, the slice is empty, the model is unauthenticated, or the response
- *  is unparseable — the caller then returns `undefined` so Pi falls back to
- *  its native compaction. */
+/** Generate a summary for a message range using the compression model.
+ *  Currently unused by the extension (kept as the shared range-summary
+ *  surface); null = hard failure, caller decides. */
 export async function summarizeRange(
   ctx: ExtensionContext,
   messages: CoreMessage[],

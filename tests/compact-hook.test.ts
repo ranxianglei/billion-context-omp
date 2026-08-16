@@ -4,28 +4,33 @@ import assert from "node:assert/strict";
 interface Captured {
   systemPrompt: string[];
   userText: string;
+  maxTokens: number;
 }
 
 let captured: Captured | undefined;
 let llmCalls = 0;
-let llmResponse = '{"summary": "FULL DIGEST COVERING EVERYTHING"}';
+let responses: string[] = ['{"summary": "FULL DIGEST COVERING EVERYTHING"}'];
+let seq = 0;
 
 mock.module("@oh-my-pi/pi-ai", () => ({
   complete: async (
     _model: unknown,
     payload: { systemPrompt: string[]; messages: { content: { type: string; text: string }[] }[] },
+    opts: { maxTokens?: number },
   ) => {
     llmCalls++;
+    const response = responses[Math.min(seq, responses.length - 1)] ?? "";
+    seq++;
     captured = {
       systemPrompt: payload.systemPrompt,
       userText: payload.messages[0]!.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"),
+      maxTokens: opts?.maxTokens ?? -1,
     };
-    return { content: [{ type: "text", text: llmResponse }] };
+    return { content: [{ type: "text", text: response }] };
   },
 }));
 
 const { createAcpExtension } = await import("../src/index.js");
-const { default: extensionFactory } = await import("../src/index.js");
 
 interface MockApi {
   on(event: string, handler: (e: unknown, ctx: unknown) => unknown): void;
@@ -140,36 +145,78 @@ test("/compact summarizes ALL discarded content — gap, prior compress-call sum
   // previousSummary is folded in so iterative compactions never lose it.
   assert.ok(captured!.systemPrompt.join("\n").includes("PREVIOUS compaction"), "previousSummary handling must be instructed");
   assert.ok(captured!.systemPrompt.join("\n").includes("focus on auth"), "customInstructions must reach the prompt");
+  assert.equal(captured!.maxTokens, 8000, "output budget raised: 3000 truncated long compactions mid-JSON");
 });
 
-test("/compact falls back to native compaction when nothing to summarize", async () => {
+test("/compact succeeds immediately when preparation is empty (nothing at stake)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as never);
   const callsBefore = llmCalls;
   const result = await fire(api, handlers, { type: "session_before_compact", preparation: { firstKeptEntryId: "x", tokensBefore: 100 } }, compactCtx());
-  assert.equal(result, undefined, "no messagesToSummarize → undefined → native fallback");
+  assert.equal(result, undefined, "no messagesToSummarize → nothing to do");
   assert.equal(llmCalls, callsBefore, "no LLM call for empty preparation");
 });
 
-test("/compact falls back when the LLM response is unparseable", async () => {
+test("/compact retries once and recovers when the first response is unparseable", async () => {
   const { api, handlers } = captureApi();
-  extensionFactory(api as never);
-  const prev = llmResponse;
-  llmResponse = "not json at all";
+  createAcpExtension()(api as never);
+  const prev = responses;
+  responses = ["total garbage, not json, too short??", '{"summary": "RETRY RECOVERED FULL DIGEST"}'];
+  seq = 0;
   try {
-    const result = await fire(api, handlers, { type: "session_before_compact", preparation: preparation() }, compactCtx());
-    assert.equal(result, undefined, "unparseable summary → native fallback");
+    const callsBefore = llmCalls;
+    const result = (await fire(api, handlers, { type: "session_before_compact", preparation: preparation() }, compactCtx())) as {
+      compaction: { summary: string };
+    };
+    assert.ok(result, "second attempt must produce the compaction");
+    assert.equal(result.compaction.summary, "RETRY RECOVERED FULL DIGEST");
+    assert.equal(llmCalls - callsBefore, 2, "exactly two LLM calls (initial + one retry)");
   } finally {
-    llmResponse = prev;
+    responses = prev;
   }
 });
 
-test("/compact falls back when no model resolves", async () => {
+test("long plain-prose output is accepted as the summary (weak-model tolerance)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as never);
+  const prev = responses;
+  const prose = "The session covered authentication work: token refresh in lib/auth.ts:45, a retry loop fix, and three passing regression tests. " +
+    "Key decision: keep the cache keyed by session id because the alternative broke prefix reuse.";
+  responses = [prose];
+  seq = 0;
+  try {
+    const result = (await fire(api, handlers, { type: "session_before_compact", preparation: preparation() }, compactCtx())) as {
+      compaction: { summary: string };
+    };
+    assert.ok(result, "prose ≥50 chars is a usable summary");
+    assert.equal(result.compaction.summary, prose);
+  } finally {
+    responses = prev;
+  }
+});
+
+test("/compact cancels (no native fallback) when the retry also fails", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as never);
+  const prev = responses;
+  responses = ["??", "!!"];
+  seq = 0;
+  try {
+    const callsBefore = llmCalls;
+    const result = (await fire(api, handlers, { type: "session_before_compact", preparation: preparation() }, compactCtx())) as { cancel?: boolean };
+    assert.deepEqual(result, { cancel: true }, "hard failure → compaction cancelled, native path never runs");
+    assert.equal(llmCalls - callsBefore, 2, "initial + one retry, then stop");
+  } finally {
+    responses = prev;
+  }
+});
+
+test("/compact cancels when no model resolves (no silent native compaction)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ compress: { compressModel: "nope:missing" } })(api as never);
   const callsBefore = llmCalls;
-  const result = await fire(api, handlers, { type: "session_before_compact", preparation: preparation() }, compactCtx());
-  assert.equal(result, undefined, "unresolvable configured model → native fallback");
+  const result = (await fire(api, handlers, { type: "session_before_compact", preparation: preparation() }, compactCtx())) as { cancel?: boolean };
+  assert.deepEqual(result, { cancel: true }, "unresolvable model → cancel, never native");
   assert.equal(llmCalls, callsBefore, "no LLM call when model does not resolve");
 });
 
@@ -184,6 +231,7 @@ test("summarizeMessages renders stable mNNNNN refs when fold refs are provided (
       captured = {
         systemPrompt: payload.systemPrompt,
         userText: payload.messages[0]!.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"),
+        maxTokens: 8000,
       };
       return { content: [{ type: "text", text: '{"summary": "FULL DIGEST COVERING EVERYTHING"}' }] };
     }) as never,
