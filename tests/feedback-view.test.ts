@@ -51,7 +51,7 @@ function fakeCtx(): ExtensionContext {
 
 test("context handler does not stack a second nudge on its own feedback view", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const stream: Array<Record<string, unknown>> = [u("start " + FILLER)];
@@ -86,7 +86,7 @@ test("context handler does not stack a second nudge on its own feedback view", a
 
 test("a normal follow-up turn (no trailing nudge) still gets nudged when due", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const stream: Array<Record<string, unknown>> = [u("start " + FILLER)];

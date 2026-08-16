@@ -34,7 +34,7 @@ const msg = (role: string, text: string) => ({ role, content: [{ type: "text", t
 
 test("handler ignores session-tree accounting for nudge arbitration (180K window, 366K tree)", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({})(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context" } as never)(api as unknown as ExtensionAPI);
 
   // 180K model; the session tree "remembers" 366K (switched down from 1M).
   const ctx = {
@@ -64,7 +64,7 @@ test("handler ignores session-tree accounting for nudge arbitration (180K window
 
 test("handler DOES go emergency when the sent view itself overflows the window", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({})(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context" } as never)(api as unknown as ExtensionAPI);
 
   const ctx = {
     mode: "rpc",

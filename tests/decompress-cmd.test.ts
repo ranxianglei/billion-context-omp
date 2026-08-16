@@ -50,7 +50,7 @@ function fakeCtx(notifies: string[]) {
 // (append semantics: the block stays folded, content shown via notify).
 test("/acp-decompress returns a block's content and stays repeatable (append mode)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
 
   const stateFile = "/tmp/omp-decompress-it.session.json";
   await cleanState(stateFile);
@@ -98,7 +98,7 @@ test("/acp-decompress returns a block's content and stays repeatable (append mod
 
 test("/acp-decompress rejects invalid input with a usage message", async () => {
   const { api } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
 
   const notifies: string[] = [];
   const ctx = fakeCtx(notifies);
@@ -117,7 +117,7 @@ test("/acp-decompress rejects invalid input with a usage message", async () => {
 
 test("/acp-decompress reports not-found for a valid id with no matching block", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
 
   const notifies: string[] = [];
   const ctx = fakeCtx(notifies);

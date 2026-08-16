@@ -31,12 +31,15 @@ export interface CompressConfig {
  * (live model context window, protected tools, state persistence).
  */
 export interface AdapterConfig {
-  /** Where the compression surgery intercepts (issue #52). "context" (default)
-   *  rewrites the context event — battle-tested, but omp's recap/subagent
-   *  pipelines can re-feed our output as input (feedback-view loops).
-   *  "provider" leaves the agent array untouched and transforms the WIRE
-   *  payload at before_provider_request — request-local, no re-entry; unknown
-   *  provider formats pass through untransformed (fail-open). */
+  /** Where the compression surgery intercepts (issue #52). "provider"
+   *  (default since v0.2.6) leaves the agent array untouched and transforms
+   *  the WIRE payload at before_provider_request — request-local, no
+   *  re-entry, structurally immune to omp's feedback-view loops (the recap /
+   *  subagent re-feed pathology, issues #22/#52). Unknown provider formats
+   *  pass through untransformed (fail-open). "context" rewrites the context
+   *  event — battle-tested legacy mode, kept for compat.
+   *  Existing setups pin the mode explicitly via `transformMode` in
+   *  ~/.omp/acp-omp.json; unset now resolves to "provider". */
   transformMode?: "context" | "provider";
   /** When omitted, the adapter reads `ctx.model.contextWindow` live each turn.
    *  Set explicitly for tests/headless runs. */

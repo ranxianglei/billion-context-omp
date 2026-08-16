@@ -331,10 +331,10 @@ async function transformStream(
 
 function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("context", async (event, ctx) => {
-    if ((runtime.adapter.transformMode ?? "context") === "provider") {
-      // Provider mode: the context event is an observer. The fold runs at
-      // before_provider_request instead (wireProviderTransform); touching the
-      // message array here is what creates the feedback-view loop.
+    if ((runtime.adapter.transformMode ?? "provider") === "provider") {
+      // Provider mode (default since v0.2.6): the context event is an observer.
+      // The fold runs at before_provider_request instead (wireProviderTransform);
+      // touching the message array here is what creates the feedback-view loop.
       debug.event("context-observer-skip", { sid: ctx.sessionManager.getSessionId(), msgs: event.messages?.length ?? 0 });
       return undefined;
     }
@@ -354,7 +354,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // any error or unrecognized format returns the original payload.
 function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_provider_request", async (event, ctx) => {
-    if ((runtime.adapter.transformMode ?? "context") !== "provider") return undefined;
+    if ((runtime.adapter.transformMode ?? "provider") !== "provider") return undefined;
     const payload = (event as { payload?: unknown }).payload;
     if (payload === null || typeof payload !== "object" || !Array.isArray((payload as { messages?: unknown }).messages)) return undefined;
     const sid = ctx.sessionManager?.getSessionId?.() ?? "";

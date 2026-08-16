@@ -33,7 +33,7 @@ const msg = (role: string, text: string) => ({ role, content: [{ type: "text", t
 test("context handler: ignored nudge re-delivers after +growthFloor within the same turn", async () => {
   const { api, handlers } = capture();
   // nudgeGrowthTokens pinned → kernel threshold & cadence = 20000.
-  createAcpExtension({ compress: { nudgeGrowthTokens: 20000 } } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context", compress: { nudgeGrowthTokens: 20000 } } as never)(api as unknown as ExtensionAPI);
 
 
   const ctx = {
@@ -73,7 +73,7 @@ test("context handler: ignored nudge re-delivers after +growthFloor within the s
 
 test("over-limit nudge does not re-inject on back-to-back LLM calls (issue #22)", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({} as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context" } as never)(api as unknown as ExtensionAPI);
 
   const ctx = {
     mode: "rpc",
@@ -118,7 +118,7 @@ test("over-limit nudge does not re-inject on back-to-back LLM calls (issue #22)"
 
 test("nudge never lists degenerate ranges that would fail the summary floor atomically", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ compress: { nudgeGrowthTokens: 20000 } } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context", compress: { nudgeGrowthTokens: 20000 } } as never)(api as unknown as ExtensionAPI);
 
 
   const ctx = {

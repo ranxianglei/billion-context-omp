@@ -176,7 +176,7 @@ test("end-to-end: context handler re-fed its own output keeps blocks active (iss
     },
   };
 
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = {
     mode: "rpc",
     hasUI: false,

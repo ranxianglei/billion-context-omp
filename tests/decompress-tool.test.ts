@@ -44,7 +44,7 @@ function streamUser(text: string) {
 // tool, and hand back the tool handles so tests can drive decompress.
 async function setupWithCompressedBlock() {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
 
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(600);
@@ -146,7 +146,7 @@ test("decompress degrades gracefully when the covered message left the stream (h
 
 test("decompress restores multi tool-call assistant messages (split refs carry # suffix)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
   const ctx = fakeCtx();
   const filler = (n: string) => `filler ${n} `.repeat(400);
 

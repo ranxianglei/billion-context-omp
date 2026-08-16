@@ -44,7 +44,7 @@ function fakeCtx() {
 
 async function setup(entries: any[]) {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
   const ctx = fakeCtx();
   const stream = entries.map((e: any) => e.message);
   await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);

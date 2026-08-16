@@ -65,11 +65,11 @@ billion-context 拦截 omp 的 `context` 事件（每次 LLM 调用前触发）�
 
 **会话流是唯一真相源。** compress 调用本身就存在于流中：每次 compress 工具调用的参数（区间 + 摘要）在每次 LLM 调用、重启、resume 时被确定性重放——没有会漂移失步的独立状态文件。位置 id（`p1..pN`）和面向模型的 ref（`m00001..`）每轮从流重新推导；前缀改写（retry、rewind、宿主 compaction）会被检测并安全重折叠，指纹守卫防止把调用重放到错误的消息上。
 
-omp 内置的 `/compact` 被拦截，替换为 ACP 模型摘要式 compaction，它同时保留之前的 compress 调用摘要——摘要与保留条目之间的空隙不会丢任何东西。
+omp 内置的 `/compact` **是宿主的功能**——原生运行（用户手动发起、轮间执行），ACP 不拦截。压缩本身由模型通过 compress 工具主动决策。若想让 ACP 成为*唯一*压缩主体，在 omp settings 里设 `"compaction": { "enabled": false }` 关掉宿主自动压缩（80% 阈值触发）；手动 `/compact` 随时可用。
 
 ## 插件兼容性
 
-**只安装一个上下文压缩插件。** 若两个压缩扩展都改写消息列表，它们会互相破坏对方的工作——被压缩的区间可能被重新展开或损坏。omp 自己的 `/compact` 已被 billion-context-omp 自动拦截，但任何*第三方*压缩/compaction 扩展都应卸载。
+**只安装一个上下文压缩插件。** 若两个压缩扩展都改写消息列表，它们会互相破坏对方的工作——被压缩的区间可能被重新展开或损坏。任何*第三方*压缩/compaction 扩展都应卸载。
 
 ## 面向模型的工具
 
@@ -123,7 +123,6 @@ billion-context-omp 开箱即用，无需配置。可选键写入 JSON 配置文
   "debug": false,
   "autoUpdate": true,
   "modelContextLimit": 200000,
-  "compressModel": "zhipuai:glm-5.2",
   "toolBashDefaultTimeout": 60,
   "toolOutputMaxBytes": 200000,
   "compress": {
@@ -147,7 +146,7 @@ billion-context-omp 开箱即用，无需配置。可选键写入 JSON 配置文
 | `debug` | `false` | 开启**debug 级**详细日志事件。常开日志（生命周期事件、错误、警告）无论如何都会写；`debug` 只增加诊断信息。也可用环境变量 `ACP_DEBUG=1` 开启。 |
 | `autoUpdate` | `true` | 会话启动时（节流为每 3 分钟最多一次）检查 npm 是否有新版本并自动安装。关闭可避免所有启动期网络请求。 |
 | `modelContextLimit` | *(自动)* | 覆盖上下文上限（token 数）。默认取模型的 `contextWindow`。 |
-| `compressModel` | *(会话模型)* | `/compact` 模型摘要式压缩使用的 `provider:modelId`（如 `"zhipuai:glm-5.2"`）。缺省用当前会话模型。 |
+| `transformMode` | `"provider"`（v0.2.6 起默认）或 `"context"` | 压缩手术拦截位置。`provider` 变换 provider wire 载荷（请求局部，结构性免疫回灌环路）。`context` 是旧版原地改写模式。 |
 | `toolBashDefaultTimeout` | `60` | 模型省略 `timeout` 时注入 `bash` 工具的秒数。没有它，一次忘记的 timeout 可能挂起数千秒。`0` 恢复无限制。 |
 | `toolOutputMaxBytes` | `200000` | 工具结果文本的硬字节上限（经 `tool_result` 钩子实施）。拦截 omp 自身上限管不住的失控输出。触发时模型会被告知完整输出在哪；调低（如 `8192`）可更省上下文，`0` 禁用。 |
 | `compress.maxContextLimit` | `"75%"` | 触发**强制压缩**提醒的上下文用量阈值（绕过增长门控与节拍）。接受比例（`0.75`）或百分比字符串（`"75%"`）。越低 = 越早/越激进压缩。 |

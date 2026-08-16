@@ -167,7 +167,7 @@ test("provider mode: openai payloads transform too", async () => {
 
 test("mode isolation: context mode ignores before_provider_request; provider mode ignores context", async () => {
   const a = capture();
-  createAcpExtension({})(a.api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context" } as never)(a.api as unknown as ExtensionAPI);
   const payload = anthropicPayload([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
   const r1 = await a.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, fakeCtx());
   assert.equal(r1, undefined, "context mode: provider handler is a no-op");
@@ -185,4 +185,20 @@ test("fail-open: malformed payloads return undefined, never throw", async () => 
   const fire = (payload: unknown) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, fakeCtx());
   assert.equal(await fire({ model: "x" }), undefined, "no messages array → pass-through");
   assert.equal(await fire({ messages: [42, null] }), undefined, "garbage entries → empty synthesis → pass-through");
+});
+
+test("default (no transformMode given) resolves to provider mode", async () => {
+  const { api, handlers } = capture();
+  createAcpExtension({ autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  // context handler must be an observer when no explicit mode is configured
+  const stream = [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }];
+  const r1 = await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  assert.equal(r1, undefined, "default mode: context handler is a no-op (provider)");
+  // provider handler must engage
+  const payload = anthropicPayload([{ role: "user", content: [{ type: "text", text: "hello" }] }]);
+  const r2 = (await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx)) as
+    | { messages: Array<Record<string, unknown>> }
+    | undefined;
+  assert.ok(r2, "default mode: provider handler transforms the wire payload");
 });

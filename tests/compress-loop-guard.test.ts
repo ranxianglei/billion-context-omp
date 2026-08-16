@@ -115,7 +115,7 @@ const FILLERS = [1, 2, 3, 4, 5, 6].map((n) => userMsg(`filler ${n} `.repeat(600)
 
 test("loop guard: repeated rejected compress calls escalate, then suppress, then reset on success", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
   const compress = api.tools.find((t) => t.name === "compress")!;
@@ -184,7 +184,7 @@ test("loop guard: repeated rejected compress calls escalate, then suppress, then
 
 test("loop guard: a fresh extension instance starts at streak 0 (no cross-session bleed)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
   const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), ...FILLERS];
@@ -198,7 +198,7 @@ test("loop guard: a fresh extension instance starts at streak 0 (no cross-sessio
   // A second extension instance (fresh runtime + slots) re-folds the same
   // stream and replays tc_ok from the stream itself.
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
   await second.handlers.get("context")![0]!({ type: "context", messages: [...stream, assistantCompressCall("tc_ok", [call]), toolResult("tc_ok", ok.content[0].text)] }, ctx);
   const rejected = await second.api.tools.find((t) => t.name === "compress")!.execute("tc_new", { content: [call] }, undefined, undefined, ctx);
   assert.match(rejected.content[0].text, /No changes applied/, "fresh instance: rejection is a real rejection");
@@ -208,7 +208,7 @@ test("loop guard: a fresh extension instance starts at streak 0 (no cross-sessio
 
 test("loop guard: malformed compress args count toward the reject streak", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
   const compress = api.tools.find((t) => t.name === "compress")!;

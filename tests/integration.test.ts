@@ -79,7 +79,7 @@ function bigText(seed: string) {
 
 test("factory registers the compress tool and 4 flat commands", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension()(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context" } as never)(api as unknown as ExtensionAPI);
 
   assert.ok(api.tools.some((t) => t.name === "compress"), "compress tool registered");
   assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-search", "acp-status"]);
@@ -90,7 +90,7 @@ test("factory registers the compress tool and 4 flat commands", () => {
 
 test("before_agent_start appends the ACP system prompt", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension()(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context" } as never)(api as unknown as ExtensionAPI);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, fakeCtx());
   const sp = result.systemPrompt.join("\n");
   assert.ok(sp.startsWith("BASE"));
@@ -100,7 +100,7 @@ test("before_agent_start appends the ACP system prompt", () => {
 
 test("context handler tags every stream message with sequential refs (no tree access needed)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
 
   const stream = [userMsg("first"), userMsg("second"), userMsg("third")];
   const result = await handlers.get("context")![0]!({ type: "context", messages: stream }, fakeCtx());
@@ -114,7 +114,7 @@ test("context handler tags every stream message with sequential refs (no tree ac
 
 test("refs stay stable as the stream grows (append-only turns)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, fakeCtx());
 
   const turn1 = [userMsg(bigText("one")), userMsg("short")];
@@ -128,7 +128,7 @@ test("refs stay stable as the stream grows (append-only turns)", async () => {
 
 test("metadata fields (attribution, usage, timestamps) never shift refs", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, fakeCtx());
 
   const base = [userMsg(bigText("meta")), { role: "assistant", content: [{ type: "text", text: "answer" }] }];
@@ -147,7 +147,7 @@ test("metadata fields (attribution, usage, timestamps) never shift refs", async 
 
 test("compress tool prunes the covered range on the next context event", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
 
@@ -172,7 +172,7 @@ test("compress tool prunes the covered range on the next context event", async (
 
 test("in-stream compress calls are deduped — a replayed tool call does not double-apply", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
 
@@ -197,7 +197,7 @@ test("in-stream compress calls are deduped — a replayed tool call does not dou
 
 test("restart recovery: a fresh extension rebuilds blocks by replaying in-stream compress calls", async () => {
   const first = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(first.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(first.api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
@@ -212,7 +212,7 @@ test("restart recovery: a fresh extension rebuilds blocks by replaying in-stream
   // New process: brand-new extension instance, no sidecar state file — the
   // stream alone must reconstruct the block.
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
   const r3 = await second.handlers.get("context")![0]!({ type: "context", messages: withCall }, ctx);
 
   const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
@@ -228,7 +228,7 @@ test("restart recovery: a fresh extension rebuilds blocks by replaying in-stream
 
 test("restart replay skips compress calls that were rejected live", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const filler = (n: string) => `filler ${n} `.repeat(400);
@@ -247,7 +247,7 @@ test("restart replay skips compress calls that were rejected live", async () => 
 
   // Restart: fresh extension must NOT resurrect the rejected call.
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
   const r2 = await second.handlers.get("context")![0]!({ type: "context", messages: withRejection }, ctx);
   const statusTool = second.api.tools.find((t) => t.name === "acp_status")!;
   const status = await statusTool.execute("tc-rejected", {}, undefined, undefined, ctx);
@@ -257,7 +257,7 @@ test("restart replay skips compress calls that were rejected live", async () => 
 
 test("host compaction rewriting the prefix must NOT replay stale compress calls onto shifted positions", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   // 40 large user messages, model compresses m00005..m00035 (call at pos 36..37).
@@ -284,7 +284,7 @@ test("host compaction rewriting the prefix must NOT replay stale compress calls 
   const rewritten = [userMsg(bigText("host compaction summary")), ...compacted.slice(5)];
 
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
   await second.handlers.get("context")![0]!({ type: "context", messages: rewritten }, ctx);
   const statusTool = second.api.tools.find((t) => t.name === "acp_status")!;
   const status = await statusTool.execute("tc_fp2", {}, undefined, undefined, ctx);
@@ -293,7 +293,7 @@ test("host compaction rewriting the prefix must NOT replay stale compress calls 
 
 test("issue #35: the compactionSummary message is itself already compressed and must never be recommended", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   // After native /compact, the stream starts with the compaction entry
@@ -323,7 +323,7 @@ test("issue #35: the compactionSummary message is itself already compressed and 
 
 test("live-rejected compress call stays rejected on the next INCREMENTAL context event", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const filler = (n: number) => `content ${n} `.repeat(600);
@@ -353,7 +353,7 @@ test("live-rejected compress call stays rejected on the next INCREMENTAL context
 
 test("tail rewind (retry) re-folds deterministically without losing prefix refs", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
 
@@ -372,7 +372,7 @@ test("tail rewind (retry) re-folds deterministically without losing prefix refs"
 
 test("acp_status refs remain usable by the next compress call", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const stream = [userMsg(bigText("status target")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
@@ -390,7 +390,7 @@ test("acp_status refs remain usable by the next compress call", async () => {
 
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension()(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context" } as never)(api as unknown as ExtensionAPI);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, fakeCtx());
   const sp = result.systemPrompt.join("\n");
   assert.ok(sp.includes("Work from summaries, not raw tool outputs"), "kernel COMPRESS_PHILOSOPHY inlined");
@@ -415,7 +415,7 @@ test("system prompt never includes the ACP_DELEGATE NOTIFICATIONS section (omp d
 
 test("restart replay preserves tier-2 blocks (block-boundary ranges must not be treated as stale)", async () => {
   const first = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(first.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(first.api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: any[]) => first.handlers.get("context")![0]!({ type: "context", messages }, ctx);
 
@@ -439,7 +439,7 @@ test("restart replay preserves tier-2 blocks (block-boundary ranges must not be 
 
   // New process: the stream alone must rebuild BOTH tiers.
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
   const r3 = await second.handlers.get("context")![0]!({ type: "context", messages: withCalls }, ctx);
   const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
   assert.ok(!texts.includes("second large enough"), "covered original stays pruned under the tier-2 block");
@@ -453,7 +453,7 @@ test("restart replay preserves tier-2 blocks (block-boundary ranges must not be 
 
 test("mixed message/block boundary batch keeps fingerprint index alignment on replay", async () => {
   const first = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(first.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(first.api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: any[]) => first.handlers.get("context")![0]!({ type: "context", messages }, ctx);
 
@@ -481,7 +481,7 @@ test("mixed message/block boundary batch keeps fingerprint index alignment on re
   const withCalls = [...stream, call1, toolResult("call_c1", res1.content[0].text), call2, toolResult("call_c2", res2.content[0].text), userMsg("post mixed-batch turn")];
 
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(second.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
   const r3 = await second.handlers.get("context")![0]!({ type: "context", messages: withCalls }, ctx);
   const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
   assert.ok(!texts.includes("second large enough"), "block-range content stays pruned (call not mis-skipped)");
@@ -500,7 +500,7 @@ test("mixed message/block boundary batch keeps fingerprint index alignment on re
 // so the boundary fingerprints match) — no block loss, no double-apply.
 test("mid-stream mutation triggers re-fold and the in-stream compress call still replays", async () => {
   const cap = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(cap.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(cap.api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const fillers = (s: string) => [...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} ${s} `.repeat(400)))];
@@ -543,7 +543,7 @@ test("mid-stream mutation triggers re-fold and the in-stream compress call still
 // top-level ("essential") so the model calls them with structured args.
 test("all ACP tools are registered as essential (top-level, not xd:// devices)", async () => {
   const cap = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000 })(cap.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(cap.api as unknown as ExtensionAPI);
   const expected = ["compress", "decompress", "search_context", "acp_status"];
   assert.equal(cap.api.tools.length, expected.length, `expected ${expected.length} tools`);
   for (const name of expected) {

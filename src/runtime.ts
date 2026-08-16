@@ -338,7 +338,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       // text mirrors what before_agent_start puts on the wire (base + ACP
       // block — not yet appended at session_start, so add it here).
       if (
-        (adapterRef.transformMode ?? "context") === "provider" &&
+        (adapterRef.transformMode ?? "provider") === "provider" &&
         (ctx.model as { api?: string } | undefined)?.api === "openai-completions"
       ) {
         const base = getSystemPromptText(ctx);

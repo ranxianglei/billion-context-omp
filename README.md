@@ -65,11 +65,11 @@ Each message gets an invisible `<acp>` ref tag (`m00001`, `m00002`, ...) visible
 
 **The session stream is the single source of truth.** Compress calls live in the stream itself: every compress tool call's arguments (ranges + summaries) are re-applied deterministically on each LLM call, on restart, and on resume — no sidecar state file to drift out of sync. Position ids (`p1..pN`) and model-facing refs (`m00001..`) are re-derived from the stream every turn; prefix rewrites (retry, rewind, host compaction) are detected and safely re-folded, with fingerprint guards against replaying a call onto the wrong messages.
 
-omp's built-in `/compact` is intercepted and replaced by an ACP model-summarized compaction that also preserves prior compress-call summaries — nothing is lost to the gap between the summary and the kept entries.
+omp's built-in `/compact` is **the host's feature** — it runs natively (user-initiated, between turns). ACP does not intercept it. Compression itself is the model's decision via the compress tool. If you want ACP to be the *only* compression authority, set `"compaction": { "enabled": false }` in omp settings to disable the host's auto-compact (the 80% threshold trigger); manual `/compact` still works whenever you want it.
 
 ## Plugin compatibility
 
-**Keep exactly one context-compression plugin installed.** If two compression extensions both rewrite the message list, they clobber each other's work — compressed ranges can be re-expanded or corrupted. omp's own `/compact` is already intercepted automatically by billion-context-omp, but any *third-party* compression/compaction extension should be uninstalled.
+**Keep exactly one context-compression plugin installed.** If two compression extensions both rewrite the message list, they clobber each other's work — compressed ranges can be re-expanded or corrupted. Any *third-party* compression/compaction extension should be uninstalled.
 
 ## Model-facing tools
 
@@ -123,7 +123,6 @@ Create `~/.omp/acp-omp.json` (global) and/or `<project>/.omp/acp-omp.json` (proj
   "debug": false,
   "autoUpdate": true,
   "modelContextLimit": 200000,
-  "compressModel": "zhipuai:glm-5.2",
   "toolBashDefaultTimeout": 60,
   "toolOutputMaxBytes": 200000,
   "compress": {
@@ -145,10 +144,9 @@ Create `~/.omp/acp-omp.json` (global) and/or `<project>/.omp/acp-omp.json` (proj
 | Key | Default | Description |
 |-----|---------|-------------|
 | `debug` | `false` | Enable verbose **debug-level** events in the log. The always-on log (lifecycle events, errors, warnings) is written regardless; `debug` only adds extra diagnostics. Also enabled by env `ACP_DEBUG=1`. |
-| `transformMode` | `"context"` (default) or `"provider"` — where the compression surgery intercepts. `provider` transforms the provider wire payload (no feedback re-entry; experimental). |
+| `transformMode` | `"provider"` (default since v0.2.6) or `"context"` — where the compression surgery intercepts. `provider` transforms the provider wire payload (request-local, structurally immune to feedback re-entry). `context` is the legacy rewrite-in-place mode. |
 | `autoUpdate` | `true` | On session start (throttled to one check per 3 minutes), check npm for a newer version and auto-install it. Disable to avoid all startup network calls. |
 | `modelContextLimit` | *(auto)* | Override the context limit (in tokens). Defaults to the model's `contextWindow`. |
-| `compressModel` | *(session model)* | `provider:modelId` used for `/compact` model-summarized compaction (e.g. `"zhipuai:glm-5.2"`). Defaults to the current session model when omitted. |
 | `toolBashDefaultTimeout` | `60` | Seconds injected into the `bash` tool when the model omits `timeout`. Without this a forgotten timeout can hang for thousands of seconds. `0` restores unbounded behavior. |
 | `toolOutputMaxBytes` | `200000` | Hard byte cap on tool result text (applied via the `tool_result` hook). Stops runaway output that omp's own caps can't catch. When it fires the model is told where the full output lives; set lower (e.g. `8192`) for a tighter context budget, or `0` to disable. |
 | `compress.maxContextLimit` | `"75%"` | Context usage threshold that triggers **forced compression** nudges (bypasses growth-gate + cadence). Accepts a ratio (`0.75`) or percent string (`"75%"`). Lower = compress earlier / more aggressively. |
