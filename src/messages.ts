@@ -102,7 +102,7 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
  *  shapes must replay from the stream. Returns normalized compress args
  *  (content array
  *  plus optional topic / summaryMaxChars from wherever they live). */
-function compressToolArgs(call: { name: string; arguments?: unknown }): { content: unknown[]; topic?: unknown; summaryMaxChars?: unknown } | null {
+export function compressToolArgs(call: { name: string; arguments?: unknown }): { content: unknown[]; topic?: unknown; summaryMaxChars?: unknown } | null {
   let args = call.arguments;
   if (typeof args === "string") {
     try { args = JSON.parse(args); } catch { return null; }
@@ -214,7 +214,7 @@ export function extractText(content: unknown, stripTags = true): string {
   return parts.join("\n");
 }
 
-function stripRefTag(text: string): string {
+export function stripRefTag(text: string): string {
   return text.replace(REF_TAG, "").replace(TRAILING_REF_TAG, "");
 }
 export function messageIdentity(message: unknown): string {

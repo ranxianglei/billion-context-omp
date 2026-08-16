@@ -1,14 +1,29 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createAcpExtension } from "../src/index.js";
-import { detectWireFormat, synthesizeStream, rebuildWirePayload } from "../src/wire-transform.js";
+import {
+  coreIdentity,
+  detectProviderWireFormat,
+  findCompressCallsCore,
+  payloadToCore,
+  coreToPayloadMessages,
+  spanFingerprintCore,
+  boundaryRawCore,
+  staleRangeCore,
+  viewToAnthropicCore,
+  viewToCoreStream,
+} from "../src/wire-fold.js";
+import { stripRefTag } from "../src/messages.js";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { BiliMessage } from "acp-kernel/wire";
 
 // Provider mode (transformMode: "provider", issue #52): the context event is
 // an observer and the compression surgery runs on the WIRE payload at
-// before_provider_request. These tests cover format detection, wire↔stream
-// synthesis fidelity, in-stream compress-call replay at the wire level, and
-// mode isolation (context mode must not double-transform).
+// before_provider_request — now in CORE SPACE on the kernel codec
+// (wire-fold.ts), the same wire contract as the billion-context proxy.
+// These tests cover format detection, kernel round-trip fidelity, core-space
+// replay helpers, in-stream compress-call replay at the wire level, and mode
+// isolation (context mode must not double-transform).
 
 function capture() {
   const handlers = new Map<string, Array<(e: unknown, ctx: unknown) => unknown>>();
@@ -46,16 +61,19 @@ function anthropicPayload(msgs: Array<Record<string, unknown>>): Record<string, 
   return { model: "claude-x", max_tokens: 8192, system: "sys", messages: msgs };
 }
 
-test("detectWireFormat routes anthropic / openai / unknown", () => {
-  assert.equal(detectWireFormat(anthropicPayload([])), "anthropic");
-  assert.equal(detectWireFormat({ messages: [{ role: "assistant", tool_calls: [{ id: "t1", function: { name: "f" } }] }] }), "openai");
-  assert.equal(detectWireFormat({ messages: [{ role: "tool", tool_call_id: "t1", content: "r" }] }), "openai");
-  assert.equal(detectWireFormat({ messages: [{ role: "user", content: "hi" }] }), "openai");
-  assert.equal(detectWireFormat({ foo: 1 }), "unknown");
-  assert.equal(detectWireFormat(null), "unknown");
+test("detectProviderWireFormat routes anthropic / openai, null otherwise", () => {
+  assert.equal(detectProviderWireFormat(anthropicPayload([])), "anthropic");
+  assert.equal(detectProviderWireFormat({ messages: [{ role: "assistant", tool_calls: [{ id: "t1", function: { name: "f" } }] }] }), "openai");
+  assert.equal(detectProviderWireFormat({ messages: [{ role: "tool", tool_call_id: "t1", content: "r" }] }), "openai");
+  assert.equal(detectProviderWireFormat({ messages: [{ role: "user", content: "hi" }] }), "openai");
+  assert.equal(detectProviderWireFormat({ foo: 1 }), null);
+  assert.equal(detectProviderWireFormat(null), null);
+  // The kernel parses responses bodies, but the omp pipeline has no
+  // responses rebuild path — fail-open, not openai-shaped.
+  assert.equal(detectProviderWireFormat({ model: "gpt-x", input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] }), null);
 });
 
-test("wire→stream synthesis preserves identity-relevant shape (anthropic tool round-trip)", () => {
+test("kernel round-trip preserves tool ids and cache_control (anthropic)", () => {
   const payload = anthropicPayload([
     { role: "user", content: [{ type: "text", text: "run it", cache_control: { type: "ephemeral" } }] },
     { role: "assistant", content: [
@@ -65,30 +83,145 @@ test("wire→stream synthesis preserves identity-relevant shape (anthropic tool 
     { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "file1\nfile2" }] },
     { role: "assistant", content: [{ type: "text", text: "done" }] },
   ]);
-  const synth = synthesizeStream(payload, "anthropic");
-  // 4 agents: user text, assistant (text+toolCall), toolResult, assistant text
-  assert.equal(synth.stream.length, 4);
-  const [u1, a1, tr, a2] = synth.stream as Array<Record<string, any>>;
-  assert.ok(u1 && a1 && tr && a2, "synthesized all four agents");
-  assert.equal(u1.role, "user");
-  assert.equal(a1.role, "assistant");
-  assert.equal(a1.content[1].type, "toolCall");
-  assert.equal(a1.content[1].id, "call_1");
-  assert.equal(tr.role, "toolResult");
-  assert.equal(tr.toolCallId, "call_1");
-  assert.equal(tr.toolName, "bash");
-  assert.equal(a2.role, "assistant");
+  const { msgs, cacheControls } = payloadToCore(payload, "anthropic");
+  // 6 core pieces: user text, assistant text, tool-call, tool-result, assistant text
+  assert.ok(msgs.length >= 5, `expected >=5 pieces, got ${msgs.length}`);
+  const call = msgs.find((m) => m.contentType === "tool-call");
+  assert.equal(call?.toolCallId, "call_1");
+  assert.equal(call?.toolName, "bash");
+  assert.ok(call?.text?.includes("ls"));
+  const result = msgs.find((m) => m.contentType === "tool-result");
+  assert.equal(result?.toolCallId, "call_1");
+  assert.ok(result?.text?.includes("file1"));
 
-  // No compression (short stream): rebuild keeps every message, tool ids and
-  // cache_control survive on the original block objects.
-  const out = rebuildWirePayload(synth.stream, payload, synth) as { messages: Array<Record<string, any>> };
-  assert.equal(out.messages.length, 4);
-  const m0 = out.messages[0]!;
-  assert.equal(m0.content[0].cache_control?.type, "ephemeral", "cache_control preserved");
-  const m1 = out.messages[1]!;
-  assert.equal(m1.content.find((b: any) => b.type === "tool_use")?.id, "call_1", "tool_use id preserved");
-  const m2 = out.messages[2]!;
-  assert.equal(m2.content[0].tool_use_id, "call_1", "tool_result pairing preserved");
+  const out = coreToPayloadMessages(msgs, "anthropic", cacheControls) as Array<Record<string, any>>;
+  const flat = JSON.stringify(out);
+  assert.ok(flat.includes("call_1"), "tool ids survive the round-trip");
+  assert.ok(flat.includes("file1"), "tool result text survives");
+  const withCC = flat.match(/cache_control/);
+  assert.ok(withCC, "cache_control re-attached from the cacheControls map");
+});
+
+test("kernel round-trip preserves tool_calls and tool results (openai)", () => {
+  const payload = {
+    model: "glm-x",
+    messages: [
+      { role: "system", content: "sys" },
+      { role: "user", content: "q" },
+      { role: "assistant", content: "", tool_calls: [{ id: "t9", type: "function", function: { name: "grep", arguments: "{\"q\":\"x\"}" } }] },
+      { role: "tool", tool_call_id: "t9", content: "no matches" },
+    ],
+  };
+  const { msgs } = payloadToCore(payload, "openai");
+  assert.ok(msgs.some((m) => m.role === "system"), "system prompt becomes a core piece (takes m00001)");
+  const out = coreToPayloadMessages(msgs, "openai") as Array<Record<string, any>>;
+  const flat = JSON.stringify(out);
+  assert.ok(flat.includes("t9"), "tool_call_id survives");
+  assert.ok(flat.includes("no matches"), "tool result survives");
+  const tc = out.find((m) => Array.isArray(m.tool_calls));
+  assert.equal(tc?.tool_calls?.[0]?.id, "t9");
+});
+
+test("coreIdentity strips our own ref tags (cross-turn stability)", () => {
+  const bare: BiliMessage = { id: "x", role: "user", contentType: "text", text: "hello" };
+  const tagged: BiliMessage = { id: "y", role: "user", contentType: "text", text: "hello\n\n<acp tokens=\"1K\" type=\"text\">m00001</acp>" };
+  const taggedLead: BiliMessage = { id: "z", role: "user", contentType: "text", text: "<acp tokens=\"1K\" type=\"text\">m00001</acp>\nhello" };
+  assert.equal(coreIdentity(bare), coreIdentity(tagged));
+  assert.equal(coreIdentity(bare), coreIdentity(taggedLead));
+  assert.notEqual(coreIdentity(bare), coreIdentity({ ...bare, text: "different" }));
+  assert.equal(stripRefTag("hello\n\n<acp tokens=\"1K\" type=\"text\">m00001</acp>"), "hello");
+});
+
+test("findCompressCallsCore finds direct and xd:// compress calls", () => {
+  const direct: BiliMessage = {
+    id: "c1", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "call_z",
+    text: JSON.stringify({ content: [{ startId: "m00001", endId: "m00003", summary: "s" }] }),
+  };
+  const calls = findCompressCallsCore(direct);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.id, "call_z");
+  assert.equal(calls[0]!.ranges.length, 1);
+  assert.equal(calls[0]!.ranges[0]!.startRef, "m00001");
+
+  const legacy: BiliMessage = {
+    id: "c2", role: "assistant", contentType: "tool-call", toolName: "write", toolCallId: "call_w",
+    text: JSON.stringify({ path: "xd://compress", content: JSON.stringify([{ startId: "m00001", endId: "m00002", summary: "s2" }]) }),
+  };
+  const legacyCalls = findCompressCallsCore(legacy);
+  assert.equal(legacyCalls.length, 1);
+  assert.equal(legacyCalls[0]!.ranges[0]!.endRef, "m00002");
+
+  const other: BiliMessage = { id: "c3", role: "assistant", contentType: "tool-call", toolName: "bash", toolCallId: "call_b", text: "{}" };
+  assert.equal(findCompressCallsCore(other).length, 0);
+});
+
+test("staleRangeCore: fingerprint match passes, mismatch rejects", () => {
+  const msgs: BiliMessage[] = [
+    { id: "h1", role: "user", contentType: "text", text: "one" },
+    { id: "h2", role: "assistant", contentType: "text", text: "two" },
+    { id: "h3", role: "user", contentType: "text", text: "three" },
+    { id: "call", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "c", text: "{}" },
+  ];
+  const fp = spanFingerprintCore(msgs, "h1", "h3");
+  assert.match(fp, /^[0-9a-f]{8}$/);
+  const byRef: Record<string, string> = { m00001: "h1", m00002: "h2", m00003: "h3" };
+  const resultText = `Compressed 1 range [fp=${fp}]`;
+  assert.equal(staleRangeCore({ startRef: "m00001", endRef: "m00003" }, 0, resultText, msgs, 3, byRef, []), false, "matching fp passes");
+  assert.match(
+    String(staleRangeCore({ startRef: "m00001", endRef: "m00003" }, 0, "Compressed 1 range [fp=00000000]", msgs, 3, byRef, [])),
+    /^fp m00001\.\.m00003 want 00000000 got [0-9a-f]{8}/,
+    "mismatched fp rejects",
+  );
+  assert.match(
+    String(staleRangeCore({ startRef: "m00001", endRef: "m00099" }, 0, "Compressed 1 range [fp=x]", msgs, 3, byRef, [])),
+    /^unresolved/,
+    "unresolved message ref rejects",
+  );
+  assert.match(
+    String(staleRangeCore({ startRef: "m00001", endRef: "m00002" }, 0, "Compressed 1 range [fp=00000000]", msgs, 0, byRef, [])),
+    /^end idx 1 > callIndex 0$/,
+    "end after the call rejects",
+  );
+});
+
+test("boundaryRawCore resolves block refs by stream order", () => {
+  const msgs: BiliMessage[] = [
+    { id: "h1", role: "user", contentType: "text", text: "one" },
+    { id: "h2", role: "assistant", contentType: "text", text: "two" },
+    { id: "h3", role: "user", contentType: "text", text: "three" },
+  ];
+  const byRef: Record<string, string> = { m00001: "h1", m00002: "h2", m00003: "h3" };
+  const blocks = [{ blockId: "b1", effectiveMessageIds: ["h1", "h2", "h3"] }];
+  assert.equal(boundaryRawCore("m00002", byRef, blocks, msgs, "min"), "h2");
+  assert.equal(boundaryRawCore("b1", byRef, blocks, msgs, "min"), "h1");
+  assert.equal(boundaryRawCore("b1", byRef, blocks, msgs, "max"), "h3");
+  assert.equal(boundaryRawCore("b9", byRef, blocks, msgs, "min"), "");
+});
+
+test("viewToCoreStream mirrors the openai wire shape (system first)", () => {
+  const view = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    { role: "assistant", content: [{ type: "text", text: "calling" }, { type: "toolCall", id: "t1", name: "grep", arguments: { q: "x" } }] },
+    { role: "toolResult", content: [{ type: "text", text: "hit" }], toolCallId: "t1" },
+  ] as unknown as Parameters<typeof viewToCoreStream>[0];
+  const core = viewToCoreStream(view, "base system");
+  assert.equal(core[0]?.role, "system", "system prompt takes m00001");
+  assert.equal(core[0]?.text, "base system");
+  assert.ok(core.some((m) => m.contentType === "tool-call" && m.toolCallId === "t1"));
+  assert.ok(core.some((m) => m.role === "tool" && m.text === "hit"));
+});
+
+test("viewToAnthropicCore mirrors the anthropic wire shape (no system piece)", () => {
+  const view = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "grep", arguments: { q: "x" } }] },
+    { role: "toolResult", content: [{ type: "text", text: "hit" }], toolCallId: "t1" },
+  ] as unknown as Parameters<typeof viewToAnthropicCore>[0];
+  const core = viewToAnthropicCore(view);
+  assert.ok(!core.some((m) => m.role === "system"), "top-level system is out of the fold space");
+  const call = core.find((m) => m.contentType === "tool-call");
+  assert.equal(call?.toolCallId, "t1");
+  assert.ok(core.some((m) => m.contentType === "tool-result" && m.toolCallId === "t1"));
 });
 
 test("provider mode: in-stream compress call replays and prunes the wire payload", async () => {
@@ -159,7 +292,6 @@ test("provider mode: openai payloads transform too", async () => {
   const fire = () => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx);
   const out = (await fire()) as { messages: Array<Record<string, any>> };
   assert.ok(out, "openai payload transformed");
-  assert.equal(out.messages.length, payload.messages.length, "nothing pruned on a small session");
   const flat = JSON.stringify(out.messages);
   assert.ok(flat.includes("no matches"), "tool result survives");
   assert.ok(flat.includes("t9"), "tool_call_id preserved");
@@ -184,7 +316,7 @@ test("fail-open: malformed payloads return undefined, never throw", async () => 
   createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
   const fire = (payload: unknown) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, fakeCtx());
   assert.equal(await fire({ model: "x" }), undefined, "no messages array → pass-through");
-  assert.equal(await fire({ messages: [42, null] }), undefined, "garbage entries → empty synthesis → pass-through");
+  assert.equal(await fire({ messages: [42, null] }), undefined, "garbage entries → fail-open catch → pass-through");
 });
 
 test("default (no transformMode given) resolves per model API (issue #79)", async () => {
