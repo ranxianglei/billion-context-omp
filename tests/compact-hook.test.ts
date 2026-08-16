@@ -176,6 +176,16 @@ test("/compact retries once and recovers when the first response is unparseable"
   }
 });
 
+test("truncated-mid-JSON output yields the partial summary without wrapper debris", async () => {
+  const { parseSummary } = await import("../src/auto-compress.js");
+  const truncated = '{"summary": "The session covered authentication work end to end: token refresh in lib/auth.ts:45, retry loop hardening, and three regress';
+  const out = parseSummary(truncated);
+  assert.ok(out, "truncated JSON with a real partial summary must be accepted");
+  assert.ok(!out.includes('"summary"'), "no wrapper debris in the stored summary");
+  assert.match(out, /^The session covered authentication/);
+  assert.equal(parseSummary('{"summary": "short"'), null, "too-short partial → null");
+});
+
 test("long plain-prose output is accepted as the summary (weak-model tolerance)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as never);

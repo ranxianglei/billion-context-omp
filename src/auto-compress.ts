@@ -126,12 +126,20 @@ export function parseSummary(text: string): string | null {
     if (typeof obj.summary === "string" && obj.summary.length > 0) return obj.summary;
     return null;
   } catch {
-    // Not JSON. Weak/local models often emit plain prose despite the JSON
-    // instruction — when it is long enough to be a real summary (kernel
-    // minSummaryLength parity), accept the prose instead of failing the
-    // whole compaction over formatting.
+    // Not valid JSON. Two weak-model shapes recover here:
+    // 1. plain prose despite the JSON instruction — accept when long enough
+    //    (kernel minSummaryLength parity);
+    // 2. TRUNCATED JSON — the wrapper opened ("summary" was being written)
+    //    but the output cap cut it mid-string. Extract the partial summary
+    //    text instead of storing the wrapper debris verbatim.
+    const m = /^\{\s*"summary"\s*:\s*"([\s\S]*)$/.exec(cleaned);
+    if (m) {
+      const partial = m[1]!.replace(/\s*"?\s*\}?\s*$/, "").trim();
+      return partial.length >= 50 ? partial : null;
+    }
+    return cleaned.length >= 50 ? cleaned : null;
   }
-  return cleaned.length >= 50 ? cleaned : null;
+  return null;
 }
 
 /** Build the summary-generation system prompt FROM the kernel's load-bearing
