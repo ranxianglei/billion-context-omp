@@ -40,10 +40,15 @@ export interface UserAcpConfig {
  *  everything else (thresholds, models, timeouts) but not the prompts. */
 export async function loadUserConfig(cwd: string): Promise<UserAcpConfig> {
   const home = homeDir();
+  const globalDir = join(home, CONFIG_DIR_NAME);
   const merged: UserAcpConfig = {};
-  for (const base of [join(home, CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
+  for (const base of [globalDir, join(cwd, CONFIG_DIR_NAME)]) {
     const file = join(base, "acp-omp.json");
-    const allowPrompts = base.startsWith(home);
+    // Exact equality, not startsWith(home): a project checked out under
+    // $HOME (~/code/repo/.omp) also starts with $HOME — prefix matching let
+    // its config carry prompts + acknowledgePromptsRisk into the system
+    // prompt, reopening the exact injection surface issue #32 closed.
+    const allowPrompts = base === globalDir;
     try {
       const raw = await fs.readFile(file, "utf8");
       const parsed = JSON.parse(raw);
