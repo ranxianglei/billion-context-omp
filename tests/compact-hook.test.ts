@@ -145,7 +145,7 @@ test("/compact summarizes ALL discarded content — gap, prior compress-call sum
   // previousSummary is folded in so iterative compactions never lose it.
   assert.ok(captured!.systemPrompt.join("\n").includes("PREVIOUS compaction"), "previousSummary handling must be instructed");
   assert.ok(captured!.systemPrompt.join("\n").includes("focus on auth"), "customInstructions must reach the prompt");
-  assert.equal(captured!.maxTokens, 8000, "output budget raised: 3000 truncated long compactions mid-JSON");
+  assert.equal(captured!.maxTokens, -1, "no output cap — the model's own window + timeout are the only limits");
 });
 
 test("/compact succeeds immediately when preparation is empty (nothing at stake)", async () => {
@@ -241,7 +241,7 @@ test("summarizeMessages renders stable mNNNNN refs when fold refs are provided (
       captured = {
         systemPrompt: payload.systemPrompt,
         userText: payload.messages[0]!.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"),
-        maxTokens: 8000,
+        maxTokens: -1,
       };
       return { content: [{ type: "text", text: '{"summary": "FULL DIGEST COVERING EVERYTHING"}' }] };
     }) as never,
