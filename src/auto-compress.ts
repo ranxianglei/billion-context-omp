@@ -8,14 +8,12 @@ import { createInitialState, type CoreMessage, type CompressionState, type Compr
 import { debug, logInfo, logWarn } from "./log.js";
 import { streamToCoreMessages, type AgentMessage } from "./messages.js";
 
-const TIMEOUT_MS = 120_000;
-// NO output cap: `maxTokens` is deliberately omitted from the complete() calls.
-// A capped side-channel summary gets cut mid-JSON/mid-sentence by the server
-// (finish_reason "length") — the model has no awareness of the cap and cannot
-// wrap up. The compaction model defaults to the ACTIVE model (262K-class
-// windows locally), so the physical constraint is the model's own window and
-// the 120s timeout, not an invented budget. Timeout raised 60s→120s because an
-// uncapped long summary legitimately takes longer than 60s on local models.
+// NO timeout: the timer that used to abort the summary call after 60/120s
+// was a client-side kill switch for runaway local models. It is gone — the
+// compaction is user-initiated and cancellable via the host's own signal
+// (opts.signal, wired to omp's compaction abort, e.g. Ctrl+C), which is the
+// only legitimate way to stop it. A slow local model writing a 20k-token
+// summary is NORMAL, not runaway.
 const MAX_SLICE_CHARS = 150_000;
 const MAX_MSG_CHARS = 4000;
 
@@ -208,7 +206,6 @@ export async function summarizeMessages(
   }
 
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
   const onOuterAbort = () => ac.abort();
   opts?.signal?.addEventListener("abort", onOuterAbort);
   try {
@@ -260,7 +257,6 @@ export async function summarizeMessages(
     logWarn("summarize-messages", { event: "failed", model: label, error: String(e) });
     return null;
   } finally {
-    clearTimeout(timer);
     opts?.signal?.removeEventListener("abort", onOuterAbort);
     debug.event("summarize-messages-done", { model: label, messages: slice.length });
   }
@@ -293,7 +289,6 @@ export async function summarizeRange(
   }
 
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
   try {
     const instructions = buildSummaryPrompt(prompts);
     const userText =
@@ -317,7 +312,6 @@ export async function summarizeRange(
     logWarn("summarize-range", { event: "failed", model: label, error: String(e) });
     return null;
   } finally {
-    clearTimeout(timer);
     debug.event("summarize-range-done", { span: `${startRef}..${endRef}`, model: label });
   }
 }
