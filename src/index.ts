@@ -19,6 +19,7 @@ import { viableRanges } from "billion-context-kit";
 import { summarizeMessages } from "./auto-compress.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
+import { stampAndDetect } from "./instance-guard.js";
 import { debug, setDebugEnabled, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTextTokens, estimateTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
@@ -119,6 +120,21 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
+    // Dual-instance guard (AGENTS.md #14): `omp install` + a manual
+    // extensions path both loading this package fight over two fold
+    // states — observed live as evaporating blocks. Warn once, loudly.
+    const selfPath = import.meta.url;
+    const conflict = stampAndDetect(selfPath, typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null);
+    if (conflict) {
+      logWarn("instance", { event: "dual-instance", self: selfPath, other: conflict.path, otherPid: conflict.pid, otherVersion: conflict.version });
+      try {
+        if (ctx.hasUI) {
+          ctx.ui.notify(`⚠ billion-context-omp loaded TWICE (also from ${conflict.path}). Two instances corrupt compression state — remove one (check 'omp plugin list' vs config.yml extensions).`);
+        }
+      } catch {
+        // notify unavailable — log line above is the durable record
+      }
+    }
     try {
       const user = await loadUserConfig(ctx.cwd);
       runtime.setAdapter(applyUserConfig(runtime.adapter, user));
