@@ -61,15 +61,22 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
 
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const ranges = args.content ?? [];
-  if (ranges.length === 0) return "No ranges provided.";
+  if (ranges.length === 0) {
+    return rejectionMessage(ctx, runtime, "No ranges provided. No changes applied — send content: [{ startId, endId, summary }].");
+  }
   // Defensive validation (live issue, 2026-08-15 provider-mode e2e: a range
   // without a summary threw `r.summary.length` deep in the handler). Weak
   // models occasionally emit {startId,endId} only — answer with a precise,
-  // correctable error instead of a TypeError string.
+  // correctable error instead of a TypeError string. These early returns go
+  // through rejectionMessage too: repeating the same malformed call is the
+  // same issue-47 poison loop as repeating a kernel rejection, and the
+  // streak must escalate identically. "No changes applied" also keeps the
+  // fold-replay skip contract for mixed batches rejected atomically here
+  // (otherwise their valid ranges would resurrect on the next fold).
   const invalid = ranges.filter((r) => !r || typeof r.summary !== "string" || !r.summary.trim() || !r.startId || !r.endId);
   if (invalid.length > 0) {
     logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "invalid-ranges", count: invalid.length });
-    return `Every range needs startId, endId and a summary (min 50 chars) — got ${invalid.length} range(s) missing fields. Re-send the FULL ranges array with summaries included.`;
+    return rejectionMessage(ctx, runtime, `Every range needs startId, endId and a summary (min 50 chars) — got ${invalid.length} range(s) missing fields. Re-send the FULL ranges array with summaries included. No changes applied — run acp_status for current refs.`);
   }
   const releaseLock = await runtime.acquireLock(ctx.sessionManager.getSessionId());
   try {

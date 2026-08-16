@@ -205,3 +205,35 @@ test("loop guard: a fresh extension instance starts at streak 0 (no cross-sessio
   assert.match(rejected.content[0].text, /already compressed/, "fresh instance: covered span rejected");
   assert.doesNotMatch(rejected.content[0].text, /STOP/, "fresh instance: first rejection is clean (streak 1)");
 });
+
+test("loop guard: malformed compress args count toward the reject streak", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const compress = api.tools.find((t) => t.name === "compress")!;
+  const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), ...FILLERS];
+  await fire([...stream]);
+
+  // {startId,endId} without summary — the weak-model shape from the
+  // 2026-08-15 provider-mode e2e. Repeating it must escalate like any
+  // other rejection: STOP at the third, suppressed detail at the fourth.
+  const bad = { content: [{ startId: "m00001", endId: "m00002" }] };
+  const r1 = await compress.execute("tc_m1", bad, undefined, undefined, ctx);
+  assert.match(r1.content[0].text, /Every range needs startId/, "malformed: correctable error returned");
+  assert.match(r1.content[0].text, /No changes applied/, "malformed: fold-skip marker present");
+  assert.doesNotMatch(r1.content[0].text, /STOP/, "malformed rejection 1: no escalation yet");
+  const r2 = await compress.execute("tc_m2", bad, undefined, undefined, ctx);
+  assert.doesNotMatch(r2.content[0].text, /STOP/, "malformed rejection 2: no escalation yet");
+  const r3 = await compress.execute("tc_m3", bad, undefined, undefined, ctx);
+  assert.match(r3.content[0].text, /STOP: 3 compress calls rejected in a row/, "malformed rejection 3: escalates to the stop directive");
+  const r4 = await compress.execute("tc_m4", bad, undefined, undefined, ctx);
+  assert.match(r4.content[0].text, /again — 4 consecutive rejections/, "malformed rejection 4: detail suppressed");
+  assert.doesNotMatch(r4.content[0].text, /Every range needs startId/, "malformed rejection 4: base error detail gone");
+
+  // Empty content arrays ride the same guard — this is the 5th consecutive
+  // rejection, so the guard is already in suppress mode.
+  const e1 = await compress.execute("tc_e1", { content: [] }, undefined, undefined, ctx);
+  assert.match(e1.content[0].text, /again — 5 consecutive rejections/, "empty content: counted, guard already suppressing");
+  assert.match(e1.content[0].text, /No changes applied/, "empty content: fold-skip marker present");
+});
