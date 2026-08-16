@@ -202,13 +202,14 @@ function stringifyArgs(args: unknown): string {
   return safeStringify(args);
 }
 
-export function extractText(content: unknown): string {
-  if (typeof content === "string") return stripRefTag(content);
+export function extractText(content: unknown, stripTags = true): string {
+  const clean = stripTags ? stripRefTag : (s: string): string => s;
+  if (typeof content === "string") return clean(content);
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
   for (const block of content) {
     const b = block as { type?: string; text?: string };
-    if (b.type === "text" && typeof b.text === "string") parts.push(stripRefTag(b.text));
+    if (b.type === "text" && typeof b.text === "string") parts.push(clean(b.text));
   }
   return parts.join("\n");
 }

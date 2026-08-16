@@ -229,7 +229,9 @@ export function rebuildWirePayload(rebuilt: AgentMessage[], payload: unknown, sy
     const ai = agentIndexOf(agent);
     if (ai === undefined || ai >= synth.back.length) {
       // Synthesized message (nudge / future synthetic injections).
-      const text = extractText((agent as { content?: unknown }).content);
+      // Wire reconstruction never strips: the fold's ref tags are PAYLOAD
+      // here (the model reads m-refs off the wire; issue #66).
+      const text = extractText((agent as { content?: unknown }).content, false);
       const role = (agent as { role?: string }).role === "assistant" ? "assistant" : "user";
       if (synth.format === "anthropic") {
         out.push({ role, content: [{ type: "text", text }] });
@@ -247,7 +249,7 @@ export function rebuildWirePayload(rebuilt: AgentMessage[], payload: unknown, sy
       const blocks = anthropicBlocks(srcMsg);
       if (kind === "toolResult") {
         const block = blocks.find((b) => b.type === "tool_result" && b.tool_use_id === (agent as unknown as { toolCallId?: string }).toolCallId);
-        const text = extractText((agent as { content?: unknown }).content);
+        const text = extractText((agent as { content?: unknown }).content, false);
         if (block) {
           // Tag-patched text; original block attrs (cache_control etc.) kept.
           out.push({ role: "user", content: [{ ...block, content: [{ type: "text", text }] }] });
@@ -264,7 +266,7 @@ export function rebuildWirePayload(rebuilt: AgentMessage[], payload: unknown, sy
             .filter((b) => b.type === "toolCall" && b.id)
             .map((b) => b.id as string),
         );
-        const agentText = extractText((agent as { content?: unknown }).content);
+        const agentText = extractText((agent as { content?: unknown }).content, false);
         const outBlocks: AnthropicBlock[] = [];
         let textSeen = false;
         for (const b of blocks) {
@@ -285,7 +287,7 @@ export function rebuildWirePayload(rebuilt: AgentMessage[], payload: unknown, sy
         continue;
       }
       // text
-      const text = extractText((agent as { content?: unknown }).content);
+      const text = extractText((agent as { content?: unknown }).content, false);
       const block = blocks.find((b) => b.type === "text");
       if (block) out.push({ role: srcMsg.role, content: [{ ...block, text }] });
       else out.push({ role: srcMsg.role, content: [{ type: "text", text }] });
@@ -294,7 +296,7 @@ export function rebuildWirePayload(rebuilt: AgentMessage[], payload: unknown, sy
 
     // openai
     const srcMsg = src as OpenAIWireMessage;
-    const text = extractText((agent as { content?: unknown }).content);
+    const text = extractText((agent as { content?: unknown }).content, false);
     if (kind === "toolResult") {
       out.push({ role: "tool", tool_call_id: (agent as unknown as { toolCallId?: string }).toolCallId ?? srcMsg.tool_call_id, content: text });
       continue;
