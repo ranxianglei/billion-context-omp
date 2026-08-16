@@ -1,6 +1,6 @@
 {
 	"name": "billion-context-omp",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "One billion, not one million. Model-driven context management for the oh-my-pi (omp) coding agent.",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
