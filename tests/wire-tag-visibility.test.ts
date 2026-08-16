@@ -128,11 +128,11 @@ async function providerRoundTrip(window: number, session: Msg[], wire: (s: Msg[]
       buildSessionContext: () => ({ messages: session }),
     },
   } as unknown as ExtensionContext;
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(apiObj as ExtensionAPI);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(apiObj as unknown as ExtensionAPI);
   await handlers.get("session_start")![0]!({ type: "session_start" }, ctx);
   const payload = wire(session);
-  const h = handlers.get("before_provider_request")![0];
-  return await h({ type: "before_provider_request", payload }, ctx) as Record<string, unknown> | undefined;
+  const h = handlers.get("before_provider_request")![0]!;
+  return (await h({ type: "before_provider_request", payload }, ctx)) as Record<string, unknown> | undefined;
 }
 
 const wireMsgs = (out: Record<string, unknown> | undefined): Array<Record<string, unknown>> =>
@@ -158,7 +158,7 @@ test("provider+openai: nudge reaches the FINAL wire as the trailing user message
   const inputFlat = JSON.stringify(openaiWire(SESSION));
   assert.ok(!inputFlat.includes("Context limit reached") && !inputFlat.includes("efficiency nudge"), "input wire has no nudge");
 
-  const last = msgs[msgs.length - 1];
+  const last = msgs[msgs.length - 1]!;
   assert.equal(last.role, "user", "final wire message is the trailing user nudge");
   const lastText = textOf(last);
   const isNudge = lastText.includes("Context limit reached") || lastText.includes("efficiency nudge to compress early");
@@ -173,7 +173,6 @@ test("provider+openai: per-message m-ref tags reach the FINAL wire text (issue #
   const out = await providerRoundTrip(200_000, SESSION, openaiWire, "openai-completions", "wire-tag-openai");
   assert.ok(out, "provider transform returned a payload");
   const msgs = wireMsgs(out);
-
   // Full tag shape <acp …>mNNNNN</acp>; check non-system messages only
   // (the system prompt's ACP docs contain a tag example).
   const nonSystem = msgs.filter((m) => m.role !== "system");
@@ -184,7 +183,7 @@ test("provider+openai: per-message m-ref tags reach the FINAL wire text (issue #
   assert.ok(taggedTool, "tool result wire text carries its m-ref tag");
   // Tags are suffixes (patchRefTag) — the original body stays intact.
   assert.ok(textOf(firstUser).includes("u0 " + FILLER.slice(0, 40)), "original user body preserved");
-  assert.equal(msgs[0].role, "system", "system prompt stays first");
+  assert.equal(msgs[0]!.role, "system", "system prompt stays first");
 });
 
 test("provider+anthropic: per-message m-ref tags reach the FINAL wire text (issue #66)", async () => {
