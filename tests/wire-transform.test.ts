@@ -14,6 +14,7 @@ import {
   viewToCoreStream,
 } from "../src/wire-fold.js";
 import { stripRefTag } from "../src/messages.js";
+import { hostVersionAtLeast } from "../src/transform-mode.js";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { BiliMessage } from "acp-kernel/wire";
 
@@ -319,7 +320,7 @@ test("fail-open: malformed payloads return undefined, never throw", async () => 
   assert.equal(await fire({ messages: [42, null] }), undefined, "garbage entries → fail-open catch → pass-through");
 });
 
-test("default (no transformMode given) resolves per model API (issue #79)", async () => {
+test("default (no transformMode given) resolves per model API (issues #79/#83)", async () => {
   const make = () => {
     const { api, handlers } = capture();
     createAcpExtension({ autoUpdate: false } as never)(api as unknown as ExtensionAPI);
@@ -335,13 +336,19 @@ test("default (no transformMode given) resolves per model API (issue #79)", asyn
   // openai-completions (GLM/DeepSeek/vLLM): upstream PR can1357/oh-my-pi#8717
   // (issue #83) made the host apply the wire-payload replacement from 17.3.8,
   // and the openai wire body has a codec path — so the default is provider
-  // when the host is new enough (the devDep pin here is 17.3.8).
+  // when the host is new enough. The expectation depends on the ambient host
+  // version (devDep pin), so assert both branches explicitly (M1).
   {
     const handlers = make();
     const r1 = await fireCtx(handlers, model("openai-completions"));
-    assert.equal(r1, undefined, "default+openai-completions: context handler is an observer");
     const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("openai-completions"));
-    assert.ok(r2, "default+openai-completions: provider handler transforms the wire payload");
+    if (hostVersionAtLeast([17, 3, 8])) {
+      assert.equal(r1, undefined, "default+openai-completions (host >= 17.3.8): context handler is an observer");
+      assert.ok(r2, "default+openai-completions (host >= 17.3.8): provider handler transforms the wire payload");
+    } else {
+      assert.ok(r1?.messages, "default+openai-completions (host < 17.3.8): context handler transforms");
+      assert.equal(r2, undefined, "default+openai-completions (host < 17.3.8): provider handler is a no-op");
+    }
   }
 
   // anthropic-messages + ollama-chat: the host applies the replacement → provider.
