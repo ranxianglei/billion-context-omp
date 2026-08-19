@@ -226,7 +226,7 @@ test("viewToAnthropicCore mirrors the anthropic wire shape (no system piece)", (
 
 test("provider mode: in-stream compress call replays and prunes the wire payload", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   // 8 covered filler turns + compress tool_use + success result + 6 tail
@@ -260,7 +260,7 @@ test("provider mode: in-stream compress call replays and prunes the wire payload
 
 test("provider mode: emergency nudge appends a wire user message", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
   const ctx = fakeCtx({ model: { contextWindow: 8_000 }, getContextUsage: () => ({ tokens: 0, contextWindow: 8_000 }) });
 
   const msgs: Array<Record<string, unknown>> = [];
@@ -277,7 +277,7 @@ test("provider mode: emergency nudge appends a wire user message", async () => {
 
 test("provider mode: openai payloads transform too", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
   const ctx = fakeCtx({ model: { contextWindow: 1_000_000 } });
 
   const msgs: Array<Record<string, unknown>> = [
@@ -299,13 +299,13 @@ test("provider mode: openai payloads transform too", async () => {
 
 test("mode isolation: context mode ignores before_provider_request; provider mode ignores context", async () => {
   const a = capture();
-  createAcpExtension({ transformMode: "context" } as never)(a.api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "context", autoUpdate: false } as never)(a.api as unknown as ExtensionAPI);
   const payload = anthropicPayload([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
   const r1 = await a.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, fakeCtx());
   assert.equal(r1, undefined, "context mode: provider handler is a no-op");
 
   const b = capture();
-  createAcpExtension({ transformMode: "provider" })(b.api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(b.api as unknown as ExtensionAPI);
   const stream = [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }];
   const r2 = await b.handlers.get("context")![0]!({ type: "context", messages: stream }, fakeCtx());
   assert.equal(r2, undefined, "provider mode: context handler is a no-op");
@@ -313,7 +313,7 @@ test("mode isolation: context mode ignores before_provider_request; provider mod
 
 test("fail-open: malformed payloads return undefined, never throw", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
   const fire = (payload: unknown) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, fakeCtx());
   assert.equal(await fire({ model: "x" }), undefined, "no messages array → pass-through");
   assert.equal(await fire({ messages: [42, null] }), undefined, "garbage entries → fail-open catch → pass-through");
@@ -332,15 +332,16 @@ test("default (no transformMode given) resolves per model API (issue #79)", asyn
   const fireCtx = (handlers: ReturnType<typeof capture>["handlers"], m: unknown): Promise<CtxOut> =>
     handlers.get("context")![0]!({ type: "context", messages: stream() }, m) as Promise<CtxOut>;
 
-  // openai-completions (GLM/DeepSeek/vLLM): the host drops the wire-payload
-  // replacement — context must transform so the injections actually reach
-  // the model, and provider must stay a no-op.
+  // openai-completions (GLM/DeepSeek/vLLM): upstream PR can1357/oh-my-pi#8717
+  // (issue #83) made the host apply the wire-payload replacement from 17.3.8,
+  // and the openai wire body has a codec path — so the default is provider
+  // when the host is new enough (the devDep pin here is 17.3.8).
   {
     const handlers = make();
     const r1 = await fireCtx(handlers, model("openai-completions"));
-    assert.ok(r1?.messages, "default+openai-completions: context handler transforms");
+    assert.equal(r1, undefined, "default+openai-completions: context handler is an observer");
     const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("openai-completions"));
-    assert.equal(r2, undefined, "default+openai-completions: provider handler is a no-op");
+    assert.ok(r2, "default+openai-completions: provider handler transforms the wire payload");
   }
 
   // anthropic-messages + ollama-chat: the host applies the replacement → provider.
