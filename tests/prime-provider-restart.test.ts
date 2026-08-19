@@ -242,13 +242,17 @@ test("context mode: restart primeFold folds the session view (unchanged path)", 
   }
 
   const host = makeHost(session, "p64-ctx", openaiWire);
-  createAcpExtension({ autoUpdate: false } as never)(host.api as ExtensionAPI);
-  // context mode: the context event carries the session view; compress the
-  // same range, then restart and prime.
+  // Explicit mode: on hosts >= 17.3.8 the openai-completions default is provider
+  // (issue #83), so without this the test silently runs the provider space and
+  // the context-mode primeFold branch goes untested.
+  createAcpExtension({ transformMode: "context", autoUpdate: false } as never)(host.api as ExtensionAPI);
+  // context mode: the context event carries the raw session view (no system
+  // message; u0..b6 = m00001..m00014); compress m00001..m00013, then restart
+  // and prime.
   await host.handlers.get("session_start")![0]!({ type: "session_start" }, host.ctx);
   const fireCtx = () => host.handlers.get("context")![0]!({ type: "context", messages: session }, host.ctx);
   await fireCtx();
-  const args = { content: [{ startId: "m00002", endId: "m00014", summary: SUMMARY }] };
+  const args = { content: [{ startId: "m00001", endId: "m00013", summary: SUMMARY }] };
   const res: AgentToolResult<unknown> = await host.tools.get("compress")!.execute("call_c1", args, undefined, undefined, host.ctx);
   const resText = (res.content as Array<{ text?: string }>).map((b) => b.text ?? "").join("\n");
   assert.match(resText, /\[fp=[0-9a-f,-]+\]/, "compress result carries span fingerprints");
@@ -258,7 +262,7 @@ test("context mode: restart primeFold folds the session view (unchanged path)", 
   await fireCtx();
 
   const host2 = makeHost(session, "p64-ctx", openaiWire);
-  createAcpExtension({ autoUpdate: false } as never)(host2.api as ExtensionAPI);
+  createAcpExtension({ transformMode: "context", autoUpdate: false } as never)(host2.api as ExtensionAPI);
   await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
   const prime = await statusText(host2);
   assert.equal(activeBlocks(prime), "1", "context-mode post-restart acp_status shows the block:\n" + prime);
