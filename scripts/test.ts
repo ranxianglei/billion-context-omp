@@ -5,6 +5,7 @@ for (const file of files) {
   const proc = Bun.spawn([process.execPath, "test", file], {
     stdout: "inherit",
     stderr: "inherit",
+    env: { ...process.env, ACP_AUTO_UPDATE: "off" },
   });
   const exitCode = await proc.exited;
   if (exitCode !== 0) failed = true;

@@ -113,10 +113,10 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // The core integration. Two interception points share one pipeline
 // (fold → processTurn → nudge → rebuild). The effective mode per API is
 // resolved in transform-mode.ts (issue #79): an explicit `transformMode`
-// always wins; the unset default is "provider" only where the host applies
-// the wire-payload replacement (anthropic-messages, ollama-chat) and "context"
-// everywhere else (openai-completions & friends drop the replacement, so the
-// context event is the only channel that reaches the model).
+// always wins; the unset default is "provider" where the host applies the
+// wire-payload replacement AND the wire body has a codec path
+// (anthropic-messages, ollama-chat; openai-completions on hosts >= 17.3.8,
+// issue #83) and "context" everywhere else.
 //  - "context": omp's `context` event fires before every LLM call with the
 //    messages about to be sent; we return the transformed AgentMessage[].
 //    Known defect: omp's recap/subagent pipelines re-feed our output as INPUT
