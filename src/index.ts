@@ -15,7 +15,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { resolveTransformMode } from "./transform-mode.js";
-import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadToCore, type ProviderWireFormat } from "./wire-fold.js";
+import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -373,6 +373,16 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       debug.event("provider-transform-unknown-format", { sid });
       return undefined;
     }
+    const representable = payloadRepresentable(payload, fmt);
+    if (!representable.ok) {
+      // Fail-open (issue #3 review): the kernel codec round-trip silently
+      // drops blocks it cannot parse (document PDFs, redacted_thinking,
+      // server-tool results, ...). The payload passes through untouched —
+      // no compression surgery, but no content loss either.
+      logInfo("provider-transform", { sid, fmt, event: "unrepresentable", reason: representable.reason });
+      debug.event("provider-transform-unrepresentable", { sid, fmt, reason: representable.reason });
+      return undefined;
+    }
     try {
       const { msgs, cacheControls } = payloadToCore(payload, fmt);
       if (msgs.length === 0) return undefined;
@@ -483,6 +493,7 @@ async function transformStreamCore(
     const coreOut = applyWireTagContract(
       (turn.messages as BiliMessage[]).filter((m) => !m.id.startsWith("acp_summary_")),
       turn.state,
+      { config, tokenCount },
     );
 
     let nudgeInjected = false;
