@@ -10,7 +10,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 // is the payload object the host serializes into the POST body: if the nudge
 // text is present in the returned messages, it is on the wire. Full stop.
 //
-// Threshold facts this test is calibrated against (kernel 0.0.27, 200K
+// Threshold facts this test is calibrated against (kernel 0.0.28, 200K
 // window): efficiency nudge needs T1 effective (merged ranges) ≥ 50000
 // tokens AND growth ≥ 22500; a ~100K-token single message crosses the
 // emergency band outright. 50×~700 tok baseline + 70×~700 tok growth
@@ -87,7 +87,9 @@ test("wire-level: efficiency nudge rides the returned HTTP payload (growth path)
   assert.ok(tagged.length > 0, "ref tags ride the wire on prior messages");
   const firstUser = prior.find((m) => m.role === "user")!;
   const firstText = typeof firstUser.content === "string" ? firstUser.content : JSON.stringify(firstUser.content);
-  assert.match(firstText, /<acp[^>]*>m0*\d+<\/acp>\s*$/, "first user message ends with its ref tag");
+  // The openai provider path (issue #83) places the ref tag at the START of
+  // the message, not the end — pin the placement so a silent revert is caught.
+  assert.match(firstText, /^<acp[^>]*>m\d+<\/acp>\s/, "first user message starts with its ref tag");
 });
 
 test("wire-level: emergency alert rides the returned HTTP payload (single BIG message)", async () => {
