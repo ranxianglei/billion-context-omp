@@ -221,6 +221,35 @@ export function boundaryIndexCore(
   return fallbackIdx >= 0 && fallbackIdx < coreMessages.length ? fallbackIdx : -1;
 }
 
+/** Structured replay-guard verdict (issue #91, rework): the position
+ *  fallback recovers the STREAM INDEX of a drifted boundary, but the kernel
+ *  resolves ranges by REF — so when a recorded m-ref dangles, the replay
+ *  must re-apply that boundary under the CURRENT ref of the recovered piece.
+ *  `remap` carries exactly that (only dangling m-refs are remapped; block
+ *  refs resolve themselves inside the kernel and are never touched). */
+export type ReplayRangeVerdict = {
+  /** Stale: the range must be dropped (master semantics, unchanged). */
+  reject?: string;
+  /** Dangling m-refs recovered by position, remapped to current refs. */
+  remap?: { startRef?: string; endRef?: string };
+  /** True when the result text carried a [pos=] pair for this range —
+   *  with `reject` set it marks a RECOVERY FAILURE (always logged). */
+  hint?: boolean;
+  /** Diagnostics — always logged when a recovery happens. */
+  recovered?: { pos: string; startIdx: number; endIdx: number };
+};
+
+/** Current m-ref of the piece at stream index idx (inverse byRef scan).
+ *  "" when the piece has no ref (protected) — the replay must fail closed
+ *  rather than hand the kernel a ref it does not know. Replay-time only
+ *  (replayed compress calls), so the O(refs) scan stays off the hot path. */
+export function refOfPieceCore(coreMessages: BiliMessage[], idx: number, byRef: Record<string, string>): string {
+  const id = coreMessages[idx]?.id;
+  if (!id) return "";
+  for (const [ref, mapped] of Object.entries(byRef)) if (mapped === id) return ref;
+  return "";
+}
+
 export function staleRangeCore(
   r: { startRef: string; endRef: string },
   rangeIndex: number,
@@ -229,34 +258,58 @@ export function staleRangeCore(
   callIndex: number,
   byRef: Record<string, string>,
   blocks: BlockLike[],
-): string | false {
+): ReplayRangeVerdict {
   // Compress-time boundary positions (issue #91): the stream index each
   // boundary sat at when the call was recorded. A drift that re-hashes a
   // boundary piece dangles its carried ref — the position recovers it, and
   // the fingerprint below still decides keep/drop.
   const pm = resultText.match(/\[pos=([0-9,-]+)\]/);
   const pair = pm ? pm[1]!.split(",")[rangeIndex] ?? "-" : "-";
+  const hinted = pair !== "-";
   const [ps, pe] = pair === "-" ? ["", ""] : pair.split("-");
   const fbStart = ps && ps !== "" ? Number.parseInt(ps, 10) : -1;
   const fbEnd = pe && pe !== "" ? Number.parseInt(pe, 10) : -1;
-  const startIdx = boundaryIndexCore(r.startRef, byRef, blocks, coreMessages, "min", fbStart);
-  const endIdx = boundaryIndexCore(r.endRef, byRef, blocks, coreMessages, "max", fbEnd);
+
+  // Raw resolution (id → stream index) separately from the fallback, so a
+  // dangling m-ref recovered by position can be flagged for remapping.
+  const startRaw = boundaryRawCore(r.startRef, byRef, blocks, coreMessages, "min");
+  const endRaw = boundaryRawCore(r.endRef, byRef, blocks, coreMessages, "max");
+  const rawStartIdx = startRaw ? coreMessages.findIndex((cm) => cm.id === startRaw) : -1;
+  const rawEndIdx = endRaw ? coreMessages.findIndex((cm) => cm.id === endRaw) : -1;
+  const startIdx = rawStartIdx >= 0 ? rawStartIdx : fbStart >= 0 && fbStart < coreMessages.length ? fbStart : -1;
+  const endIdx = rawEndIdx >= 0 ? rawEndIdx : fbEnd >= 0 && fbEnd < coreMessages.length ? fbEnd : -1;
   if (startIdx < 0 || endIdx < 0) {
     if (!/^b\d+$/i.test(r.startRef.trim()) && !/^b\d+$/i.test(r.endRef.trim()))
-      return `unresolved ${r.startRef}..${r.endRef} -> ${startIdx}..${endIdx}`;
-    return false;
+      return { reject: `unresolved ${r.startRef}..${r.endRef} -> ${startIdx}..${endIdx}`, ...(hinted ? { hint: true } : {}) };
+    return {}; // block ref(s): the kernel resolves them itself (master)
   }
   // The end piece must precede the call that issued it — a rewrite moved
   // the call and the fingerprint check below is meaningless either way.
-  if (endIdx > callIndex) return `end idx ${endIdx} > callIndex ${callIndex}`;
+  if (endIdx > callIndex) return { reject: `end idx ${endIdx} > callIndex ${callIndex}`, ...(hinted ? { hint: true } : {}) };
   const m = resultText.match(/\[fp=([0-9a-f,-]+)\]/);
-  if (!m) return false;
-  const expected = m[1]!.split(",");
-  const want = expected[rangeIndex];
-  if (want === undefined || want === "-") return false;
-  const got = spanFingerprintCoreIdx(coreMessages, startIdx, endIdx);
-  if (want !== got) return `fp ${r.startRef}..${r.endRef} want ${want} got ${got} @${startIdx}..${endIdx}`;
-  return false;
+  if (m) {
+    const want = m[1]!.split(",")[rangeIndex];
+    if (want !== undefined && want !== "-") {
+      const got = spanFingerprintCoreIdx(coreMessages, startIdx, endIdx);
+      if (want !== got) return { reject: `fp ${r.startRef}..${r.endRef} want ${want} got ${got} @${startIdx}..${endIdx}`, ...(hinted ? { hint: true } : {}) };
+    }
+  }
+  // Remap only the boundaries that actually dangled (m-refs whose recorded id
+  // no longer resolves); resolved boundaries keep their recorded ref, block
+  // refs are the kernel's to resolve.
+  const remap: { startRef?: string; endRef?: string } = {};
+  if (/^m\d+$/i.test(r.startRef.trim()) && rawStartIdx < 0) {
+    const ref = refOfPieceCore(coreMessages, startIdx, byRef);
+    if (!ref) return { reject: `recovered ${r.startRef} @${startIdx} has no ref (protected piece)`, ...(hinted ? { hint: true } : {}) };
+    remap.startRef = ref;
+  }
+  if (/^m\d+$/i.test(r.endRef.trim()) && rawEndIdx < 0) {
+    const ref = refOfPieceCore(coreMessages, endIdx, byRef);
+    if (!ref) return { reject: `recovered ${r.endRef} @${endIdx} has no ref (protected piece)`, ...(hinted ? { hint: true } : {}) };
+    remap.endRef = ref;
+  }
+  if (!remap.startRef && !remap.endRef) return {};
+  return { remap, recovered: { pos: pair, startIdx, endIdx } };
 }
 
 /** One fingerprint per range for the replay guard, content-hash space
