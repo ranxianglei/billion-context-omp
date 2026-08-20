@@ -71,8 +71,10 @@ export interface AcpRuntime {
  *  semantics as foldStream, content-hash id space (wire-fold.ts). */
   foldStreamCore(ctx: ExtensionContext, stream: BiliMessage[]): CoreFoldResult;
   stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }>;
+  /** Commit the folded state to the slot space the session's CURRENT mode
+   *  folds in (provider -> core slot, context -> context slot) — the mirror
+   *  of stateFor: a commit must land where the next read goes (issue #90). */
   commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void;
-  commitFoldStateCore(ctx: ExtensionContext, state: CompressionState): void;
   /** Record the identity sequence of the last rebuilt output so the next
    *  foldStream can recognize omp re-feeding it (issue #52). */
   recordRebuiltOutput(ctx: ExtensionContext, rebuilt: AgentMessage[]): void;
@@ -452,7 +454,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     // The two slot spaces never mix within a session; surface the space the
     // session's CURRENT mode folds in (a mid-session mode flip means the old
     // space's orphaned blocks are deactivated on the next fold, not mixed).
-    const slot = resolveTransformMode(adapterRef, ctx.model) === "provider" ? coreSlotFor(sid) : slotFor(sid);
+    const slot = slotForMode(ctx, sid);
     return Promise.resolve({ state: slot.state, coreMessages: slot.coreMessages });
   }
 
@@ -510,15 +512,14 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     locks.delete(sid);
   }
 
-  function commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void {
-    const sid = sidOf(ctx);
-    const slot = slotFor(sid);
-    slot.state = state;
-    if (toolCallId) slot.appliedCallIds.add(toolCallId);
+  function slotForMode(ctx: ExtensionContext, sid: string): FoldSlot {
+    return resolveTransformMode(adapterRef, ctx.model) === "provider" ? coreSlotFor(sid) : slotFor(sid);
   }
 
-  function commitFoldStateCore(ctx: ExtensionContext, state: CompressionState): void {
-    coreSlotFor(sidOf(ctx)).state = state;
+  function commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void {
+    const slot = slotForMode(ctx, sidOf(ctx));
+    slot.state = state;
+    if (toolCallId) slot.appliedCallIds.add(toolCallId);
   }
 
   function recordRebuiltOutput(ctx: ExtensionContext, rebuilt: AgentMessage[]): void {
@@ -527,7 +528,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   function noteCompressOutcome(ctx: ExtensionContext, ok: boolean): number {
-    const slot = slotFor(sidOf(ctx));
+    const slot = slotForMode(ctx, sidOf(ctx));
     slot.rejectStreak = ok ? 0 : slot.rejectStreak + 1;
     return slot.rejectStreak;
   }
@@ -544,7 +545,6 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     foldStreamCore,
     stateFor,
     commitFoldState,
-    commitFoldStateCore,
     recordRebuiltOutput,
     noteCompressOutcome,
     forgetSession,
