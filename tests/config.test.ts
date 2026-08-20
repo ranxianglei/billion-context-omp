@@ -70,6 +70,17 @@ test("resolveConfig maps compress.emergencyThresholdPercent to both nudge.emerge
   assert.equal(cfg.truncate.threshold, 0.9);
 });
 
+test("resolveConfig ignores zero or unparseable emergencyThresholdPercent instead of zeroing both thresholds (review M3)", () => {
+  // A zero threshold fires the emergency nudge + full truncate on EVERY turn
+  // (kernel truncate: tokenCount >= 0 always) — the override must be dropped,
+  // not applied, and unparseable values (parsePercent → 0) get the same treatment.
+  for (const bad of [0, "0", "0%", "abc"] as const) {
+    const cfg = resolveConfig({ compress: { emergencyThresholdPercent: bad } }, 1_000_000);
+    assert.equal(cfg.nudge.emergencyThresholdPct, 0.95, `nudge pct stays at kernel default for ${JSON.stringify(bad)}`);
+    assert.equal(cfg.truncate.threshold, 0.95, `truncate threshold stays at kernel default for ${JSON.stringify(bad)}`);
+  }
+});
+
 test("resolveConfig maps compress.nudgeGrowthTokens to both growthFloor and growthCap", () => {
   const cfg = resolveConfig({ compress: { nudgeGrowthTokens: 30000 } }, 1_000_000);
   assert.equal(cfg.nudge.growthFloor, 30000);

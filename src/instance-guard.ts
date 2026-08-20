@@ -23,6 +23,15 @@ export interface InstanceMarker {
   ts: number;
 }
 
+/** `import.meta.url` can carry a host-added cache-busting query (observed:
+ *  `?mtime=<epoch-ms>` on hot reload). The two instances then hold DIFFERENT
+ *  urls for the SAME physical file and the guard alarms on its own reload
+ *  (issue #88) — compare the physical path, not the full url. */
+function normalizeLoadPath(p: string): string {
+  const q = p.indexOf("?");
+  return q === -1 ? p : p.slice(0, q);
+}
+
 function markerPath(): string {
   return join(homeDir(), ".omp", MARKER_FILE);
 }
@@ -41,7 +50,7 @@ function readMarker(): InstanceMarker | undefined {
 export function detectDualInstance(selfPath: string, now = Date.now()): InstanceMarker | undefined {
   const m = readMarker();
   if (!m) return undefined;
-  if (m.path === selfPath) return undefined;
+  if (normalizeLoadPath(m.path) === normalizeLoadPath(selfPath)) return undefined;
   if (now - m.ts > FRESH_MS) return undefined;
   return m;
 }
