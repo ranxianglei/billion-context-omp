@@ -8,9 +8,13 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 // the host dropped the handler's return value and the turn went out with
 // untransformed messages. All call sites are now fire-and-forget
 // (autoInstallLatest's keepAlive interval still protects a short-lived host
-// from exiting mid-install). checkForUpdate is stubbed with a promise that
-// never settles unless the test resolves it: if any handler awaits it, the
-// race below times out and the test fails.
+// from exiting mid-install). checkForUpdate is stubbed with a controllable
+// promise that ALSO settles after a 100ms fallback: mock.module is
+// process-global, so other test files sharing this bun process (the
+// checkForUpdate callers in tests/update.test.ts) must never hang on it.
+// The no-await pin below does NOT rely on the promise staying unsettled —
+// it asserts the handler settled while the update promise was STILL
+// pending, which holds for any fallback delay.
 
 interface Deferred {
   promise: Promise<void>;
@@ -21,6 +25,11 @@ function deferred(): Deferred {
   let resolve: () => void = () => {};
   const promise = new Promise<void>((r) => {
     resolve = r;
+    // Fallback for OTHER test files sharing this bun process: their
+    // checkForUpdate callers await this too and must not hang. 100ms is
+    // long enough that the settled-while-pending assertions below (which
+    // attach their observer well before then) still see it pending.
+    setTimeout(resolve, 100);
   });
   return { promise, resolve };
 }
@@ -86,10 +95,15 @@ test("session_start fires checkForUpdate without awaiting it (issue #89)", async
 
   const started = calls;
   const p = handlers.get("session_start")![0]!({}, ctx) as Promise<unknown>;
-  assert.equal(await settlesWithin(p, 2000), true, "session_start must settle while the update check is still pending");
+  await sleep(50); // the fire-and-forget call has happened; the 100ms fallback has not
   assert.equal(calls, started + 1, "checkForUpdate was called once");
-  pending[pending.length - 1]!.resolve();
-  await p;
+  const d = pending[pending.length - 1]!;
+  let updateSettled = false;
+  d.promise.then(() => { updateSettled = true; });
+  assert.equal(await settlesWithin(p, 2000), true, "session_start must settle on its own (no await on checkForUpdate)");
+  assert.equal(updateSettled, false, "the update check was still pending when the handler settled");
+  d.resolve();
+  await d.promise;
 });
 
 test("context event returns the transformed messages without awaiting the update check (issue #89)", async () => {
@@ -107,13 +121,18 @@ test("context event returns the transformed messages without awaiting the update
   const stream = [userMsg("first"), userMsg("second"), userMsg("third")];
   const started = calls;
   const p = handlers.get("context")![0]!({ type: "context", messages: stream }, ctx) as Promise<unknown>;
-  assert.equal(await settlesWithin(p, 2000), true, "the context handler must resolve before the 5s/65s update check settles");
+  await sleep(50); // the fire-and-forget call has happened; the 100ms fallback has not
   assert.equal(calls, started + 1, "checkForUpdate was fired per LLM call");
+  const d = pending[pending.length - 1]!;
+  let updateSettled = false;
+  d.promise.then(() => { updateSettled = true; });
+  assert.equal(await settlesWithin(p, 2000), true, "the context handler must settle on its own, not behind the 5s/65s update check");
   const out = (await p) as { messages: unknown[] };
   assert.ok(out, "transformed messages returned while the update check was still pending");
   assert.equal(out.messages.length, 3, "all stream messages rebuilt");
-  pending[pending.length - 1]!.resolve();
-  await pending[pending.length - 1]!.promise;
+  assert.equal(updateSettled, false, "the update check was still pending when the handler settled");
+  d.resolve();
+  await d.promise;
 });
 
 test("before_provider_request returns the transformed payload without awaiting the update check (issue #89)", async () => {
@@ -141,11 +160,16 @@ test("before_provider_request returns the transformed payload without awaiting t
 
   const started = calls;
   const p = handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx) as Promise<unknown>;
-  assert.equal(await settlesWithin(p, 2000), true, "the provider handler must resolve before the 5s/65s update check settles");
+  await sleep(50); // the fire-and-forget call has happened; the 100ms fallback has not
   assert.equal(calls, started + 1, "checkForUpdate was fired per provider request");
+  const d = pending[pending.length - 1]!;
+  let updateSettled = false;
+  d.promise.then(() => { updateSettled = true; });
+  assert.equal(await settlesWithin(p, 2000), true, "the provider handler must settle on its own, not behind the 5s/65s update check");
   const out = (await p) as { messages: unknown[] };
   assert.ok(out, "transformed payload returned while the update check was still pending");
   assert.equal(out.messages.length, 2, "wire messages rebuilt");
-  pending[pending.length - 1]!.resolve();
-  await pending[pending.length - 1]!.promise;
+  assert.equal(updateSettled, false, "the update check was still pending when the handler settled");
+  d.resolve();
+  await d.promise;
 });
