@@ -8,8 +8,11 @@ import {
   payloadToCore,
   coreToPayloadMessages,
   spanFingerprintCore,
+  spanFingerprintCoreIdx,
   boundaryRawCore,
+  boundaryIndexCore,
   staleRangeCore,
+  rangePositionsCore,
   viewToAnthropicCore,
   viewToCoreStream,
 } from "../src/wire-fold.js";
@@ -166,19 +169,19 @@ test("staleRangeCore: fingerprint match passes, mismatch rejects", () => {
   assert.match(fp, /^[0-9a-f]{8}$/);
   const byRef: Record<string, string> = { m00001: "h1", m00002: "h2", m00003: "h3" };
   const resultText = `Compressed 1 range [fp=${fp}]`;
-  assert.equal(staleRangeCore({ startRef: "m00001", endRef: "m00003" }, 0, resultText, msgs, 3, byRef, []), false, "matching fp passes");
+  assert.deepEqual(staleRangeCore({ startRef: "m00001", endRef: "m00003" }, 0, resultText, msgs, 3, byRef, []), {}, "matching fp passes");
   assert.match(
-    String(staleRangeCore({ startRef: "m00001", endRef: "m00003" }, 0, "Compressed 1 range [fp=00000000]", msgs, 3, byRef, [])),
+    staleRangeCore({ startRef: "m00001", endRef: "m00003" }, 0, "Compressed 1 range [fp=00000000]", msgs, 3, byRef, []).reject ?? "",
     /^fp m00001\.\.m00003 want 00000000 got [0-9a-f]{8}/,
     "mismatched fp rejects",
   );
   assert.match(
-    String(staleRangeCore({ startRef: "m00001", endRef: "m00099" }, 0, "Compressed 1 range [fp=x]", msgs, 3, byRef, [])),
+    staleRangeCore({ startRef: "m00001", endRef: "m00099" }, 0, "Compressed 1 range [fp=x]", msgs, 3, byRef, []).reject ?? "",
     /^unresolved/,
     "unresolved message ref rejects",
   );
   assert.match(
-    String(staleRangeCore({ startRef: "m00001", endRef: "m00002" }, 0, "Compressed 1 range [fp=00000000]", msgs, 0, byRef, [])),
+    staleRangeCore({ startRef: "m00001", endRef: "m00002" }, 0, "Compressed 1 range [fp=00000000]", msgs, 0, byRef, []).reject ?? "",
     /^end idx 1 > callIndex 0$/,
     "end after the call rejects",
   );
@@ -196,6 +199,127 @@ test("boundaryRawCore resolves block refs by stream order", () => {
   assert.equal(boundaryRawCore("b1", byRef, blocks, msgs, "min"), "h1");
   assert.equal(boundaryRawCore("b1", byRef, blocks, msgs, "max"), "h3");
   assert.equal(boundaryRawCore("b9", byRef, blocks, msgs, "min"), "");
+});
+
+// Issue #91: provider mode keys pieces by content hash, so a host drift that
+// re-serializes a BOUNDARY piece mints a new id and dangles the carried m-ref.
+// The [pos=] tag (recorded at compress time) recovers the stream index; the
+// [fp=] first-4096 digest still decides keep/drop, so a benign tail drift
+// (first-4096 intact) is kept while a real rewrite is dropped.
+const liveMsgs: BiliMessage[] = [
+  { id: "h1", role: "user", contentType: "text", text: "one" },
+  { id: "h2", role: "assistant", contentType: "text", text: "two" },
+  { id: "h3", role: "user", contentType: "text", text: "three" },
+  { id: "call", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "c", text: "{}" },
+];
+const liveByRef: Record<string, string> = { m00001: "h1", m00002: "h2", m00003: "h3" };
+// Drifted streams: the end boundary piece h3 is re-serialized to a NEW id.
+// benign keeps its text (first-4096 intact); rewrite changes it.
+const driftBenign: BiliMessage[] = [liveMsgs[0]!, liveMsgs[1]!, { ...liveMsgs[2]!, id: "h3b" }, liveMsgs[3]!];
+const driftRewrite: BiliMessage[] = [liveMsgs[0]!, liveMsgs[1]!, { ...liveMsgs[2]!, id: "h3r", text: "rewritten" }, liveMsgs[3]!];
+
+test("boundaryIndexCore resolves by id, else falls back to the recorded index", () => {
+  assert.equal(boundaryIndexCore("m00002", liveByRef, [], liveMsgs, "min"), 1, "present id -> array index");
+  assert.equal(boundaryIndexCore("m00099", liveByRef, [], liveMsgs, "min", 2), 2, "dangling id -> valid fallback index");
+  assert.equal(boundaryIndexCore("m00099", liveByRef, [], liveMsgs, "min", 99), -1, "dangling id, out-of-range fallback -> -1");
+  assert.equal(boundaryIndexCore("m00099", liveByRef, [], liveMsgs, "min"), -1, "dangling id, no fallback -> -1");
+  assert.equal(boundaryIndexCore("b1", {}, [{ blockId: "b1", effectiveMessageIds: ["h1", "h3"] }], liveMsgs, "max"), 2, "block ref by stream order");
+});
+
+test("rangePositionsCore emits aligned s-e pairs, '-' when unpositionable", () => {
+  assert.deepEqual(rangePositionsCore([{ startRef: "m00001", endRef: "m00003" }], liveMsgs, liveByRef, []), ["0-2"]);
+  assert.deepEqual(rangePositionsCore([{ startRef: "m00099", endRef: "m00003" }], liveMsgs, liveByRef, []), ["-"], "unresolvable start -> '-'");
+  assert.deepEqual(
+    rangePositionsCore([{ startRef: "m00001", endRef: "m00003" }, { startRef: "m00099", endRef: "m00002" }], liveMsgs, liveByRef, []),
+    ["0-2", "-"],
+  );
+});
+
+test("staleRangeCore position fallback: benign tail drift keeps and remaps, rewrite drops", () => {
+  const fp = spanFingerprintCore(liveMsgs, "h1", "h3");
+  const r = { startRef: "m00001", endRef: "m00003" };
+  // Live fold of the drifted stream: the re-serialized end piece lost its
+  // old id and got the next free ref (m00004) from assignRefs; the stale
+  // m00003 -> h3 entry lingers but resolves to nothing in the stream.
+  const driftBenignByRef = { ...liveByRef, m00004: "h3b" };
+  const driftRewriteByRef = { ...liveByRef, m00004: "h3r" };
+  // No drift: byRef resolves, [pos=] is inert.
+  assert.deepEqual(staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-2]`, liveMsgs, 99, liveByRef, []), {}, "no drift passes");
+  // Benign tail drift: end id h3 re-hashed (dangles), [pos=0-2] recovers
+  // idx 2, first-4096 intact -> fp matches -> KEEP, remapped to the
+  // recovered piece's current ref.
+  assert.deepEqual(
+    staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-2]`, driftBenign, 99, driftBenignByRef, []),
+    { remap: { endRef: "m00004" }, recovered: { pos: "0-2", startIdx: 0, endIdx: 2 } },
+    "benign tail drift keeps and remaps",
+  );
+  // Genuine rewrite: end id dangles, [pos=0-2] recovers idx 2, but text
+  // changed -> fp mismatches -> DROP.
+  assert.match(
+    staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-2]`, driftRewrite, 99, driftRewriteByRef, []).reject ?? "",
+    /^fp m00001\.\.m00003 want [0-9a-f]{8} got [0-9a-f]{8} @0\.\.2$/,
+    "genuine rewrite drops on fp mismatch",
+  );
+});
+
+test("staleRangeCore position fallback: misaligned hint and missing tag are fail-safe", () => {
+  const fp = spanFingerprintCore(liveMsgs, "h1", "h3");
+  const r = { startRef: "m00001", endRef: "m00003" };
+  const driftBenignByRef = { ...liveByRef, m00004: "h3b" };
+  // Misaligned [pos] points at the call piece (idx 3) -> fp mismatch -> DROP.
+  assert.match(
+    staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-3]`, driftBenign, 99, driftBenignByRef, []).reject ?? "",
+    /^fp m00001\.\.m00003 want/,
+    "misaligned hint drops",
+  );
+  // No [pos] tag (pre-fallback result text) + dangling end id -> unresolved
+  // -> DROP (master behavior preserved for results recorded without the
+  // fallback).
+  assert.match(
+    staleRangeCore(r, 0, `[fp=${fp}]`, driftBenign, 99, driftBenignByRef, []).reject ?? "",
+    /^unresolved m00001\.\.m00003 -> 0\.\.-1$/,
+    "missing pos tag keeps master drop-on-dangle",
+  );
+});
+
+test("staleRangeCore: recovered boundary without a current ref fails closed", () => {
+  const fp = spanFingerprintCore(liveMsgs, "h1", "h3");
+  const r = { startRef: "m00001", endRef: "m00003" };
+  // Drifted stream where the recovered end piece is PROTECTED (no entry in
+  // the live byRef): the kernel could never apply the range under it —
+  // reject instead of handing the kernel a ref it does not know.
+  const v = staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-2]`, driftBenign, 99, liveByRef, []);
+  assert.match(v.reject ?? "", /^recovered m00003 @2 has no ref \(protected piece\)$/);
+  assert.equal(v.remap, undefined);
+});
+
+test("staleRangeCore: block refs are never remapped (the kernel resolves them)", () => {
+  const msgs: BiliMessage[] = [
+    { id: "h1", role: "user", contentType: "text", text: "one" },
+    { id: "h2", role: "assistant", contentType: "text", text: "two" },
+    { id: "h3", role: "user", contentType: "text", text: "three" },
+    { id: "call", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "c", text: "{}" },
+  ];
+  const byRef: Record<string, string> = { m00001: "h1", m00002: "h2", m00003: "h3" };
+  const blocks = [{ blockId: "b1", effectiveMessageIds: ["h1", "h2"] }];
+  // Both boundaries resolve normally -> plain pass, no remap even with [pos=].
+  assert.deepEqual(staleRangeCore({ startRef: "b1", endRef: "m00003" }, 0, "Compressed 1 range [fp=-] | [pos=0-2]", msgs, 3, byRef, blocks), {});
+  // Unresolvable start with a block end -> the kernel decides (master
+  // pass-through, now `{}`).
+  assert.deepEqual(staleRangeCore({ startRef: "m00099", endRef: "b1" }, 0, "Compressed 1 range [fp=-]", msgs, 3, byRef, blocks), {});
+});
+
+test("staleRangeCore: hint flag marks recovery failures (always-on logging)", () => {
+  const fp = spanFingerprintCore(liveMsgs, "h1", "h3");
+  const r = { startRef: "m00001", endRef: "m00003" };
+  // Hint present + fp mismatch -> reject WITH hint (a failed recovery).
+  assert.equal(staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-3]`, driftBenign, 99, liveByRef, []).hint, true, "hinted reject flags a failed recovery");
+  // No hint + dangling end -> reject WITHOUT hint (plain master-style drop).
+  assert.equal(staleRangeCore(r, 0, `[fp=${fp}]`, driftBenign, 99, liveByRef, []).hint, undefined, "hintless reject stays a plain drop");
+  // Hint present + successful recovery -> no reject, remap carried instead.
+  const ok = staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-2]`, driftBenign, 99, { ...liveByRef, m00004: "h3b" }, []);
+  assert.equal(ok.reject, undefined);
+  assert.ok(ok.remap?.endRef, "successful recovery carries the remap");
 });
 
 test("viewToCoreStream mirrors the openai wire shape (system first)", () => {
@@ -256,6 +380,71 @@ test("provider mode: in-stream compress call replays and prunes the wire payload
   assert.ok(JSON.stringify(compressMsg).includes("COVERED PHASE SUMMARY"), "summary text visible via call args");
   // First user message is never pruned (kernel firstUser protection).
   assert.ok(flat.includes("cov0 "), "first user message kept");
+});
+
+test("provider mode: drifted replay remaps dangling refs and prunes (issue #91 e2e)", async () => {
+  const { api, handlers } = capture();
+  createAcpExtension({ transformMode: "provider", protectedTools: ["bash", "read"], autoUpdate: false })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx({ model: { contextWindow: 1_000_000 } });
+
+  // Drift scenario (openai wire shape, system takes m00001): at RECORD time
+  // the bash/read results were unprotected, so the range was recorded as
+  // m00002..m00014 (ovl0..covE). By REPLAY time protectedTools gained
+  // ["bash","read"] — their results are ref-blocked, the numbering shifts
+  // (covE = m00012 now) and the recorded endRef m00014 dangles (replay max
+  // ref is m00013). The [pos=] hint must recover covE and the range must be
+  // re-applied under covE's CURRENT ref — pre-fix the guard passed but the
+  // kernel threw BoundaryNotFoundError on the dangling ref and the block
+  // was silently dropped (issue #91). The six ovl* fillers sit outside the
+  // kernel's last-5+last-user protected zone so the applied range is
+  // actionable; covA/covB/covE (and the bash/read pieces) are excluded by
+  // the zone / protectedTools — ovl1..ovl3 must still prune.
+  const msgs: Array<Record<string, unknown>> = [
+    { role: "system", content: "base system" },
+    { role: "user", content: `ovl0 ${FILLER}` },
+    { role: "assistant", content: `ovl1 ${FILLER}` },
+    { role: "user", content: `ovl2 ${FILLER}` },
+    { role: "assistant", content: `ovl3 ${FILLER}` },
+    { role: "user", content: `ovl4 ${FILLER}` },
+    { role: "assistant", content: `ovl5 ${FILLER}` },
+    { role: "user", content: `covA ${FILLER}` },
+    { role: "assistant", content: `covB ${FILLER}` },
+    { role: "assistant", content: "", tool_calls: [{ id: "call_c1", type: "function", function: { name: "bash", arguments: "{\"cmd\":\"ls\"}" } }] },
+    { role: "tool", tool_call_id: "call_c1", content: `covD1 ${FILLER}` },
+    { role: "assistant", content: "", tool_calls: [{ id: "call_c2", type: "function", function: { name: "read", arguments: "{\"path\":\"f\"}" } }] },
+    { role: "tool", tool_call_id: "call_c2", content: `covD2 ${FILLER}` },
+    { role: "user", content: `covE ${FILLER}` },
+    { role: "assistant", content: "", tool_calls: [{ id: "call_c3", type: "function", function: { name: "compress", arguments: JSON.stringify({
+      content: [{ startId: "m00002", endId: "m00014", summary: "COVERED DRIFT SUMMARY: phase-one exploration and tool runs compressed for context economy and continuity of the session work." }],
+    }) } }] },
+    { role: "tool", tool_call_id: "call_c3", content: "placeholder" },
+  ];
+  // Record the span fingerprint the way the live compress tool does: over
+  // the recorded span (pieces 1..13 = ovl0..covE). The drift changes refs,
+  // not contents — the fp is computable from the drifted stream.
+  const { msgs: core } = payloadToCore({ model: "glm-x", max_completion_tokens: 4096, messages: msgs }, "openai");
+  const fp = spanFingerprintCoreIdx(core, 1, 13);
+  assert.match(fp, /^[0-9a-f]{8}$/, "recorded fp computable from the drifted stream");
+  msgs[15] = { role: "tool", tool_call_id: "call_c3", content: `Compressed 1 range — 8.8k tokens saved (b1, tier 1).\n[fp=${fp}]\n[pos=1-13]` };
+  const payload = { model: "glm-x", max_completion_tokens: 4096, messages: msgs };
+
+  const fire = () => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx);
+  const out = (await fire()) as { messages: Array<Record<string, any>> };
+  assert.ok(out, "transformed openai payload returned");
+  const flat = JSON.stringify(out.messages);
+  assert.ok(!flat.includes("ovl1 "), "old filler pruned (pre-fix: nothing pruned — block dropped)");
+  assert.ok(!flat.includes("ovl3 "), "third old filler pruned");
+  assert.ok(flat.includes("ovl0 "), "first user message kept (kernel firstUser protection)");
+  assert.ok(flat.includes("ovl5 "), "protected-zone tail of the range kept");
+  assert.ok(flat.includes("covA "), "zone piece kept");
+  assert.ok(flat.includes("covE "), "recovered end boundary kept");
+  assert.ok(flat.includes("covD1 "), "protectedTools result excluded from compression, not pruned");
+  assert.ok(flat.includes("base system"), "system prompt kept");
+  const compressMsg = out.messages.find((m) => JSON.stringify(m).includes("call_c3"));
+  assert.ok(compressMsg, "compress tool_call survives");
+  assert.ok(JSON.stringify(compressMsg).includes("COVERED DRIFT SUMMARY"), "summary visible via call args");
+  const srcMsgs = payload.messages as Array<Record<string, unknown>>;
+  assert.ok(out.messages.length < srcMsgs.length, `pruned: ${out.messages.length} < ${srcMsgs.length}`);
 });
 
 test("provider mode: emergency nudge appends a wire user message", async () => {

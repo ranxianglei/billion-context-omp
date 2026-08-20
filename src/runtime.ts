@@ -393,14 +393,34 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
           continue;
         }
         if (slot.appliedCallIds.has(call.id) || stateHasCompressCall(slot.state, call.id)) continue;
-        const stale = call.ranges.map((r, ri) => staleRangeCore(r, ri, resultText, coreMessages, i, slot.state.messageRefs.byRef, slot.state.blocks)).find((s) => s !== false);
+        // Guard verdicts: reject → drop (master semantics); a position-
+        // recovered boundary comes back remapped to the CURRENT ref of the
+        // piece it recovered — the kernel resolves ranges by ref, and a
+        // drifted fold leaves the recorded m-ref dangling (issue #91).
+        const verdicts = call.ranges.map((r, ri) => staleRangeCore(r, ri, resultText, coreMessages, i, slot.state.messageRefs.byRef, slot.state.blocks));
+        const stale = verdicts.find((v) => v.reject);
         if (stale) {
-          debug.event("fold-replay-stale", { sid, callId: call.id, reason: stale });
+          debug.event("fold-replay-stale", { sid, callId: call.id, reason: stale.reject });
+          // A recovery that FAILED (pos hint present, range still dropped) is
+          // exactly the issue-#91 symptom resurfacing — always-on, not just
+          // ACP_DEBUG (a plain stale drop without hint stays debug-only, as
+          // on master).
+          const failed = verdicts.find((v) => v.hint && v.reject);
+          if (failed) logWarn("fold", { sid, event: "replay-recovery-failed", callId: call.id, reason: failed!.reject });
           continue;
         }
-        if (slot.appliedCallIds.has(call.id) || stateHasCompressCall(slot.state, call.id)) continue;
+        const recovered = verdicts.find((v) => v.recovered);
+        const ranges = recovered
+          ? call.ranges.map((r, ri) => {
+              const m = verdicts[ri]!.remap;
+              return m ? { ...r, startRef: m.startRef ?? r.startRef, endRef: m.endRef ?? r.endRef } : r;
+            })
+          : call.ranges;
+        if (recovered) {
+          logWarn("fold", { sid, event: "replay-recovered", callId: call.id, pos: recovered.recovered!.pos, startIdx: recovered.recovered!.startIdx, endIdx: recovered.recovered!.endIdx });
+        }
         try {
-          const applied = core.applyCompression({ ranges: call.ranges, messages: coreMessages, state: slot.state, config });
+          const applied = core.applyCompression({ ranges, messages: coreMessages, state: slot.state, config });
           if (applied.result.errors.length === 0) {
             slot.state = applied.state;
             replayed++;
