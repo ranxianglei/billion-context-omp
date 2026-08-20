@@ -36,7 +36,6 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
   return (pi: ExtensionAPI) => {
     const runtime = createRuntime(adapter);
     wireSessionLifecycle(pi, runtime);
-    wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
     // BEFORE wireProviderDebug: handlers fire in registration order, so the
