@@ -57,3 +57,25 @@ test("fresh marker from a different path → conflict reported, then overwritten
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test("host cache-busting query (?mtime=) on the same physical path is NOT a dual instance (issue #88)", async () => {
+  const home = await mkdtemp(join(tmpdir(), "acp-instguard3-"));
+  const prev = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home; process.env.USERPROFILE = home;
+  try {
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(home, ".omp"), { recursive: true });
+    const marker = join(home, ".omp", ".billion-context-omp-instance.json");
+    // The other instance stamped a url WITH a ?mtime= cache-bust query.
+    await writeFile(marker, JSON.stringify({ path: "file:///ext/dist/index.js?mtime=1724000000000", version: "0.2.6", pid: 7, ts: Date.now() }), { encoding: "utf8" });
+    assert.equal(detectDualInstance("file:///ext/dist/index.js"), undefined, "same physical file, fresh ?mtime= marker → silent");
+    assert.equal(detectDualInstance("file:///ext/dist/index.js?mtime=1724000999999"), undefined, "different mtime value, same physical file → silent");
+    // A genuinely different physical path still conflicts.
+    const conflict = stampAndDetect("file:///other/dist/index.js?mtime=1724000000000", "0.2.6");
+    assert.ok(conflict, "different physical path still conflicts");
+    assert.equal(conflict!.path, "file:///ext/dist/index.js?mtime=1724000000000", "marker is stamped raw (diagnostics keep the url)");
+  } finally {
+    process.env.HOME = prev.HOME; process.env.USERPROFILE = prev.USERPROFILE;
+    await rm(home, { recursive: true, force: true });
+  }
+});
