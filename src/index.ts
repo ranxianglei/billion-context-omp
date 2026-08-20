@@ -92,13 +92,13 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // Rebuild blocks from the persisted session right away so /acp and
     // acp_status show them immediately on resume — before the first LLM call.
     runtime.primeFold(ctx);
-    // Awaited (not fire-and-forget): session_start is the natural update
-    // point and short-lived hosts (print/JSON mode) exit right after the
-    // turn — awaiting here plus the keepAlive in autoInstallLatest
-    // guarantees the install completes before the process can exit.
-    await checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
+    // Fire-and-forget: the registry fetch (5s) or an auto-install (60s)
+    // must not sit on the session-start critical path (issue #89). A
+    // short-lived host still cannot exit mid-install: autoInstallLatest's
+    // keepAlive interval holds the event loop until `npm install` exits.
+    void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
-    });
+    }).catch((e) => logThrow("update", e, { sid, phase: "session_start" }));
   });
   pi.on("session_shutdown", (_event, ctx) => {
     try {
@@ -323,16 +323,16 @@ async function transformStream(
       release();
     }
     // Also check for updates here (not only on session_start): resuming a
-    // long-running session never re-fires session_start, so an update could
-    // go unnoticed for days. checkForUpdate throttles internally (3 min) and
-    // is guarded against concurrent calls, so firing it per LLM call is safe.
-    // Must run OUTSIDE the fold lock: a discovered update awaits `npm install`
-    // for up to 60s (update.ts autoInstallLatest), and under the lock that
-    // would serialize every later context event / provider request of this
-    // session behind the install.
-    await checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
+    // long-running session never re-fires session_start. Fire-and-forget
+    // (issue #89): the host awaits this handler in the LLM pipeline with a
+    // 30s budget, while the registry fetch (5s) plus an auto-install (60s)
+    // can exceed it — awaiting here would make the host drop this turn's
+    // transformed messages. checkForUpdate throttles internally (3 min)
+    // and guards concurrent calls; the install survives a short-lived host
+    // via autoInstallLatest's keepAlive interval.
+    void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
-    });
+    }).catch((e) => logThrow("update", e, { sid, phase: "context" }));
     return result;
 }
 
@@ -538,9 +538,12 @@ async function transformStreamCore(
   } finally {
     release();
   }
-  await checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
+  // Fire-and-forget, same contract as the context path (issue #89): the
+  // host's 30s handler budget must not be spent on a registry fetch or an
+  // auto-install.
+  void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
     if (ctx.hasUI) ctx.ui.notify(msg);
-  });
+  }).catch((e) => logThrow("update", e, { sid, phase: "provider" }));
   return result;
 }
 
