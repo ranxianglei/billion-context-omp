@@ -8,6 +8,7 @@ import type {
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { rangeFingerprints } from "./messages.js";
+import { rangePositionsCore } from "./wire-fold.js";
 import { estimateTokens, collectCoveredMessageIds, formatTokens } from "./tokens.js";
 
 const RangeSpec = type({
@@ -171,10 +172,17 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     // entry per range ("-" for block-boundary ranges the ledger can't
     // position) so replay-side index lookup stays aligned.
     const fps = rangeFingerprints(rangeSpecs, coreMessages, applied.state.messageRefs.byRef, applied.state.blocks);
+    // Replay-position fallback (issue #91): the stream index each boundary sat
+    // at when recorded. Provider mode re-serializes pieces by content hash, so
+    // a host drift that re-hashes a boundary dangles its carried m-ref; the
+    // index recovers the piece and the [fp=] above still decides keep/drop.
+    // Inert in context mode (pN ids already position themselves via rawPos).
+    const positions = rangePositionsCore(rangeSpecs, coreMessages, applied.state.messageRefs.byRef, applied.state.blocks);
 
     const lines = [`▣ ACP | ${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens (~${formatTokens(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
     if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
     if (fps.some((fp) => fp !== "-")) lines.push(`[fp=${fps.join(",")}]`);
+    if (positions.some((p) => p !== "-")) lines.push(`[pos=${positions.join(",")}]`);
     return lines.join("\n");
   } finally { releaseLock(); }
 }
