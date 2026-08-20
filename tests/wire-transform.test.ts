@@ -9,7 +9,9 @@ import {
   coreToPayloadMessages,
   spanFingerprintCore,
   boundaryRawCore,
+  boundaryIndexCore,
   staleRangeCore,
+  rangePositionsCore,
   viewToAnthropicCore,
   viewToCoreStream,
 } from "../src/wire-fold.js";
@@ -196,6 +198,75 @@ test("boundaryRawCore resolves block refs by stream order", () => {
   assert.equal(boundaryRawCore("b1", byRef, blocks, msgs, "min"), "h1");
   assert.equal(boundaryRawCore("b1", byRef, blocks, msgs, "max"), "h3");
   assert.equal(boundaryRawCore("b9", byRef, blocks, msgs, "min"), "");
+});
+
+// Issue #91: provider mode keys pieces by content hash, so a host drift that
+// re-serializes a BOUNDARY piece mints a new id and dangles the carried m-ref.
+// The [pos=] tag (recorded at compress time) recovers the stream index; the
+// [fp=] first-4096 digest still decides keep/drop, so a benign tail drift
+// (first-4096 intact) is kept while a real rewrite is dropped.
+const liveMsgs: BiliMessage[] = [
+  { id: "h1", role: "user", contentType: "text", text: "one" },
+  { id: "h2", role: "assistant", contentType: "text", text: "two" },
+  { id: "h3", role: "user", contentType: "text", text: "three" },
+  { id: "call", role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "c", text: "{}" },
+];
+const liveByRef: Record<string, string> = { m00001: "h1", m00002: "h2", m00003: "h3" };
+// Drifted streams: the end boundary piece h3 is re-serialized to a NEW id.
+// benign keeps its text (first-4096 intact); rewrite changes it.
+const driftBenign: BiliMessage[] = [liveMsgs[0]!, liveMsgs[1]!, { ...liveMsgs[2]!, id: "h3b" }, liveMsgs[3]!];
+const driftRewrite: BiliMessage[] = [liveMsgs[0]!, liveMsgs[1]!, { ...liveMsgs[2]!, id: "h3r", text: "rewritten" }, liveMsgs[3]!];
+
+test("boundaryIndexCore resolves by id, else falls back to the recorded index", () => {
+  assert.equal(boundaryIndexCore("m00002", liveByRef, [], liveMsgs, "min"), 1, "present id -> array index");
+  assert.equal(boundaryIndexCore("m00099", liveByRef, [], liveMsgs, "min", 2), 2, "dangling id -> valid fallback index");
+  assert.equal(boundaryIndexCore("m00099", liveByRef, [], liveMsgs, "min", 99), -1, "dangling id, out-of-range fallback -> -1");
+  assert.equal(boundaryIndexCore("m00099", liveByRef, [], liveMsgs, "min"), -1, "dangling id, no fallback -> -1");
+  assert.equal(boundaryIndexCore("b1", {}, [{ blockId: "b1", effectiveMessageIds: ["h1", "h3"] }], liveMsgs, "max"), 2, "block ref by stream order");
+});
+
+test("rangePositionsCore emits aligned s-e pairs, '-' when unpositionable", () => {
+  assert.deepEqual(rangePositionsCore([{ startRef: "m00001", endRef: "m00003" }], liveMsgs, liveByRef, []), ["0-2"]);
+  assert.deepEqual(rangePositionsCore([{ startRef: "m00099", endRef: "m00003" }], liveMsgs, liveByRef, []), ["-"], "unresolvable start -> '-'");
+  assert.deepEqual(
+    rangePositionsCore([{ startRef: "m00001", endRef: "m00003" }, { startRef: "m00099", endRef: "m00002" }], liveMsgs, liveByRef, []),
+    ["0-2", "-"],
+  );
+});
+
+test("staleRangeCore position fallback: benign tail drift keeps, rewrite drops", () => {
+  const fp = spanFingerprintCore(liveMsgs, "h1", "h3");
+  const r = { startRef: "m00001", endRef: "m00003" };
+  // No drift: byRef resolves, [pos=] is inert.
+  assert.equal(staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-2]`, liveMsgs, 99, liveByRef, []), false, "no drift passes");
+  // Benign tail drift: end id h3 re-hashed (dangles), [pos=0-2] recovers idx 2,
+  // first-4096 intact -> fp matches -> KEEP.
+  assert.equal(staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-2]`, driftBenign, 99, liveByRef, []), false, "benign tail drift keeps");
+  // Genuine rewrite: end id dangles, [pos=0-2] recovers idx 2, but text changed
+  // -> fp mismatches -> DROP.
+  assert.match(
+    String(staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-2]`, driftRewrite, 99, liveByRef, [])),
+    /^fp m00001\.\.m00003 want [0-9a-f]{8} got [0-9a-f]{8} @0\.\.2$/,
+    "genuine rewrite drops on fp mismatch",
+  );
+});
+
+test("staleRangeCore position fallback: misaligned hint and missing tag are fail-safe", () => {
+  const fp = spanFingerprintCore(liveMsgs, "h1", "h3");
+  const r = { startRef: "m00001", endRef: "m00003" };
+  // Misaligned [pos] points at the call piece (idx 3) -> fp mismatch -> DROP.
+  assert.match(
+    String(staleRangeCore(r, 0, `[fp=${fp}] | [pos=0-3]`, driftBenign, 99, liveByRef, [])),
+    /^fp m00001\.\.m00003 want/,
+    "misaligned hint drops",
+  );
+  // No [pos] tag (pre-fix result text) + dangling end id -> unresolved -> DROP
+  // (master behavior preserved for results recorded without the fallback).
+  assert.match(
+    String(staleRangeCore(r, 0, `[fp=${fp}]`, driftBenign, 99, liveByRef, [])),
+    /^unresolved m00001\.\.m00003 -> 0\.\.-1$/,
+    "missing pos tag keeps master drop-on-dangle",
+  );
 });
 
 test("viewToCoreStream mirrors the openai wire shape (system first)", () => {
