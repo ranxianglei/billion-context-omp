@@ -259,6 +259,43 @@ test("provider mode: in-stream compress call replays and prunes the wire payload
   assert.ok(flat.includes("cov0 "), "first user message kept");
 });
 
+test("provider mode: in-stream compress call replays on the openai wire shape (review M6, issue #83)", async () => {
+  const { api, handlers } = capture();
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+
+  // Openai shape: the system prompt is a wire MESSAGE, so it takes m00001
+  // and the filler refs shift by one vs the anthropic test (m00002..m00009).
+  // PR #86 makes openai-completions the provider default on hosts >= 17.3.8,
+  // so this shape is the e2e replay contract for GLM/DeepSeek/vLLM traffic.
+  const msgs: Array<Record<string, unknown>> = [{ role: "system", content: "base system" }];
+  for (let i = 0; i < 8; i++) msgs.push({ role: i % 2 ? "assistant" : "user", content: `cov${i} ${FILLER}` });
+  msgs.push({ role: "assistant", content: "", tool_calls: [{ id: "call_c1", type: "function", function: { name: "compress", arguments: JSON.stringify({
+    content: [{ startId: "m00002", endId: "m00009", summary: "COVERED PHASE SUMMARY: early exploration, tool runs and findings compressed for context economy and continuity of the session work." }],
+  }) } }] });
+  msgs.push({ role: "tool", tool_call_id: "call_c1", content: "Compressed 1 range — 8.8k tokens saved (b1, tier 1)." });
+  for (let i = 0; i < 6; i++) msgs.push({ role: i % 2 ? "assistant" : "user", content: `tail${i} ${FILLER}` });
+  const payload = { model: "glm-x", max_completion_tokens: 4096, messages: msgs };
+
+  const fire = () => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, ctx);
+  const out = (await fire()) as { messages: Array<Record<string, unknown>> };
+  assert.ok(out, "transformed openai payload returned");
+  const srcMsgs = payload.messages as Array<Record<string, unknown>>;
+  assert.ok(out.messages.length < srcMsgs.length, `pruned: ${out.messages.length} < ${srcMsgs.length}`);
+
+  const flat = JSON.stringify(out.messages);
+  assert.ok(!flat.includes("cov3 "), "covered filler pruned from the openai wire payload");
+  assert.ok(flat.includes("tail0 "), "protected tail kept");
+  assert.ok(flat.includes("base system"), "system prompt (m00001) survives the transform");
+  // The compress tool_call itself survives (protected message) — the summary
+  // stays visible to the model through its arguments.
+  const compressMsg = out.messages.find((m) => JSON.stringify(m).includes("call_c1"));
+  assert.ok(compressMsg, "compress tool_call survives");
+  assert.ok(JSON.stringify(compressMsg).includes("COVERED PHASE SUMMARY"), "summary text visible via call args");
+  // First user message (cov0, m00002) is never pruned (kernel firstUser protection).
+  assert.ok(flat.includes("cov0 "), "first user message kept");
+});
+
 test("provider mode: emergency nudge appends a wire user message", async () => {
   const { api, handlers } = capture();
   createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
