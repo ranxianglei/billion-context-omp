@@ -443,7 +443,7 @@ async function transformStreamCore(
     // tool content — the proxy's wire contract (refs are still assigned on
     // tool pieces, so blocks cover them; the model cites them by block ref).
     const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount, renderTags: "text-only" });
-    runtime.commitFoldStateCore(ctx, turn.state);
+    runtime.commitFoldState(ctx, turn.state);
 
     logInfo("turn", {
       sid,
