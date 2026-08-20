@@ -141,8 +141,17 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number):
   if (c?.maxContextLimit !== undefined) config.nudge.maxContextLimitPct = parsePercent(c.maxContextLimit);
   if (c?.emergencyThresholdPercent !== undefined) {
     const pct = parsePercent(c.emergencyThresholdPercent);
-    config.nudge.emergencyThresholdPct = pct;
-    config.truncate.threshold = pct;
+    if (pct <= 0) {
+      // A zero threshold fires the emergency nudge AND the full truncate on
+      // EVERY turn (kernel truncate: tokenCount >= 0 always) — and
+      // parsePercent maps unparseable values to 0, so "abc" would silently
+      // do the same. Ignore the override instead of zeroing both thresholds
+      // (review M3, issue #92).
+      logWarn("config", { event: "emergency-threshold-ignored", value: String(c.emergencyThresholdPercent), reason: "zero threshold would truncate every turn" });
+    } else {
+      config.nudge.emergencyThresholdPct = pct;
+      config.truncate.threshold = pct;
+    }
   }
   if (c?.nudgeGrowthTokens !== undefined) {
     config.nudge.growthFloor = c.nudgeGrowthTokens;
