@@ -334,12 +334,13 @@ test("live-rejected compress call stays rejected on the next INCREMENTAL context
   const compress = api.tools.find((t) => t.name === "compress")!;
   const ok = await compress.execute("tc_ok", { content: [{ startId: ref1, endId: ref2, summary: "First target compressed with a summary that is definitely long enough to pass." }] }, undefined, undefined, ctx);
   assert.match((ok as any).content[0].text, /reclaimed/, "setup: first compression succeeds");
-  // Same SPAN again: live execution works on the pruned turn view where the
-  // covered messages no longer exist → rejected. Replay on the full stream
-  // projection would resolve them again — this is exactly the resurrection
-  // asymmetry the guard must close.
-  const rejected = await compress.execute("tc_dup", { content: [{ startId: ref1, endId: ref2, summary: "Duplicate attempt with a summary that is definitely long enough to pass." }] }, undefined, undefined, ctx);
-  assert.match((rejected as any).content[0].text, /No changes applied/, "setup: duplicate is rejected live");
+  // Unknown ref: rejected live. On the next incremental context event the
+  // replay must NOT resurrect this call into a successful compression.
+  // (Kernel 0.0.31 snaps consumed refs to the owning block, so re-compressing
+  //  a covered range now succeeds — use an unknown ref to exercise the
+  //  rejection-persistence path.)
+  const rejected = await compress.execute("tc_dup", { content: [{ startId: "m99999", endId: "m99999", summary: "Duplicate attempt with a summary that is definitely long enough to pass." }] }, undefined, undefined, ctx);
+  assert.match((rejected as { content: Array<{ type: string; text: string }> }).content[0].text, /No changes applied/, "setup: unknown-ref call is rejected live");
 
   // Next context event: the stream now carries the call + rejection result.
   const stream2 = [...stream, assistantCompressCall("tc_ok", [{ startId: ref1, endId: ref2, summary: "First target compressed with a summary that is definitely long enough to pass." }]), toolResult("tc_ok", (ok as any).content[0].text), assistantCompressCall("tc_dup", [{ startId: ref1, endId: ref2, summary: "Duplicate attempt with a summary that is definitely long enough to pass." }]), toolResult("tc_dup", (rejected as any).content[0].text), userMsg(filler(7))];

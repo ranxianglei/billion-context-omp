@@ -129,8 +129,11 @@ test("loop guard: repeated rejected compress calls escalate, then suppress, then
   const ok = await compress.execute("tc_ok", { content: [{ startId: ref1, endId: ref2, summary: SUMMARY }] }, undefined, undefined, ctx);
   assert.match(ok.content[0].text, /reclaimed/, "setup: first compression succeeds");
 
-  // Re-target the covered span: rejected live ("already compressed").
-  const call = { startId: ref1, endId: ref2, summary: SUMMARY };
+  // Re-target with a ref that does not exist: rejected live ("unknown ref").
+  // (Kernel 0.0.31 snaps consumed refs to the owning block instead of
+  //  rejecting, so an already-compressed range no longer triggers the
+  //  rejection path — use an unknown ref to exercise the loop guard.)
+  const call = { startId: "m99999", endId: "m99999", summary: SUMMARY };
   const r2 = await compress.execute("tc_r2", { content: [call] }, undefined, undefined, ctx);
   assert.match(r2.content[0].text, /No changes applied/, "rejection 1: replay marker intact");
   assert.doesNotMatch(r2.content[0].text, /STOP/, "rejection 1: no escalation yet");
@@ -193,16 +196,19 @@ test("loop guard: a fresh extension instance starts at streak 0 (no cross-sessio
   const ref2 = refOf(r1.messages[1]);
   const call = { startId: ref1, endId: ref2, summary: SUMMARY };
   const ok = await api.tools.find((t) => t.name === "compress")!.execute("tc_ok", { content: [call] }, undefined, undefined, ctx);
-  assert.match(ok.content[0].text, /reclaimed/, "setup: first compression succeeds");
+  assert.match((ok as { content: Array<{ type: string; text: string }> }).content[0].text, /reclaimed/, "setup: first compression succeeds");
 
   // A second extension instance (fresh runtime + slots) re-folds the same
-  // stream and replays tc_ok from the stream itself.
+  // stream. Use an unknown ref to trigger a rejection (kernel 0.0.31 snaps
+  // consumed refs to the owning block, so re-compressing a covered range
+  // now succeeds instead of rejecting).
   const second = captureApi();
   createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
   await second.handlers.get("context")![0]!({ type: "context", messages: [...stream, assistantCompressCall("tc_ok", [call]), toolResult("tc_ok", ok.content[0].text)] }, ctx);
-  const rejected = await second.api.tools.find((t) => t.name === "compress")!.execute("tc_new", { content: [call] }, undefined, undefined, ctx);
+  const badCall = { startId: "m99999", endId: "m99999", summary: SUMMARY };
+  const rejected = await second.api.tools.find((t) => t.name === "compress")!.execute("tc_new", { content: [badCall] }, undefined, undefined, ctx);
   assert.match(rejected.content[0].text, /No changes applied/, "fresh instance: rejection is a real rejection");
-  assert.match(rejected.content[0].text, /already compressed/, "fresh instance: covered span rejected");
+  assert.match(rejected.content[0].text, /does not exist/, "fresh instance: unknown ref rejected");
   assert.doesNotMatch(rejected.content[0].text, /STOP/, "fresh instance: first rejection is clean (streak 1)");
 });
 
