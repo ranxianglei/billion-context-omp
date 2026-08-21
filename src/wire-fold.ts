@@ -12,9 +12,11 @@
 // (mode flip) re-folds deterministically from the stream, deactivating the
 // old space's orphaned blocks (syncBlocks) rather than mixing ids.
 //
-// Responses bodies are fail-open: the kernel ships a responses codec, but
-// the omp pipeline has no responses rebuild path (the proxy covers responses
-// at the wire level).
+// Responses bodies (input[] item arrays) ride the same channel since the
+// kernel responses codec landed: responsesToCore folds the input items,
+// patchResponsesInput splices the folded stream back into the original item
+// layout (unknown item types pass through verbatim, reasoning items keep
+// their encrypted content via the rawResponsesItem sidecar).
 
 import {
   anthropicToCore,
@@ -22,7 +24,11 @@ import {
   coreToOpenai,
   detectWireFormat as kernelDetectWireFormat,
   openaiToCore,
+  patchResponsesInput,
+  responsesToCore,
   type BiliMessage,
+  type ResponsesProjection,
+  type ResponsesRequestBody,
 } from "acp-kernel/wire";
 import {
   createRenderRefsNode,
@@ -35,22 +41,43 @@ import { compressToolArgs, stripRefTag } from "./messages.js";
 import type { AgentMessage, BlockLike, StreamCompressCall } from "./messages.js";
 import { createHash } from "node:crypto";
 
-export type ProviderWireFormat = "anthropic" | "openai";
+export type ProviderWireFormat = "anthropic" | "openai" | "responses";
 
 /** Kernel format detection narrowed to the formats the omp pipeline can
  *  rebuild onto the wire. null = fail-open (pass the payload through). */
 export function detectProviderWireFormat(payload: unknown): ProviderWireFormat | null {
   const fmt = kernelDetectWireFormat(payload);
-  return fmt === "anthropic" || fmt === "openai" ? fmt : null;
+  return fmt === "anthropic" || fmt === "openai" || fmt === "responses" ? fmt : null;
+}
+
+/** omp emits user turns as EasyInputMessage items (role + content, no
+ *  `type`), which the kernel responses codec files under `preamble` — never
+ *  folded, never tagged. Normalizing them to explicit `type: "message"`
+ *  (an equally legal Responses shape every server accepts) puts user text
+ *  into the fold space. Other role-less shapes are left untouched. */
+export function normalizeResponsesPayload(payload: unknown): ResponsesRequestBody {
+  const body = payload as ResponsesRequestBody;
+  if (!Array.isArray(body.input)) return body;
+  const input = body.input.map((item) => {
+    if (item === null || typeof item !== "object" || typeof (item as { type?: unknown }).type === "string") return item;
+    const role = (item as { role?: unknown }).role;
+    if (role !== "user" && role !== "assistant") return item;
+    return { ...item, type: "message" } as typeof item;
+  });
+  return { ...body, input };
 }
 
 export function payloadToCore(
   payload: unknown,
   fmt: ProviderWireFormat,
-): { msgs: BiliMessage[]; cacheControls?: Map<string, unknown> } {
+): { msgs: BiliMessage[]; cacheControls?: Map<string, unknown>; projection?: ResponsesProjection } {
   if (fmt === "anthropic") {
     const { msgs, cacheControls } = anthropicToCore(payload as Parameters<typeof anthropicToCore>[0]);
     return { msgs, cacheControls };
+  }
+  if (fmt === "responses") {
+    const projection = responsesToCore(normalizeResponsesPayload(payload));
+    return { msgs: projection.msgs, projection };
   }
   const { msgs } = openaiToCore(payload as Parameters<typeof openaiToCore>[0]);
   return { msgs };
@@ -60,7 +87,12 @@ export function coreToPayloadMessages(
   msgs: BiliMessage[],
   fmt: ProviderWireFormat,
   cacheControls?: Map<string, unknown>,
+  projection?: ResponsesProjection,
 ): unknown[] {
+  if (fmt === "responses") {
+    if (!projection) throw new Error("responses rebuild requires the parse-time projection");
+    return patchResponsesInput(projection, msgs) as unknown[];
+  }
   return fmt === "anthropic" ? coreToAnthropic(msgs, cacheControls) : coreToOpenai(msgs);
 }
 
@@ -82,12 +114,32 @@ export type Representability = { ok: true } | { ok: false; reason: string };
  *  the rebuild. Unrepresentable payloads must fail the transform OPEN —
  *  pass through untouched rather than lose content (issue #3 review). */
 export function payloadRepresentable(payload: unknown, fmt: ProviderWireFormat): Representability {
+  if (fmt === "responses") return responsesRepresentable(payload);
   const messages = (payload as { messages?: unknown }).messages;
   if (!Array.isArray(messages)) return { ok: false, reason: "messages not an array" };
   for (const message of messages) {
     if (message === null || typeof message !== "object") return { ok: false, reason: "message not an object" };
     const bad = fmt === "anthropic" ? unrepresentableAnthropicMessage(message) : unrepresentableOpenaiMessage(message);
     if (bad) return { ok: false, reason: bad };
+  }
+  return { ok: true };
+}
+
+/** Responses round-trip guard: the kernel codec parses every known item
+ *  type (unknown types pass through as preamble verbatim), with ONE lossy
+ *  case — a `type: "message"` item with role system/developer is folded
+ *  into `systemParts` and dropped from the rebuilt input. omp never emits
+ *  those (system rides top-level `instructions`), so fail open on them. */
+function responsesRepresentable(payload: unknown): Representability {
+  const input = (payload as { input?: unknown }).input;
+  if (typeof input === "string") return { ok: true };
+  if (!Array.isArray(input)) return { ok: false, reason: "input neither string nor array" };
+  for (const item of input) {
+    if (item === null || typeof item !== "object") return { ok: false, reason: "input item not an object" };
+    const { type, role } = item as { type?: unknown; role?: unknown };
+    if (type === "message" && (role === "system" || role === "developer")) {
+      return { ok: false, reason: "input message role system/developer is folded into systemParts and dropped on rebuild" };
+    }
   }
   return { ok: true };
 }
@@ -634,4 +686,56 @@ function extractViewText(content: unknown): string {
     if (b.type === "text" && typeof b.text === "string") parts.push(clean(b.text));
   }
   return parts.join("\n");
+}
+
+/** Responses wire mirror for primeFold: omp's responses payloads carry the
+ *  system prompt top-level (`instructions`, out of the fold space) and the
+ *  conversation as input[] items. Thinking blocks replay as reasoning items
+ *  whose exact wire form (id + encrypted_content) is serialized whole inside
+ *  `thinkingSignature` — parse it back so the preview ids match the live
+ *  fold. Unsigned thinking falls back to a synthesized item (id drift is
+ *  tolerated: the preview is re-folded at the first live request). */
+export function viewToResponsesCore(view: AgentMessage[], systemText: string): BiliMessage[] {
+  const input: Array<Record<string, unknown>> = [];
+  for (const message of view) {
+    const m = message as { role?: string; content?: unknown; toolCallId?: string; summary?: string };
+    if (m.role === "user") {
+      const text = extractViewText(m.content);
+      if (text) input.push({ type: "message", role: "user", content: text });
+    } else if (m.role === "assistant") {
+      const blocks = Array.isArray(m.content) ? m.content : [];
+      const typed = blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown; text?: unknown; thinking?: unknown; thinkingSignature?: unknown }>;
+      for (const b of typed) {
+        if (b === null || typeof b !== "object") continue;
+        if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0) {
+          const replay = parseReasoningReplay(b.thinkingSignature);
+          input.push(replay ?? { type: "reasoning", id: `rs_${createHash("sha1").update(b.thinking).digest("hex").slice(0, 24)}`, summary: [{ type: "summary_text", text: b.thinking }] });
+        } else if (b.type === "text" && typeof b.text === "string" && stripRefTag(b.text).trim().length > 0) {
+          input.push({ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: stripRefTag(b.text), annotations: [] }] });
+        } else if (b.type === "toolCall") {
+          input.push({ type: "function_call", call_id: b.id, name: b.name ?? "", arguments: JSON.stringify(b.arguments ?? {}) });
+        }
+      }
+    } else if (m.role === "toolResult") {
+      input.push({ type: "function_call_output", call_id: m.toolCallId ?? "", output: extractViewText(m.content) });
+    } else {
+      const text = extractViewText(m.content) || (typeof m.summary === "string" ? m.summary : "");
+      if (text) input.push({ type: "message", role: "user", content: text });
+    }
+  }
+  const { msgs } = responsesToCore({ model: "prime-fold", instructions: systemText, input } as ResponsesRequestBody);
+  return msgs;
+}
+
+function parseReasoningReplay(signature: unknown): Record<string, unknown> | null {
+  if (typeof signature !== "string" || signature.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(signature);
+    if (parsed === null || typeof parsed !== "object") return null;
+    const item = parsed as { type?: unknown; id?: unknown };
+    if (item.type !== "reasoning" || typeof item.id !== "string") return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }

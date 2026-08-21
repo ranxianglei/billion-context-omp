@@ -74,7 +74,7 @@ test("detectProviderWireFormat routes anthropic / openai, null otherwise", () =>
   assert.equal(detectProviderWireFormat(null), null);
   // The kernel parses responses bodies, but the omp pipeline has no
   // responses rebuild path — fail-open, not openai-shaped.
-  assert.equal(detectProviderWireFormat({ model: "gpt-x", input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] }), null);
+  assert.equal(detectProviderWireFormat({ model: "gpt-x", input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] }), "responses");
 });
 
 test("kernel round-trip preserves tool ids and cache_control (anthropic)", () => {
@@ -623,13 +623,20 @@ test("default (no transformMode given) resolves per model API (issues #79/#83)",
     assert.ok(r2, `default+${api}: provider handler transforms the wire payload`);
   }
 
-  // Non-viable wire bodies (openai-responses `input`) and missing api → context.
+  // openai-responses defaults to provider (issue #12): the responses codec
+  // folds input[] bodies. Missing api still has no viable default → context.
   for (const api of ["openai-responses", undefined] as const) {
     const handlers = make();
     const r1 = await fireCtx(handlers, model(api));
-    assert.ok(r1?.messages, `default+${api ?? "(no api)"}: context handler transforms`);
-    const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model(api));
-    assert.equal(r2, undefined, `default+${api ?? "(no api)"}: provider handler is a no-op`);
+    if (api === "openai-responses") {
+      assert.equal(r1, undefined, `default+${api}: context handler is an observer`);
+      const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model(api));
+      assert.ok(r2, `default+${api}: provider handler transforms the wire payload`);
+    } else {
+      assert.ok(r1?.messages, `default+${api ?? "(no api)"}: context handler transforms`);
+      const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model(api));
+      assert.equal(r2, undefined, `default+${api ?? "(no api)"}: provider handler is a no-op`);
+    }
   }
 });
 

@@ -54,9 +54,16 @@ test("openai-completions: context below 17.3.8, provider from 17.3.8 (issue #83)
   assert.equal(resolveTransformMode({}, { api: "openai-completions" }, "17.4.0"), "provider");
 });
 
-test("bedrock / cursor / responses / google / devin stay context even on 17.3.8 (no codec path)", () => {
-  for (const api of ["amazon-bedrock", "cursor", "openai-responses", "google", "devin-agent"]) {
+test("bedrock / cursor / google / devin stay context even on 17.3.8 (no codec path)", () => {
+  for (const api of ["amazon-bedrock", "cursor", "google", "devin-agent"]) {
     assert.equal(resolveTransformMode({}, { api }, "17.3.8"), "context");
+  }
+});
+
+test("responses family defaults to provider at any host version (issue #12)", () => {
+  for (const api of ["openai-responses", "azure-openai-responses", "openai-codex-responses"]) {
+    assert.equal(resolveTransformMode({}, { api }, "17.0.0"), "provider");
+    assert.equal(resolveTransformMode({}, { api }, "17.3.8"), "provider");
   }
 });
 

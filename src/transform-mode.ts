@@ -2,9 +2,18 @@ import type { AdapterConfig } from "./config.js";
 import { VERSION } from "@oh-my-pi/pi-utils";
 
 // Model APIs where the omp host's provider layer applies the
-// before_provider_request (onPayload) replacement AND serves a `messages`-array
-// wire body the wire transform recognizes.
-const PROVIDER_VIABLE_APIS = new Set(["anthropic-messages", "ollama-chat"]);
+// before_provider_request (onPayload) replacement AND serves a wire body the
+// kernel codec parses: anthropic-messages / ollama-chat (messages[] bodies),
+// plus the responses family (input[] item arrays — all three providers honor
+// onPayload: openai-responses applyPayloadReplacement, azure-openai-responses
+// and openai-codex-responses likewise; ework issue #12).
+const PROVIDER_VIABLE_APIS = new Set([
+  "anthropic-messages",
+  "ollama-chat",
+  "openai-responses",
+  "azure-openai-responses",
+  "openai-codex-responses",
+]);
 
 // openai-completions honors the onPayload replacement only from host 17.3.8
 // (upstream PR can1357/oh-my-pi#8717, shipped in pi-ai 17.3.8; issue #83). On
@@ -42,12 +51,11 @@ export function resolveTransformMode(
   return "context";
 }
 
-// Responses-shaped APIs: the host honors the onPayload replacement, but the
-// wire body is an `input[]` item array the wire transform has no codec for
-// (kernel covers responses at the proxy level, not omp) — provider mode is a
-// silent no-op there, so it always warns regardless of host version (ework
-// issue #12).
-const RESPONSES_SHAPED_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses"]);
+// ework issue #12 follow-up: the responses family (openai-responses,
+// azure-openai-responses, openai-codex-responses) now defaults to provider —
+// the kernel responses codec folds input[] bodies and patchResponsesInput
+// rebuilds them. A codex WebSocket frame body (no input[] array) is detected
+// as unknown-format and fails open at the transform boundary.
 
 export interface ProviderDeliveryWarning {
   key: string;
@@ -83,13 +91,6 @@ export function providerDeliveryWarning(
       key: `nocodec:${api}`,
       reason: `${api} honors the replacement from 17.3.8 but its wire body has no codec path yet (issue #83)`,
       message: `⚠ billion-context-omp: transformMode "provider" is set, but the ${api} wire body has no codec path yet (#83) — compression is NOT applied. Remove the transformMode override to use context mode.`,
-    };
-  }
-  if (api != null && RESPONSES_SHAPED_APIS.has(api)) {
-    return {
-      key: `nocodec:${api}`,
-      reason: `${api} wire bodies are input[] item arrays with no codec path in the wire transform`,
-      message: `⚠ billion-context-omp: transformMode "provider" is set, but the ${api} wire body (input[] items) has no codec path yet — compression is NOT applied. Remove the transformMode override to use context mode.`,
     };
   }
   return undefined;

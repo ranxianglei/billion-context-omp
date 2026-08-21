@@ -25,6 +25,7 @@ import {
   toolResultTextsCore,
   viewToAnthropicCore,
   viewToCoreStream,
+  viewToResponsesCore,
 } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { boundaryRaw, findCompressCalls, isBlockRef, messageIdentity, rawPos, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage, type BlockLike } from "./messages.js";
@@ -492,6 +493,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
         let stream: BiliMessage[];
         if (api === "anthropic-messages") {
           stream = viewToAnthropicCore(view);
+        } else if (api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses") {
+          const base = getSystemPromptText(ctx);
+          const acp = buildAcpSystemPrompt(promptsRef);
+          stream = viewToResponsesCore(view, base.includes(acp) ? base : `${base}\n\n${acp}`);
         } else {
           const base = getSystemPromptText(ctx);
           const acp = buildAcpSystemPrompt(promptsRef);

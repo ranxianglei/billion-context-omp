@@ -463,10 +463,26 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelive
       return undefined;
     }
     try {
-      const { msgs, cacheControls } = payloadToCore(payload, fmt);
+      const { msgs, cacheControls, projection } = payloadToCore(payload, fmt);
       if (msgs.length === 0) return undefined;
       const result = await transformStreamCore(ctx, runtime, msgs, fmt);
       if (!result) return undefined;
+      if (fmt === "responses") {
+        // Responses surgery rewrites only `input` — instructions (system)
+        // stay top-level and untouched, and every other body field rides
+        // the spread; patchResponsesInput splices folded texts back into
+        // the original item layout (patched in place, folded items dropped,
+        // summaries/nudges inserted at their stream position).
+        const rebuilt = coreToPayloadMessages(result.coreOut, fmt, undefined, projection);
+        const inMsgs = Array.isArray((payload as { input?: unknown }).input)
+          ? ((payload as { input?: unknown[] }).input as unknown[]).length
+          : 1;
+        if (rebuilt.length !== inMsgs) {
+          logInfo("provider-transform", { sid, fmt, inMsgs, outMsgs: rebuilt.length, nudge: result.nudgeInjected ? "injected" : "idle" });
+        }
+        debug.event("provider-transform", { sid, fmt, inMsgs, outMsgs: rebuilt.length, nudgeInjected: result.nudgeInjected });
+        return { ...(payload as object), input: rebuilt };
+      }
       const inMessages = (payload as { messages?: unknown[] }).messages ?? [];
       // Openai rebuilds restore the host's wire contract first (issue #105):
       // content "" on assistant tool-call messages and reasoning_details
