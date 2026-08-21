@@ -11,7 +11,7 @@
         "@oh-my-pi/pi-coding-agent": "17.3.8",
         "@oh-my-pi/pi-utils": "17.3.8",
         "@types/node": "^26.1.2",
-        "acp-kernel": "0.0.28",
+        "acp-kernel": "0.0.31",
         "billion-context-kit": "0.2.0",
         "bun-types": "^1.3.14",
         "tsup": "^8.5.1",
@@ -347,7 +347,7 @@
 
     "acorn": ["acorn@8.18.0", "", { "bin": "bin/acorn" }, "sha512-lGq+9yr1/GuAWaVYIHRjvvySG5/4VfKIvC8EWxStPdcDh/Ka7FG3twP6v4d5BkravUilhIAsG4Qj83t02LWUPQ=="],
 
-    "acp-kernel": ["acp-kernel@0.0.28", "", {}, "sha512-1pdpu8xmIlVFxfO3oHzaigX8DhlYVyMr9o5sSYHRzcOfijCwhnnz3yJMeqT8Gb1WBnIyl5UyV9muhTa5A4D/Sg=="],
+    "acp-kernel": ["acp-kernel@0.0.31", "", {}, "sha512-XVL/8RryOhc4mvqa+5JJTv7P4s2TJvmBHL6l0/3rCrixPfMcAADuHC5wXHlhRdsu8qsb26MFDT27rN8lJ2qCQA=="],
 
     "adm-zip": ["adm-zip@0.5.18", "", {}, "sha512-ufJnssQGbxzLNS1Ho9bCtX4rQKCCvoVuDLHoJyc3F9dOGDB4BkWs2Ci0kv53lqocAEQ/Cbi+I2XCsNYGqVYqng=="],
 
