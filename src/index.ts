@@ -15,7 +15,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, lastRejectedCompressPair } from "./messages.js";
 import { resolveTransformMode } from "./transform-mode.js";
-import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, lastRejectedPairCore, payloadRepresentable, payloadToCore, type ProviderWireFormat } from "./wire-fold.js";
+import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, lastRejectedPairCore, payloadRepresentable, payloadToCore, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -433,13 +433,21 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       if (msgs.length === 0) return undefined;
       const result = await transformStreamCore(ctx, runtime, msgs, fmt);
       if (!result) return undefined;
-      const outMsgs = coreToPayloadMessages(result.coreOut, fmt, cacheControls).length;
-      const inMsgs = (payload as { messages?: unknown[] }).messages?.length ?? 0;
+      const inMessages = (payload as { messages?: unknown[] }).messages ?? [];
+      // Openai rebuilds restore the host's wire contract first (issue #105):
+      // content "" on assistant tool-call messages and reasoning_details
+      // replay — the codec drops/flips both and strict backends trip.
+      const rebuilt =
+        fmt === "openai"
+          ? restoreOpenaiWireFidelity(inMessages, coreToPayloadMessages(result.coreOut, fmt, cacheControls))
+          : coreToPayloadMessages(result.coreOut, fmt, cacheControls);
+      const outMsgs = rebuilt.length;
+      const inMsgs = inMessages.length;
       if (outMsgs !== inMsgs) {
         logInfo("provider-transform", { sid, fmt, inMsgs, outMsgs, nudge: result.nudgeInjected ? "injected" : "idle" });
       }
       debug.event("provider-transform", { sid, fmt, inMsgs, outMsgs, nudgeInjected: result.nudgeInjected });
-      return { ...(payload as object), messages: coreToPayloadMessages(result.coreOut, fmt, cacheControls) };
+      return { ...(payload as object), messages: rebuilt };
     } catch (e) {
       // Fail-open: never break the request itself.
       logThrow("provider-transform", e, { sid, fmt });
