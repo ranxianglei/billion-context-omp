@@ -349,6 +349,43 @@ test("viewToAnthropicCore mirrors the anthropic wire shape (no system piece)", (
   assert.ok(core.some((m) => m.contentType === "tool-result" && m.toolCallId === "t1"));
 });
 
+// Issue #103: thinking blocks ride the wire (openai: reasoning_content field,
+// anthropic: thinking blocks) and the kernel codec maps each to an
+// assistant/reasoning piece. The prime mirror must reproduce those pieces or
+// every index and fingerprint after a thinking-bearing turn drifts and the
+// restart replay guards reject the in-stream compress calls.
+test("viewToCoreStream mirrors thinking blocks as reasoning pieces (issue #103)", () => {
+  const view = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    { role: "assistant", content: [{ type: "thinking", thinking: "ponder", thinkingSignature: "reasoning_content" }, { type: "text", text: "answer" }] },
+    { role: "assistant", content: [{ type: "thinking", thinking: "plan the call" }, { type: "toolCall", id: "t1", name: "grep", arguments: { q: "x" } }] },
+    { role: "toolResult", content: [{ type: "text", text: "hit" }], toolCallId: "t1" },
+    { role: "assistant", content: [{ type: "thinking", thinking: "   " }] },
+  ] as unknown as Parameters<typeof viewToCoreStream>[0];
+  const core = viewToCoreStream(view, "base system");
+  const reasoning = core.filter((m) => m.contentType === "reasoning");
+  assert.equal(reasoning.length, 2, "one reasoning piece per non-empty thinking block group");
+  assert.ok(reasoning.some((m) => m.text === "ponder"), "thinking text preserved verbatim");
+  assert.ok(reasoning.some((m) => m.text === "plan the call"), "thinking before a tool call preserved");
+  const callIdx = core.findIndex((m) => m.contentType === "tool-call" && m.toolCallId === "t1");
+  const reasoningIdx = core.findIndex((m) => m.contentType === "reasoning" && m.text === "plan the call");
+  assert.ok(reasoningIdx >= 0 && callIdx > reasoningIdx, "reasoning piece precedes its tool-call piece");
+  assert.ok(!core.some((m) => m.contentType === "reasoning" && m.text.trim() === ""), "whitespace-only thinking dropped");
+});
+
+test("viewToAnthropicCore mirrors thinking blocks as reasoning pieces (issue #103)", () => {
+  const view = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    { role: "assistant", content: [{ type: "thinking", thinking: "ponder", thinkingSignature: "sig-1" }, { type: "text", text: "answer" }] },
+  ] as unknown as Parameters<typeof viewToAnthropicCore>[0];
+  const core = viewToAnthropicCore(view);
+  const reasoning = core.find((m) => m.contentType === "reasoning");
+  assert.ok(reasoning, "thinking block becomes a reasoning piece");
+  assert.equal(reasoning?.text, "ponder");
+  assert.equal((reasoning as { thinkingSignature?: string }).thinkingSignature, "sig-1", "signature carried through");
+  assert.ok(core.some((m) => m.contentType === "text" && m.text === "answer"), "text piece still present");
+});
+
 test("provider mode: in-stream compress call replays and prunes the wire payload", async () => {
   const { api, handlers } = capture();
   createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
