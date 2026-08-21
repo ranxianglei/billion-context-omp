@@ -42,6 +42,13 @@ export function resolveTransformMode(
   return "context";
 }
 
+// Responses-shaped APIs: the host honors the onPayload replacement, but the
+// wire body is an `input[]` item array the wire transform has no codec for
+// (kernel covers responses at the proxy level, not omp) — provider mode is a
+// silent no-op there, so it always warns regardless of host version (ework
+// issue #12).
+const RESPONSES_SHAPED_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses"]);
+
 export interface ProviderDeliveryWarning {
   key: string;
   reason: string;
@@ -76,6 +83,13 @@ export function providerDeliveryWarning(
       key: `nocodec:${api}`,
       reason: `${api} honors the replacement from 17.3.8 but its wire body has no codec path yet (issue #83)`,
       message: `⚠ billion-context-omp: transformMode "provider" is set, but the ${api} wire body has no codec path yet (#83) — compression is NOT applied. Remove the transformMode override to use context mode.`,
+    };
+  }
+  if (api != null && RESPONSES_SHAPED_APIS.has(api)) {
+    return {
+      key: `nocodec:${api}`,
+      reason: `${api} wire bodies are input[] item arrays with no codec path in the wire transform`,
+      message: `⚠ billion-context-omp: transformMode "provider" is set, but the ${api} wire body (input[] items) has no codec path yet — compression is NOT applied. Remove the transformMode override to use context mode.`,
     };
   }
   return undefined;

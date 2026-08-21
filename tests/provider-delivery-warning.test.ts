@@ -81,6 +81,34 @@ test("providerDeliveryWarning: unset or context mode never warns (defaults alrea
   assert.equal(providerDeliveryWarning({ transformMode: "provider" }, { api: "kimi" }, "17.3.2"), undefined, "unknown api — body-shape check covers it");
 });
 
+// ework issue #12: explicit provider mode on responses-shaped APIs is a silent
+// no-op — their wire body is an input[] item array with no codec path (on any
+// host version), so providerDeliveryWarning must name the reason up front.
+test("providerDeliveryWarning: responses-shaped APIs lack a codec path at any host version", () => {
+  for (const api of ["openai-responses", "openai-codex-responses", "azure-openai-responses"] as const) {
+    for (const host of ["17.0.0", "17.3.8", "99.0.0"] as const) {
+      const w = providerDeliveryWarning({ transformMode: "provider" }, { api }, host);
+      assert.ok(w, `${api} on ${host} → codec-path warning`);
+      assert.equal(w.key, `nocodec:${api}`);
+      assert.match(w.message, /input\[\]/);
+    }
+    assert.equal(providerDeliveryWarning({}, { api }, "17.3.8"), undefined, `${api} unset default stays silent (context mode)`);
+  }
+});
+
+test("pure input[] responses body reaches the unknown-format warning", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  const notify: string[] = [];
+  const payload = { model: "x", input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }], instructions: "sys" };
+  const fire = () =>
+    handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, uiCtx({ sid: "warn-responses", api: "custom-api", notify }));
+  assert.equal(await fire(), undefined, "input[] body passes through untouched");
+  await fire();
+  assert.equal(notify.length, 1, "notify fires exactly once per session");
+  assert.match(notify[0]!, /no codec path/);
+});
+
 test("context observer surfaces the static warning once per session", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);

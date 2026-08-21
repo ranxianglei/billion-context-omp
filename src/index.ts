@@ -435,7 +435,7 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelive
   pi.on("before_provider_request", async (event, ctx) => {
     if (resolveTransformMode(runtime.adapter, ctx.model) !== "provider") return undefined;
     const payload = (event as { payload?: unknown }).payload;
-    if (payload === null || typeof payload !== "object" || !Array.isArray((payload as { messages?: unknown }).messages)) return undefined;
+    if (payload === null || typeof payload !== "object") return undefined;
     const sid = ctx.sessionManager?.getSessionId?.() ?? "";
     const fmt = detectProviderWireFormat(payload);
     if (fmt === null) {
