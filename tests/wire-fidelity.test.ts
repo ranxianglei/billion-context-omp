@@ -69,10 +69,6 @@ function openaiPayload(messages: Array<Record<string, unknown>>): Record<string,
 
 const text = (r: { content: Array<{ type: string; text: string }> }): string => r.content[0]!.text;
 
-function assistantToolCall(id: string, name = "bash", args = "{}"): Record<string, unknown> {
-  return { role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name, arguments: args } }] };
-}
-
 test("restoreOpenaiWireFidelity: re-attaches reasoning_details and normalizes null content", () => {
   const original = [
     { role: "user", content: "hi" },
