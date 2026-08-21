@@ -14,7 +14,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, lastRejectedCompressPair } from "./messages.js";
-import { resolveTransformMode } from "./transform-mode.js";
+import { resolveTransformMode, providerDeliveryWarning, type ProviderDeliveryWarning } from "./transform-mode.js";
 import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, lastRejectedPairCore, payloadRepresentable, payloadToCore, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { viableRanges } from "billion-context-kit";
@@ -35,13 +35,14 @@ declare const CURRENT_VERSION: string;
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
     const runtime = createRuntime(adapter);
+    const warnDelivery = makeDeliveryWarner();
     wireSessionLifecycle(pi, runtime);
-    wireContextTransform(pi, runtime);
+    wireContextTransform(pi, runtime, warnDelivery);
     wireSystemPrompt(pi, runtime);
     // BEFORE wireProviderDebug: handlers fire in registration order, so the
     // provider dumps capture the POST-transform payload (what actually goes
     // to fetch), mirroring what context dumps show in context mode.
-    wireProviderTransform(pi, runtime);
+    wireProviderTransform(pi, runtime, warnDelivery);
     wireProviderDebug(pi);
     wireToolGuardrails(pi, runtime);
     pi.registerTool(makeCompressTool(runtime));
@@ -380,19 +381,39 @@ async function transformStream(
     return result;
 }
 
-function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
+function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelivery: DeliveryWarner): void {
   pi.on("context", async (event, ctx) => {
     if (resolveTransformMode(runtime.adapter, ctx.model) === "provider") {
       // Provider mode: the context event is an observer. The fold runs at
       // before_provider_request instead (wireProviderTransform); touching the
       // message array here is what creates the feedback-view loop.
-      debug.event("context-observer-skip", { sid: ctx.sessionManager.getSessionId(), msgs: event.messages?.length ?? 0 });
+      const sid = ctx.sessionManager.getSessionId();
+      debug.event("context-observer-skip", { sid, msgs: event.messages?.length ?? 0 });
+      const warning = providerDeliveryWarning(runtime.adapter, ctx.model);
+      if (warning) warnDelivery(ctx, sid, warning);
       return undefined;
     }
     const result = await transformStream(ctx, runtime, event.messages ?? [], "context");
     if (!result) return undefined;
     return { messages: result.rebuilt };
   });
+}
+
+type DeliveryWarner = (ctx: ExtensionContext, sid: string, warning: ProviderDeliveryWarning) => void;
+
+function makeDeliveryWarner(): DeliveryWarner {
+  const warned = new Set<string>();
+  return (ctx, sid, warning) => {
+    const dedup = `${sid}:${warning.key}`;
+    if (warned.has(dedup)) return;
+    warned.add(dedup);
+    logWarn("provider-transform", { sid, event: "undelivered", reason: warning.reason });
+    try {
+      if (ctx.hasUI) ctx.ui.notify(warning.message);
+    } catch {
+      // notify unavailable — the log line above is the durable record
+    }
+  };
 }
 
 // Provider mode (issue #52's structural fix): transform the WIRE payload at
@@ -404,7 +425,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // proxy (renderTags "text-only"), so both deployments tag identically.
 // Fail-open: any error or a body the kernel cannot parse rebuilds nothing
 // and the original payload passes through.
-function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
+function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelivery: DeliveryWarner): void {
   pi.on("before_provider_request", async (event, ctx) => {
     if (resolveTransformMode(runtime.adapter, ctx.model) !== "provider") return undefined;
     const payload = (event as { payload?: unknown }).payload;
@@ -416,6 +437,13 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // into a rebuildable message list yet (the proxy covers responses at
       // the wire level) — pass through untouched.
       debug.event("provider-transform-unknown-format", { sid });
+      if (runtime.adapter.transformMode === "provider") {
+        warnDelivery(ctx, sid, {
+          key: "unknown-wire-format",
+          reason: "explicit provider mode but the wire body has no codec path (unknown format) — payload passes through",
+          message: '⚠ billion-context-omp: transformMode "provider" is set, but this wire body has no codec path — compression is NOT applied here. Remove the override to use context mode.',
+        });
+      }
       return undefined;
     }
     const representable = payloadRepresentable(payload, fmt);
