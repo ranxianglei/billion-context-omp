@@ -119,6 +119,17 @@ function unrepresentableOpenaiMessage(message: object): string | null {
   if (typeof role !== "string" || !OPENAI_CODEC_ROLES.has(role)) {
     return `openai role ${JSON.stringify(role) ?? "missing"}`;
   }
+  // Fields the codec round-trip drops entirely (issue #105): a legacy
+  // function_call loses the call itself (orphaning its tool result), and
+  // audio/annotations/refusal are replayed content some hosts echo back.
+  // reasoning_details is NOT here — restoreOpenaiWireFidelity re-attaches it.
+  for (const field of ["function_call", "audio", "annotations"] as const) {
+    if ((message as Record<string, unknown>)[field] !== undefined) {
+      return `openai ${field} field is dropped by the rebuild`;
+    }
+  }
+  const refusal = (message as { refusal?: unknown }).refusal;
+  if (refusal !== null && refusal !== undefined) return "openai refusal content is dropped by the rebuild";
   const content = (message as { content?: unknown }).content;
   if (content == null || typeof content === "string") return null;
   if (!Array.isArray(content)) return "content neither string nor part array";
@@ -137,6 +148,47 @@ function unrepresentableOpenaiMessage(message: object): string | null {
     return `openai content part type ${JSON.stringify(type) ?? "missing"}`;
   }
   return null;
+}
+
+/** Restore openai wire fields the kernel codec cannot carry (issue #105).
+ *  omp's buildParams emits assistant tool-call messages with content "" (a
+ *  null trips strict/proxy implementations) and replays encrypted reasoning
+ *  as reasoning_details keyed to the tool call ids. The codec rebuild drops
+ *  the details and flips "" back to null; this pass re-attaches both so the
+ *  post-surgery body keeps the host's wire contract. */
+export function restoreOpenaiWireFidelity(originalMessages: unknown[], rebuilt: unknown[]): unknown[] {
+  const detailsByCall = new Map<string, unknown[]>();
+  for (const message of originalMessages) {
+    if (message === null || typeof message !== "object") continue;
+    const calls = (message as { tool_calls?: unknown }).tool_calls;
+    const details = (message as { reasoning_details?: unknown }).reasoning_details;
+    if (!Array.isArray(calls) || !Array.isArray(details) || details.length === 0) continue;
+    for (const call of calls) {
+      const id = (call as { id?: unknown } | null)?.id;
+      if (typeof id === "string" && !detailsByCall.has(id)) detailsByCall.set(id, details);
+    }
+  }
+  return rebuilt.map((message) => {
+    if (message === null || typeof message !== "object") return message;
+    const m = message as Record<string, unknown>;
+    if (m.role !== "assistant") return message;
+    const calls = Array.isArray(m.tool_calls) ? (m.tool_calls as unknown[]) : [];
+    const attached: unknown[] = [];
+    for (const call of calls) {
+      const id = (call as { id?: unknown } | null)?.id;
+      if (typeof id !== "string") continue;
+      const d = detailsByCall.get(id);
+      if (d) attached.push(...d);
+    }
+    const hasReasoningField =
+      m.reasoning_content !== undefined || m.reasoning !== undefined || m.reasoning_text !== undefined;
+    const emptyContent = m.content === null && (calls.length > 0 || hasReasoningField);
+    if (attached.length === 0 && !emptyContent) return message;
+    const out: Record<string, unknown> = { ...m };
+    if (emptyContent) out.content = "";
+    if (attached.length > 0) out.reasoning_details = attached;
+    return out;
+  });
 }
 
 const renderRefsAll = createRenderRefsNode("all");
