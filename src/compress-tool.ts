@@ -187,7 +187,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   } finally { releaseLock(); }
 }
 
-const LOOP_GUARD_STOP = 3;
+export const LOOP_GUARD_STOP = 3;
 const LOOP_GUARD_SUPPRESS = 4;
 
 // Consecutive-rejection guard: weak models treat an identical error as a

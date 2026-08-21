@@ -8,14 +8,14 @@ import type { NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
-import { makeCompressTool } from "./compress-tool.js";
+import { makeCompressTool, LOOP_GUARD_STOP } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages } from "./messages.js";
+import { coreOutToAgentMessages, lastRejectedCompressPair } from "./messages.js";
 import { resolveTransformMode } from "./transform-mode.js";
-import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, type ProviderWireFormat } from "./wire-fold.js";
+import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, lastRejectedPairCore, payloadRepresentable, payloadToCore, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -231,6 +231,15 @@ async function transformStream(
     });
 
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
+    // Issue #104: hide-compress-calls strips the orphaned call+result from
+    // turn.messages, so the model never sees its own last rejection (the
+    // loop-guard STOP included — observed: 92 identical retries). Re-append
+    // the pair so the outcome of the last attempt stays visible.
+    const rejectedPair = lastRejectedCompressPair(input);
+    if (rejectedPair) {
+      rebuilt.push(...rejectedPair);
+      debug.event("rejected-pair-visible", { sid, callId: (rejectedPair[1] as { toolCallId?: string }).toolCallId ?? null });
+    }
     debug.event("core-out", {
       sid,
       coreOutMsgs: turn.messages.length,
@@ -261,11 +270,28 @@ async function transformStream(
       // stream are normal and ignored — only the trailing message counts.
       const lastUser = [...input].reverse().find((m) => m.role === "user");
       const tailText = lastUser ? JSON.stringify(lastUser.content ?? "") : "";
-      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached");
+      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached") || tailText.includes("compress calls were rejected in a row");
       if (isFeedbackView) {
         debug.event("nudge-feedback-skip", { sid: ctx.sessionManager.getSessionId(), msgs: input.length });
       } else {
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
+      // Issue #104 coherence: while compress calls are being rejected in a
+      // row, a fresh "compress now" demand is the engine of the retry loop —
+      // the model obeys the newest, loudest instruction and re-calls the same
+      // doomed range. Replace the demand with a hold consistent with the
+      // tool's STOP directive until a success resets the streak. Stamps roll
+      // back like the cadence-suppressed path so the next real nudge is not
+      // delayed.
+      const rejectStreak = runtime.rejectStreakFor(ctx);
+      const epochReset = turn.state.nudge.lastPerMessageNudgeTokens !== preTurnNudgeBaseline;
+      if (rejectStreak >= LOOP_GUARD_STOP) {
+        turn.state.nudge.lastNudgeShownTokens = epochReset ? 0 : preTurnNudgeShownTokens;
+        turn.state.nudge.lastShownByTier = preTurnNudgeShownByTier;
+        nudgeInjected = true;
+        rebuilt.push(holdMessage(rejectStreak));
+        logInfo("nudge", { sid, event: "hold-injected", streak: rejectStreak, pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
+        debug.event("nudge-hold", { sid, streak: rejectStreak });
+      } else {
       // The kernel's over-limit branch (usage >= maxContextLimitPct) applies no
       // growth cadence — it re-fires on every context event, i.e. every LLM
       // call of an agentic turn (issue #22: the nudge injects twice in a row).
@@ -276,7 +302,6 @@ async function transformStream(
       // epoch-shrink reset zeroes the stamps (fresh epoch → prevShown 0).
       // Emergency stays unguarded: while usage >= emergencyThresholdPct the
       // overflow reminder must keep firing on every call.
-      const epochReset = turn.state.nudge.lastPerMessageNudgeTokens !== preTurnNudgeBaseline;
       const prevShown = epochReset ? 0 : preTurnNudgeShownTokens;
       const cadenceFloor = turn.nudge.breakdown?.growthFloor ?? 0;
       const suppressed = !emergency && prevShown > 0 && tokenCount - prevShown < cadenceFloor;
@@ -316,6 +341,7 @@ async function transformStream(
           }
           debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, text: rendered.text + example });
         }
+      }
       }
       }
     }
@@ -514,6 +540,14 @@ async function transformStreamCore(
       turn.state,
       { config, tokenCount },
     );
+    // Issue #104 twin of the context path: keep the last REJECTED compress
+    // call+result on the wire — hide-compress-calls strips orphans, erasing
+    // the rejection the model needs to see.
+    const rejectedPair = lastRejectedPairCore(wireMsgs);
+    if (rejectedPair) {
+      coreOut.push(...rejectedPair);
+      debug.event("rejected-pair-visible", { sid, space: "core", callId: rejectedPair[1]?.toolCallId ?? null });
+    }
 
     let nudgeInjected = false;
     if (turn.nudge?.shouldInject) {
@@ -521,7 +555,7 @@ async function transformStreamCore(
       // with our nudge text the model was reminded in this very turn.
       const lastUser = [...wireMsgs].reverse().find((m) => m.role === "user");
       const tailText = lastUser ? (lastUser.text ?? "") : "";
-      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached");
+      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached") || tailText.includes("compress calls were rejected in a row");
       if (isFeedbackView) {
         debug.event("nudge-feedback-skip", { sid, msgs: wireMsgs.length });
       } else {
@@ -530,6 +564,17 @@ async function transformStreamCore(
         // branch re-fires on every LLM call; suppress unless the sent view
         // grew >= growthFloor since the last nudge the model saw.
         const epochReset = turn.state.nudge.lastPerMessageNudgeTokens !== preTurnNudgeBaseline;
+        // Issue #104: replace the compress demand with the hold while calls
+        // are being rejected in a row (context path twin).
+        const rejectStreak = runtime.rejectStreakFor(ctx);
+        if (rejectStreak >= LOOP_GUARD_STOP) {
+          turn.state.nudge.lastNudgeShownTokens = epochReset ? 0 : preTurnNudgeShownTokens;
+          turn.state.nudge.lastShownByTier = preTurnNudgeShownByTier;
+          nudgeInjected = true;
+          coreOut.push({ id: `acp_hold_${Date.now()}`, role: "user", contentType: "text", text: holdText(rejectStreak) });
+          logInfo("nudge", { sid, event: "hold-injected", streak: rejectStreak, pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
+          debug.event("nudge-hold", { sid, streak: rejectStreak });
+        } else {
         const prevShown = epochReset ? 0 : preTurnNudgeShownTokens;
         const cadenceFloor = turn.nudge.breakdown?.growthFloor ?? 0;
         const suppressed = !emergency && prevShown > 0 && tokenCount - prevShown < cadenceFloor;
@@ -555,6 +600,7 @@ async function transformStreamCore(
           // The nudge rides the wire rebuild as the trailing user message —
           // coreToX emits it; same text the context path appends.
           coreOut.push({ id: `acp_nudge_${Date.now()}`, role: "user", contentType: "text", text: nudgeText(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, example) });
+        }
         }
       }
     }
@@ -643,6 +689,21 @@ function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts:
   return {
     role: "user",
     content: [{ type: "text", text: nudgeText(nudge, blocks, prompts, example) }],
+    timestamp: Date.now(),
+  } as AgentMessage;
+}
+
+// Issue #104: the nudge-to-hold text when compress calls are being rejected
+// in a row. The trailing marker phrase doubles as the feedback-view guard
+// match so a re-fed view does not stack a second hold.
+function holdText(streak: number): string {
+  return `[ACP hold] Your last ${streak} compress calls were rejected in a row. Do NOT call compress again now and do NOT retry the same range — the compress reminder is suspended until context actually changes. Continue the actual task. If context still needs relief, run acp_status first and target ONLY a range that meets the minimum size.`;
+}
+
+function holdMessage(streak: number): AgentMessage {
+  return {
+    role: "user",
+    content: [{ type: "text", text: holdText(streak) }],
     timestamp: Date.now(),
   } as AgentMessage;
 }

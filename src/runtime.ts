@@ -82,6 +82,10 @@ export interface AcpRuntime {
    *  `ok=false` increments and returns the new streak; `ok=true` resets to 0.
    *  A re-fold (rewritten stream prefix) drops the slot and starts at 0. */
   noteCompressOutcome(ctx: ExtensionContext, ok: boolean): number;
+  /** Current consecutive-reject streak in the space the session's CURRENT
+   *  mode folds in (issue #104: the nudge must not demand compression while
+   *  compress calls are being rejected in a row). */
+  rejectStreakFor(ctx: ExtensionContext): number;
   forgetSession(sid: string): void;
   /** Rebuild blocks from the persisted session at session_start so /acp and
    *  acp_status show them BEFORE the first LLM call of a resumed session.
@@ -533,6 +537,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return slot.rejectStreak;
   }
 
+  function rejectStreakFor(ctx: ExtensionContext): number {
+    return slotForMode(ctx, sidOf(ctx)).rejectStreak;
+  }
+
   return {
     core,
     get adapter() { return adapterRef; },
@@ -547,6 +555,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     commitFoldState,
     recordRebuiltOutput,
     noteCompressOutcome,
+    rejectStreakFor,
     forgetSession,
     primeFold,
     acquireLock,

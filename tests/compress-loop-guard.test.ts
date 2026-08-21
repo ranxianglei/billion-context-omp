@@ -243,3 +243,78 @@ test("loop guard: malformed compress args count toward the reject streak", async
   assert.match(e1.content[0].text, /again — 5 consecutive rejections/, "empty content: counted, guard already suppressing");
   assert.match(e1.content[0].text, /No changes applied/, "empty content: fold-skip marker present");
 });
+
+// Issue #104: the kernel's hide-compress-calls node strips orphaned calls
+// (KEEP_LAST_ORPHANED=0) — a rejected compress call creates no block, so the
+// call AND its tool-result vanish from the rebuilt view. The model never saw
+// the rejection text (loop-guard STOP included) and retried 92 times in a
+// row. The transform must re-append the most recent rejected pair.
+test("issue #104: rejected compress call+result stay visible in the model's view", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const compress = api.tools.find((t) => t.name === "compress")!;
+  const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), ...FILLERS];
+  await fire([...stream]);
+
+  const bad = { content: [{ startId: "m99999", endId: "m99999", summary: SUMMARY }] };
+  const rejected = await compress.execute("tc_v1", bad, undefined, undefined, ctx);
+  assert.match(rejected.content[0].text, /No changes applied/);
+
+  // Next context event: omp's session view carries the call+result pair.
+  const r = await fire([...stream, assistantCompressCall("tc_v1", bad.content), toolResult("tc_v1", rejected.content[0].text)]);
+  const json = JSON.stringify(r.messages);
+  assert.ok(json.includes("No changes applied"), "the rejection result must stay visible to the model");
+  assert.ok(json.includes("m99999"), "the rejected call itself must stay visible to the model");
+  assert.equal((json.match(/No changes applied/g) ?? []).length, 1, "exactly one copy of the rejection — no duplication");
+
+  // Feedback view (omp re-feeds our output verbatim): still exactly one copy.
+  const r2 = await fire(r.messages);
+  const json2 = JSON.stringify(r2.messages);
+  assert.equal((json2.match(/No changes applied/g) ?? []).length, 1, "feedback view keeps exactly one copy");
+});
+
+// Issue #104 coherence: the over-limit/emergency nudge re-fires on every LLM
+// call ("compress now") — while compress rejects everything, that demand is
+// the engine of the retry loop. At streak >= 3 the nudge must become a hold
+// that matches the tool's STOP directive, and a successful compress must
+// restore the normal nudge.
+test("issue #104: nudge becomes a hold during a reject streak, resets on success", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 10_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  const ctx = fakeCtx();
+  const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const compress = api.tools.find((t) => t.name === "compress")!;
+
+  const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), ...FILLERS];
+  const r0 = await fire([...stream]);
+  const tail0 = JSON.stringify(r0.messages[r0.messages.length - 1]);
+  assert.ok(tail0.includes("compress"), `setup: over-limit nudge fired (${tail0.slice(0, 120)})`);
+  assert.ok(!tail0.includes("[ACP hold]"), "setup: not a hold at streak 0");
+  const ref1 = refOf(r0.messages[0]);
+  const ref2 = refOf(r0.messages[1]);
+
+  const bad = { content: [{ startId: "m99999", endId: "m99999", summary: SUMMARY }] };
+  const rejections: Array<{ text: string; id: string }> = [];
+  for (const id of ["tc_h1", "tc_h2", "tc_h3"]) {
+    const out = await compress.execute(id, bad, undefined, undefined, ctx);
+    rejections.push({ text: out.content[0].text, id });
+  }
+
+  const stream2 = [...stream];
+  for (const rej of rejections) stream2.push(assistantCompressCall(rej.id, bad.content), toolResult(rej.id, rej.text));
+  const r1 = await fire(stream2);
+  const tail1 = JSON.stringify(r1.messages[r1.messages.length - 1]);
+  assert.ok(tail1.includes("[ACP hold]"), `streak 3: nudge replaced by the hold (${tail1.slice(0, 120)})`);
+  assert.ok(tail1.includes("Do NOT call compress"), "hold carries the explicit stop directive");
+  assert.ok(!tail1.includes("Context limit reached"), "hold does not still demand compression");
+
+  // A successful compress resets the streak: the next over-limit nudge is
+  // the normal compress-demanding one again.
+  const ok = await compress.execute("tc_h_ok", { content: [{ startId: ref1, endId: ref2, summary: SUMMARY }] }, undefined, undefined, ctx);
+  assert.match(ok.content[0].text, /reclaimed/, "reset: compression succeeds");
+  const r2 = await fire([...stream2, assistantCompressCall("tc_h_ok", [{ startId: ref1, endId: ref2, summary: SUMMARY }]), toolResult("tc_h_ok", ok.content[0].text)]);
+  const tail2 = JSON.stringify(r2.messages[r2.messages.length - 1]);
+  assert.ok(!tail2.includes("[ACP hold]"), "post-success: hold is gone");
+});
