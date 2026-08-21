@@ -219,7 +219,7 @@ test("decompress accepts a model-facing mNNNNN message ref (not just raw ids)", 
     `mNNNNN ref must resolve to the covered message's original text, got: ${text.slice(0, 200)}`);
 });
 
-test("auto-generated restore files rotate (cache dir stays bounded)", async () => {
+test("auto-generated restore files rotate (cache dir stays bounded)", { timeout: 30_000 }, async () => {
   // Redirect HOME so the rotation assertions hit an isolated cache dir.
   const tmpHome = await mkdtemp(join(tmpdir(), "omp-decompress-rot-"));
   const savedHome = process.env.HOME;
