@@ -266,6 +266,23 @@ export function toolResultTextsCore(msgs: BiliMessage[]): Map<string, string> {
   return results;
 }
 
+/** Core-space twin of lastRejectedCompressPair (issue #104): the most recent
+ *  rejected compress call+result pair, re-appended to the wire output so the
+ *  model sees the outcome of its last attempt (hide-compress-calls strips
+ *  orphaned calls and their results). Null when no rejected call exists. */
+export function lastRejectedPairCore(msgs: BiliMessage[]): BiliMessage[] | null {
+  const names = toolCallNames(msgs);
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]!;
+    if (m.contentType !== "tool-result" || !m.toolCallId) continue;
+    if (!(m.text ?? "").includes("No changes applied")) continue;
+    if (names.get(m.toolCallId) !== "compress") continue;
+    const call = msgs.find((c) => c.contentType === "tool-call" && c.toolCallId === m.toolCallId);
+    return call ? [call, m] : null;
+  }
+  return null;
+}
+
 /** Compress calls carried by a core tool-call piece. Same two shapes as the
  *  AgentMessage stream (direct compress; legacy xd://compress via write),
  *  with the arguments JSON-encoded in the piece's text. */

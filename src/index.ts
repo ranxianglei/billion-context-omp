@@ -8,14 +8,14 @@ import type { NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
-import { makeCompressTool } from "./compress-tool.js";
+import { makeCompressTool, LOOP_GUARD_STOP } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages } from "./messages.js";
+import { coreOutToAgentMessages, lastRejectedCompressPair } from "./messages.js";
 import { resolveTransformMode } from "./transform-mode.js";
-import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
+import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, lastRejectedPairCore, payloadRepresentable, payloadToCore, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -57,6 +57,32 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
 export default createAcpExtension();
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  // Restart+resume (/resume, /fork, handoff, reload) fires session_switch —
+  // NOT session_start — with the transcript already loaded; session_start on
+  // a resumed boot fires before the old transcript is mounted. Without a
+  // switch handler the fold is never primed and /acp shows "Blocks: none"
+  // until the first LLM call (issue #103). Config/prompts re-resolution is
+  // idempotent and keeps the switch path self-sufficient when session_start
+  // never saw this session.
+  const prepareAndPrime = async (ctx: ExtensionContext, phase: string): Promise<void> => {
+    const sid = ctx.sessionManager.getSessionId();
+    try {
+      const user = await loadUserConfig(ctx.cwd);
+      runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+      if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
+    } catch (e) {
+      logThrow("config", e, { sid, phase });
+    }
+    try {
+      runtime.setPrompts(resolvePrompts(runtime.adapter.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
+    } catch (e) {
+      logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
+      runtime.setPrompts(defaultPrompts);
+    }
+    // Rebuild blocks from the persisted session right away so /acp and
+    // acp_status show them immediately on resume — before the first LLM call.
+    runtime.primeFold(ctx);
+  };
   pi.on("session_start", async (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
@@ -75,22 +101,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
         // notify unavailable — log line above is the durable record
       }
     }
-    try {
-      const user = await loadUserConfig(ctx.cwd);
-      runtime.setAdapter(applyUserConfig(runtime.adapter, user));
-      if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
-    } catch (e) {
-      logThrow("config", e, { sid, phase: "session_start" });
-    }
-    try {
-      runtime.setPrompts(resolvePrompts(runtime.adapter.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
-    } catch (e) {
-      logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
-      runtime.setPrompts(defaultPrompts);
-    }
-    // Rebuild blocks from the persisted session right away so /acp and
-    // acp_status show them immediately on resume — before the first LLM call.
-    runtime.primeFold(ctx);
+    await prepareAndPrime(ctx, "session_start");
     // Fire-and-forget: the registry fetch (5s) or an auto-install (60s)
     // must not sit on the session-start critical path (issue #89). A
     // short-lived host still cannot exit mid-install: autoInstallLatest's
@@ -98,6 +109,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     }).catch((e) => logThrow("update", e, { sid, phase: "session_start" }));
+  });
+  pi.on("session_switch", async (event, ctx) => {
+    logInfo("session", { event: "switch", sid: ctx.sessionManager.getSessionId(), reason: event.reason, previous: event.previousSessionFile ?? null });
+    await prepareAndPrime(ctx, "session_switch");
+  });
+  pi.on("session_branch", async (_event, ctx) => {
+    logInfo("session", { event: "branch", sid: ctx.sessionManager.getSessionId() });
+    await prepareAndPrime(ctx, "session_branch");
   });
   pi.on("session_shutdown", (_event, ctx) => {
     try {
@@ -212,6 +231,15 @@ async function transformStream(
     });
 
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
+    // Issue #104: hide-compress-calls strips the orphaned call+result from
+    // turn.messages, so the model never sees its own last rejection (the
+    // loop-guard STOP included — observed: 92 identical retries). Re-append
+    // the pair so the outcome of the last attempt stays visible.
+    const rejectedPair = lastRejectedCompressPair(input);
+    if (rejectedPair) {
+      rebuilt.push(...rejectedPair);
+      debug.event("rejected-pair-visible", { sid, callId: (rejectedPair[1] as { toolCallId?: string }).toolCallId ?? null });
+    }
     debug.event("core-out", {
       sid,
       coreOutMsgs: turn.messages.length,
@@ -242,11 +270,28 @@ async function transformStream(
       // stream are normal and ignored — only the trailing message counts.
       const lastUser = [...input].reverse().find((m) => m.role === "user");
       const tailText = lastUser ? JSON.stringify(lastUser.content ?? "") : "";
-      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached");
+      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached") || tailText.includes("compress calls were rejected in a row");
       if (isFeedbackView) {
         debug.event("nudge-feedback-skip", { sid: ctx.sessionManager.getSessionId(), msgs: input.length });
       } else {
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
+      // Issue #104 coherence: while compress calls are being rejected in a
+      // row, a fresh "compress now" demand is the engine of the retry loop —
+      // the model obeys the newest, loudest instruction and re-calls the same
+      // doomed range. Replace the demand with a hold consistent with the
+      // tool's STOP directive until a success resets the streak. Stamps roll
+      // back like the cadence-suppressed path so the next real nudge is not
+      // delayed.
+      const rejectStreak = runtime.rejectStreakFor(ctx);
+      const epochReset = turn.state.nudge.lastPerMessageNudgeTokens !== preTurnNudgeBaseline;
+      if (rejectStreak >= LOOP_GUARD_STOP) {
+        turn.state.nudge.lastNudgeShownTokens = epochReset ? 0 : preTurnNudgeShownTokens;
+        turn.state.nudge.lastShownByTier = preTurnNudgeShownByTier;
+        nudgeInjected = true;
+        rebuilt.push(holdMessage(rejectStreak));
+        logInfo("nudge", { sid, event: "hold-injected", streak: rejectStreak, pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
+        debug.event("nudge-hold", { sid, streak: rejectStreak });
+      } else {
       // The kernel's over-limit branch (usage >= maxContextLimitPct) applies no
       // growth cadence — it re-fires on every context event, i.e. every LLM
       // call of an agentic turn (issue #22: the nudge injects twice in a row).
@@ -257,7 +302,6 @@ async function transformStream(
       // epoch-shrink reset zeroes the stamps (fresh epoch → prevShown 0).
       // Emergency stays unguarded: while usage >= emergencyThresholdPct the
       // overflow reminder must keep firing on every call.
-      const epochReset = turn.state.nudge.lastPerMessageNudgeTokens !== preTurnNudgeBaseline;
       const prevShown = epochReset ? 0 : preTurnNudgeShownTokens;
       const cadenceFloor = turn.nudge.breakdown?.growthFloor ?? 0;
       const suppressed = !emergency && prevShown > 0 && tokenCount - prevShown < cadenceFloor;
@@ -297,6 +341,7 @@ async function transformStream(
           }
           debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, text: rendered.text + example });
         }
+      }
       }
       }
     }
@@ -503,6 +548,14 @@ async function transformStreamCore(
       turn.state,
       { config, tokenCount },
     );
+    // Issue #104 twin of the context path: keep the last REJECTED compress
+    // call+result on the wire — hide-compress-calls strips orphans, erasing
+    // the rejection the model needs to see.
+    const rejectedPair = lastRejectedPairCore(wireMsgs);
+    if (rejectedPair) {
+      coreOut.push(...rejectedPair);
+      debug.event("rejected-pair-visible", { sid, space: "core", callId: rejectedPair[1]?.toolCallId ?? null });
+    }
 
     let nudgeInjected = false;
     if (turn.nudge?.shouldInject) {
@@ -510,7 +563,7 @@ async function transformStreamCore(
       // with our nudge text the model was reminded in this very turn.
       const lastUser = [...wireMsgs].reverse().find((m) => m.role === "user");
       const tailText = lastUser ? (lastUser.text ?? "") : "";
-      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached");
+      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached") || tailText.includes("compress calls were rejected in a row");
       if (isFeedbackView) {
         debug.event("nudge-feedback-skip", { sid, msgs: wireMsgs.length });
       } else {
@@ -519,6 +572,17 @@ async function transformStreamCore(
         // branch re-fires on every LLM call; suppress unless the sent view
         // grew >= growthFloor since the last nudge the model saw.
         const epochReset = turn.state.nudge.lastPerMessageNudgeTokens !== preTurnNudgeBaseline;
+        // Issue #104: replace the compress demand with the hold while calls
+        // are being rejected in a row (context path twin).
+        const rejectStreak = runtime.rejectStreakFor(ctx);
+        if (rejectStreak >= LOOP_GUARD_STOP) {
+          turn.state.nudge.lastNudgeShownTokens = epochReset ? 0 : preTurnNudgeShownTokens;
+          turn.state.nudge.lastShownByTier = preTurnNudgeShownByTier;
+          nudgeInjected = true;
+          coreOut.push({ id: `acp_hold_${Date.now()}`, role: "user", contentType: "text", text: holdText(rejectStreak) });
+          logInfo("nudge", { sid, event: "hold-injected", streak: rejectStreak, pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
+          debug.event("nudge-hold", { sid, streak: rejectStreak });
+        } else {
         const prevShown = epochReset ? 0 : preTurnNudgeShownTokens;
         const cadenceFloor = turn.nudge.breakdown?.growthFloor ?? 0;
         const suppressed = !emergency && prevShown > 0 && tokenCount - prevShown < cadenceFloor;
@@ -544,6 +608,7 @@ async function transformStreamCore(
           // The nudge rides the wire rebuild as the trailing user message —
           // coreToX emits it; same text the context path appends.
           coreOut.push({ id: `acp_nudge_${Date.now()}`, role: "user", contentType: "text", text: nudgeText(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, example) });
+        }
         }
       }
     }
@@ -632,6 +697,21 @@ function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts:
   return {
     role: "user",
     content: [{ type: "text", text: nudgeText(nudge, blocks, prompts, example) }],
+    timestamp: Date.now(),
+  } as AgentMessage;
+}
+
+// Issue #104: the nudge-to-hold text when compress calls are being rejected
+// in a row. The trailing marker phrase doubles as the feedback-view guard
+// match so a re-fed view does not stack a second hold.
+function holdText(streak: number): string {
+  return `[ACP hold] Your last ${streak} compress calls were rejected in a row. Do NOT call compress again now and do NOT retry the same range — the compress reminder is suspended until context actually changes. Continue the actual task. If context still needs relief, run acp_status first and target ONLY a range that meets the minimum size.`;
+}
+
+function holdMessage(streak: number): AgentMessage {
+  return {
+    role: "user",
+    content: [{ type: "text", text: holdText(streak) }],
     timestamp: Date.now(),
   } as AgentMessage;
 }
