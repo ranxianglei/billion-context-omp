@@ -24,7 +24,13 @@ import {
   openaiToCore,
   type BiliMessage,
 } from "acp-kernel/wire";
-import { defaultCountTokens, renderVisibleRefs, type CompressionState, type CoreMessage } from "acp-kernel";
+import {
+  createRenderRefsNode,
+  defaultCountTokens,
+  type CompressionState,
+  type Config,
+  type CoreMessage,
+} from "acp-kernel";
 import { compressToolArgs, stripRefTag } from "./messages.js";
 import type { AgentMessage, BlockLike, StreamCompressCall } from "./messages.js";
 import { createHash } from "node:crypto";
@@ -58,6 +64,84 @@ export function coreToPayloadMessages(
   return fmt === "anthropic" ? coreToAnthropic(msgs, cacheControls) : coreToOpenai(msgs);
 }
 
+/** Anthropic content-block types the kernel anthropicToCore switch parses.
+ *  Anything else (document, redacted_thinking, server_tool_use,
+ *  web_search_tool_result, ...) has no case and is silently DROPPED from the
+ *  rebuild (issue #3 review). */
+const ANTHROPIC_CODEC_BLOCKS = new Set(["text", "tool_use", "tool_result", "thinking", "image"]);
+
+/** OpenAI roles the kernel openaiToCore switch parses. Anything else has no
+ *  case and is silently dropped. */
+const OPENAI_CODEC_ROLES = new Set(["system", "developer", "user", "assistant", "tool"]);
+
+export type Representability = { ok: true } | { ok: false; reason: string };
+
+/** Whether the payloadToCore → coreToPayloadMessages round-trip can rebuild
+ *  this payload WITHOUT content loss. The sets above mirror the kernel
+ *  codec switches; everything they do not parse is dropped or flattened on
+ *  the rebuild. Unrepresentable payloads must fail the transform OPEN —
+ *  pass through untouched rather than lose content (issue #3 review). */
+export function payloadRepresentable(payload: unknown, fmt: ProviderWireFormat): Representability {
+  const messages = (payload as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return { ok: false, reason: "messages not an array" };
+  for (const message of messages) {
+    if (message === null || typeof message !== "object") return { ok: false, reason: "message not an object" };
+    const bad = fmt === "anthropic" ? unrepresentableAnthropicMessage(message) : unrepresentableOpenaiMessage(message);
+    if (bad) return { ok: false, reason: bad };
+  }
+  return { ok: true };
+}
+
+function unrepresentableAnthropicMessage(message: object): string | null {
+  const content = (message as { content?: unknown }).content;
+  if (content == null || typeof content === "string") return null;
+  if (!Array.isArray(content)) return "content neither string nor block array";
+  for (const block of content) {
+    const type = (block as { type?: unknown } | null)?.type;
+    if (typeof type !== "string" || !ANTHROPIC_CODEC_BLOCKS.has(type)) {
+      return `anthropic block type ${JSON.stringify(type) ?? "missing"}`;
+    }
+    if (type === "tool_result") {
+      const inner = (block as { content?: unknown }).content;
+      if (Array.isArray(inner) && inner.some((c) => (c as { type?: unknown } | null)?.type !== "text")) {
+        return "tool_result content carries non-text parts (images are flattened away)";
+      }
+    }
+    if (type === "thinking" && (block as { cache_control?: unknown }).cache_control != null) {
+      return "cache_control on a thinking block is not re-attached";
+    }
+  }
+  return null;
+}
+
+function unrepresentableOpenaiMessage(message: object): string | null {
+  const role = (message as { role?: unknown }).role;
+  if (typeof role !== "string" || !OPENAI_CODEC_ROLES.has(role)) {
+    return `openai role ${JSON.stringify(role) ?? "missing"}`;
+  }
+  const content = (message as { content?: unknown }).content;
+  if (content == null || typeof content === "string") return null;
+  if (!Array.isArray(content)) return "content neither string nor part array";
+  let dataImages = 0;
+  for (const part of content) {
+    if (typeof part === "string") continue;
+    const type = (part as { type?: unknown } | null)?.type;
+    if (type === "text") continue;
+    if (type === "image_url" && role === "user") {
+      const url = (part as { image_url?: { url?: unknown } } | null)?.image_url?.url;
+      if (typeof url !== "string" || !url.startsWith("data:")) return "image_url without a data: URL is dropped";
+      if (++dataImages > 1) return "second image_url in one message is dropped";
+      continue;
+    }
+    return `openai content part type ${JSON.stringify(type) ?? "missing"}`;
+  }
+  return null;
+}
+
+const renderRefsAll = createRenderRefsNode("all");
+
+export type WireTagRenderScope = { config: Config; tokenCount: number };
+
 /** omp's wire tag contract (issue #66) on top of the kernel's "text-only"
  *  render: the proxy keeps tool content pristine, but omp's nudge ranges
  *  target tool results — the model must be able to cite them by ref, so tag
@@ -65,19 +149,34 @@ export function coreToPayloadMessages(
  *  kernel's "text-only" also tags assistant text — strip it: the model
  *  echoes tags it sees on its own responses (the contract patchRefTag
  *  enforced in the AgentMessage bridge). Tool-call args stay clean (replay
- *  JSON-parses them). */
-export function applyWireTagContract(msgs: BiliMessage[], state: CompressionState): BiliMessage[] {
+ *  JSON-parses them).
+ *
+ *  Rendering goes through the kernel's render-refs NODE so token counts in
+ *  the tags come from the fold state's tokenSnapshot (written once per ref,
+ *  reused forever) instead of being recomputed per call; the updated
+ *  snapshot is written back into the fold state in place. Tool names are
+ *  re-attached from the call pieces first — the codecs drop them on
+ *  tool-result pieces and classifyType would render type="tool" where the
+ *  context path (and the system-prompt contract) shows the real name. */
+export function applyWireTagContract(
+  msgs: BiliMessage[],
+  state: CompressionState,
+  scope: WireTagRenderScope,
+): BiliMessage[] {
+  const stripAssistantTags = (m: BiliMessage): BiliMessage =>
+    m.contentType === "text" && m.role === "assistant" ? { ...m, text: stripRefTag(m.text ?? "") } : m;
   const toolResults = msgs.filter((m) => m.contentType === "tool-result");
-  const taggedTools =
-    toolResults.length > 0
-      ? (renderVisibleRefs(toolResults, state, defaultCountTokens, "all") as BiliMessage[])
-      : [];
-  const bySource = new Map(toolResults.map((m, i) => [m, taggedTools[i]]));
-  return msgs.map((m) => {
-    if (m.contentType === "tool-result") return bySource.get(m) ?? m;
-    if (m.contentType === "text" && m.role === "assistant") return { ...m, text: stripRefTag(m.text ?? "") };
-    return m;
-  });
+  if (toolResults.length === 0) return msgs.map(stripAssistantTags);
+  const names = toolCallNames(msgs);
+  const named = toolResults.map((m) => (m.toolName ? m : { ...m, toolName: names.get(m.toolCallId ?? "") ?? "tool" }));
+  const io = renderRefsAll.run(
+    { messages: named, state, effects: {} },
+    { config: scope.config, tokenCount: scope.tokenCount, countTokens: defaultCountTokens },
+  );
+  if (io.state !== state) state.tokenSnapshot = io.state.tokenSnapshot;
+  const tagged = io.messages as BiliMessage[];
+  const bySource = new Map(toolResults.map((m, i) => [m, tagged[i]]));
+  return msgs.map((m) => (m.contentType === "tool-result" ? bySource.get(m) ?? m : stripAssistantTags(m)));
 }
 
 /** Stable cross-turn identity for the core-space LCP fold. The text carries
