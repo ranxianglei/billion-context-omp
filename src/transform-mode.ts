@@ -41,3 +41,42 @@ export function resolveTransformMode(
   if (api === "openai-completions" && hostVersionAtLeast(OPENAI_COMPLETIONS_VIABLE_FROM, hostVersion)) return "provider";
   return "context";
 }
+
+export interface ProviderDeliveryWarning {
+  key: string;
+  reason: string;
+  message: string;
+}
+
+/** An explicit transformMode "provider" is an escape hatch for patched hosts
+ *  — but on stock hosts some APIs silently deliver NOTHING: before 17.3.8 the
+ *  host drops the before_provider_request replacement on openai-completions /
+ *  bedrock / cursor (upstream can1357/oh-my-pi#8717, issue #83), and bedrock /
+ *  cursor bodies still have no codec path even on newer hosts. The unset
+ *  default already avoids all of this; only an explicit override can land
+ *  here, so surface why instead of failing silently (ework issue #3). */
+export function providerDeliveryWarning(
+  adapter: Pick<AdapterConfig, "transformMode">,
+  model: { api?: string } | undefined,
+  hostVersion: string = VERSION,
+): ProviderDeliveryWarning | undefined {
+  if (adapter.transformMode !== "provider") return undefined;
+  const api = model?.api;
+  const dropWarning = (target: string): ProviderDeliveryWarning => ({
+    key: `drop:${target}`,
+    reason: `host < 17.3.8 drops the before_provider_request replacement on ${target} (fixed upstream pi-ai 17.3.8, can1357/oh-my-pi#8717)`,
+    message: `⚠ billion-context-omp: transformMode "provider" is set, but this host (pi-ai < 17.3.8) discards the rewritten payload on ${target} — compression is NOT applied. Upgrade the host (omp update) or remove the transformMode override.`,
+  });
+  if (api === "openai-completions" && !hostVersionAtLeast(OPENAI_COMPLETIONS_VIABLE_FROM, hostVersion)) {
+    return dropWarning(api);
+  }
+  if (api === "amazon-bedrock" || api === "cursor") {
+    if (!hostVersionAtLeast(OPENAI_COMPLETIONS_VIABLE_FROM, hostVersion)) return dropWarning(api);
+    return {
+      key: `nocodec:${api}`,
+      reason: `${api} honors the replacement from 17.3.8 but its wire body has no codec path yet (issue #83)`,
+      message: `⚠ billion-context-omp: transformMode "provider" is set, but the ${api} wire body has no codec path yet (#83) — compression is NOT applied. Remove the transformMode override to use context mode.`,
+    };
+  }
+  return undefined;
+}
