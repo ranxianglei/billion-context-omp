@@ -122,15 +122,16 @@ function unrepresentableOpenaiMessage(message: object): string | null {
   const content = (message as { content?: unknown }).content;
   if (content == null || typeof content === "string") return null;
   if (!Array.isArray(content)) return "content neither string nor part array";
-  let dataImages = 0;
   for (const part of content) {
     if (typeof part === "string") continue;
     const type = (part as { type?: unknown } | null)?.type;
     if (type === "text") continue;
     if (type === "image_url" && role === "user") {
       const url = (part as { image_url?: { url?: unknown } } | null)?.image_url?.url;
+      // Multiple data: images are representable: the kernel codec keeps ALL
+      // image parts (rawOpenaiContentParts) and re-emits them verbatim. Only
+      // non-data: URLs are unrepresentable (the codec cannot rebuild them).
       if (typeof url !== "string" || !url.startsWith("data:")) return "image_url without a data: URL is dropped";
-      if (++dataImages > 1) return "second image_url in one message is dropped";
       continue;
     }
     return `openai content part type ${JSON.stringify(type) ?? "missing"}`;

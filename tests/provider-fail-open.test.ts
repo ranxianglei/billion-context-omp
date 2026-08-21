@@ -110,7 +110,11 @@ test("payloadRepresentable: codec-known openai shapes pass, lossy shapes fail", 
   const unknownRole = { messages: [...clean.messages, { role: "function", name: "f", content: "x" }] };
   assert.equal(payloadRepresentable(unknownRole, "openai").ok, false);
 
-  const secondImage = {
+  // Multiple data: image_url parts in one message are representable: the
+  // kernel codec keeps all of them (rawOpenaiContentParts) and re-emits them
+  // verbatim, so the gate must not fail open (doing so silently disabled
+  // provider-mode compression for any image-heavy session).
+  const multipleDataImages = {
     messages: [
       { role: "user", content: [
         { type: "image_url", image_url: { url: "data:image/png;base64,aGk=" } },
@@ -118,7 +122,7 @@ test("payloadRepresentable: codec-known openai shapes pass, lossy shapes fail", 
       ] },
     ],
   };
-  assert.equal(payloadRepresentable(secondImage, "openai").ok, false);
+  assert.deepEqual(payloadRepresentable(multipleDataImages, "openai"), { ok: true });
 
   const remoteImage = {
     messages: [{ role: "user", content: [{ type: "text", text: "see" }, { type: "image_url", image_url: { url: "https://example.com/cat.png" } }] }],
