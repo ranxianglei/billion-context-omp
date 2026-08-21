@@ -28,7 +28,7 @@ const WIRE_SYSTEM = formatSystemPromptForEvent([SYSTEM], ACP)[0]!;
 
 type Msg = {
   role: string;
-  content: Array<{ type: string; text?: string; id?: string; name?: string; arguments?: unknown }>;
+  content: Array<{ type: string; text?: string; id?: string; name?: string; arguments?: unknown; thinking?: string; thinkingSignature?: string }>;
   toolName?: string;
   toolCallId?: string;
   isError?: boolean;
@@ -45,6 +45,10 @@ const assistantBase = {
 };
 const userMsg = (t: string): Msg => ({ role: "user", content: [{ type: "text", text: t }], timestamp: Date.now() });
 const botMsg = (t: string): Msg => ({ role: "assistant", ...assistantBase, content: [{ type: "text", text: t }] });
+const thinkBot = (t: string): Msg => ({
+  role: "assistant", ...assistantBase,
+  content: [{ type: "thinking", thinking: "Let me work through " + t, thinkingSignature: "reasoning_content" }, { type: "text", text: t }],
+});
 const toolCallMsg = (id: string, name: string, args: unknown): Msg => ({
   role: "assistant", ...assistantBase,
   content: [{ type: "toolCall", id, name, arguments: args }],
@@ -101,16 +105,19 @@ function openaiWire(session: Msg[]): Record<string, unknown> {
     if (m.role === "user") {
       messages.push({ role: "user", content: m.content.map((b) => b.text ?? "").join("\n") });
     } else if (m.role === "assistant") {
+      const thinking = m.content.filter((b) => b.type === "thinking" && (b.thinking ?? "").trim().length > 0).map((b) => b.thinking ?? "");
+      const reasoning = thinking.join("\n");
       const calls = m.content.filter((b) => b.type === "toolCall");
       const text = m.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n");
       if (calls.length > 0) {
         messages.push({
           role: "assistant",
           content: text,
+          ...(reasoning ? { reasoning_content: reasoning } : {}),
           tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.arguments ?? {}) } })),
         });
-      } else if (text) {
-        messages.push({ role: "assistant", content: text });
+      } else if (text || reasoning) {
+        messages.push({ role: "assistant", content: text, ...(reasoning ? { reasoning_content: reasoning } : {}) });
       }
     } else if (m.role === "toolResult") {
       messages.push({ role: "tool", tool_call_id: m.toolCallId, content: m.content.map((b) => b.text ?? "").join("\n") });
@@ -129,7 +136,8 @@ function anthropicWire(session: Msg[]): Record<string, unknown> {
     } else if (m.role === "assistant") {
       const blocks: unknown[] = [];
       for (const b of m.content) {
-        if (b.type === "text" && b.text) blocks.push({ type: "text", text: b.text });
+        if (b.type === "thinking" && (b.thinking ?? "").trim().length > 0) blocks.push({ type: "thinking", thinking: b.thinking, signature: b.thinkingSignature });
+        else if (b.type === "text" && b.text) blocks.push({ type: "text", text: b.text });
         else if (b.type === "toolCall") blocks.push({ type: "tool_use", id: b.id, name: b.name, input: b.arguments ?? {} });
       }
       messages.push({ role: "assistant", content: blocks });
@@ -376,4 +384,53 @@ test("context mode: session_switch after resume rebuilds the view fold (issue #1
   await host2.handlers.get("context")![0]!({ type: "context", messages: live }, host2.ctx);
   const post = await statusText(host2);
   assert.equal(activeBlocks(post), "1", "context-mode post-LLM acp_status still shows the block");
+});
+
+// Issue #103 (thinking): the live wire carries assistant thinking as
+// reasoning pieces (openai `reasoning_content` / anthropic thinking blocks).
+// When the prime mirror dropped them, every compress replay after a
+// thinking-bearing turn hit an index/fingerprint mismatch and restart showed
+// "Blocks: none" until the first provider request refolded.
+test("provider+openai: restart primeFold rebuilds blocks from thinking-bearing turns (issue #103)", async () => {
+  const session: Msg[] = [];
+  for (let i = 0; i < 7; i++) {
+    session.push(userMsg(`u${i} ` + FILLER));
+    session.push(thinkBot(`b${i} ` + FILLER));
+  }
+
+  // process 1: live session where every assistant turn carries thinking
+  const host = makeHost(session, "p103-think", openaiWire);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(host.api as ExtensionAPI);
+  await livePhase(host, session);
+
+  // process 2: restart — /acp must show the block BEFORE any LLM call
+  const host2 = makeHost(session, "p103-think", openaiWire);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+  const prime = await statusText(host2);
+  assert.equal(activeBlocks(prime), "1", "post-restart pre-LLM acp_status shows the block:\n" + prime);
+
+  const out = await llmCall(host2, host2.wire(session));
+  const flat = JSON.stringify(out ?? {});
+  assert.ok(flat.includes("COVERED WORK SUMMARY"), "post-restart wire payload carries the summary");
+  const post = await statusText(host2);
+  assert.equal(activeBlocks(post), "1", "post-restart post-LLM acp_status still shows the block");
+});
+
+test("provider+anthropic: restart primeFold rebuilds blocks from thinking-bearing turns (issue #103)", async () => {
+  const session: Msg[] = [];
+  for (let i = 0; i < 7; i++) {
+    session.push(userMsg(`u${i} ` + FILLER));
+    session.push(thinkBot(`b${i} ` + FILLER));
+  }
+
+  const host = makeHost(session, "p103-think-a", anthropicWire, { api: "anthropic-messages", contextWindow: 200_000 });
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(host.api as ExtensionAPI);
+  await livePhase(host, session);
+
+  const host2 = makeHost(session, "p103-think-a", anthropicWire, { api: "anthropic-messages", contextWindow: 200_000 });
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+  const prime = await statusText(host2);
+  assert.equal(activeBlocks(prime), "1", "anthropic post-restart pre-LLM acp_status shows the block:\n" + prime);
 });

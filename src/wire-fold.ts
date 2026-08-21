@@ -531,22 +531,32 @@ export function viewToCoreStream(view: AgentMessage[], systemText: string): Bili
       if (text) messages.push({ role: "user", content: text });
     } else if (m.role === "assistant") {
       const blocks = Array.isArray(m.content) ? m.content : [];
-      const calls = (blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown }>).filter(
-        (b) => b !== null && typeof b === "object" && b.type === "toolCall",
-      );
+      const typed = blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown; thinking?: unknown }>;
+      const calls = typed.filter((b) => b !== null && typeof b === "object" && b.type === "toolCall");
+      // Thinking blocks ride the openai wire as the `reasoning_content` field
+      // (host encoder, zai/replay paths); the kernel codec turns each one into
+      // an assistant/reasoning piece. Dropping them shifted every index and
+      // fingerprint after a thinking-bearing turn, so restart replay guards
+      // rejected the in-stream compress calls and /acp showed no blocks
+      // until the first provider request (issue #103).
+      const reasoning = typed
+        .filter((b) => b !== null && typeof b === "object" && b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0)
+        .map((b) => b.thinking as string)
+        .join("\n");
       const text = extractViewText(m.content);
       if (calls.length > 0) {
         messages.push({
           role: "assistant",
           content: text,
+          ...(reasoning ? { reasoning_content: reasoning } : {}),
           tool_calls: calls.map((c) => ({
             id: c.id,
             type: "function",
             function: { name: c.name ?? "", arguments: JSON.stringify(c.arguments ?? {}) },
           })),
         });
-      } else if (text) {
-        messages.push({ role: "assistant", content: text });
+      } else if (text || reasoning) {
+        messages.push({ role: "assistant", content: text, ...(reasoning ? { reasoning_content: reasoning } : {}) });
       }
     } else if (m.role === "toolResult") {
       messages.push({ role: "tool", tool_call_id: m.toolCallId ?? "", content: extractViewText(m.content) });
@@ -573,16 +583,29 @@ export function viewToAnthropicCore(view: AgentMessage[]): BiliMessage[] {
       if (text) messages.push({ role: "user", content: [{ type: "text", text }] });
     } else if (m.role === "assistant") {
       const blocks = Array.isArray(m.content) ? m.content : [];
-      const calls = (blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown }>).filter(
-        (b) => b !== null && typeof b === "object" && b.type === "toolCall",
-      );
-      const text = extractViewText(m.content);
+      const typed = blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown; text?: unknown; thinking?: unknown; thinkingSignature?: unknown }>;
+      // Signed thinking blocks ride the live anthropic wire as {type:"thinking"}
+      // blocks; the kernel codec maps each to an assistant/reasoning piece
+      // (issue #103 — same parity reasoning as the openai mirror above).
+      // Unsigned thinking is demoted to text by the live encoder; mirroring it
+      // as a thinking block then diverges, the span guard rejects the replay
+      // and the preview falls back to rebuilding at the first request.
       const content: Array<Record<string, unknown>> = [];
-      if (text) content.push({ type: "text", text });
-      for (const c of calls) {
-        let input: unknown = {};
-        try { input = c.arguments && typeof c.arguments === "object" ? c.arguments : JSON.parse(JSON.stringify(c.arguments ?? {})); } catch { input = {}; }
-        content.push({ type: "tool_use", id: c.id, name: c.name ?? "", input });
+      for (const b of typed) {
+        if (b === null || typeof b !== "object") continue;
+        if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0) {
+          content.push({
+            type: "thinking",
+            thinking: b.thinking,
+            ...(typeof b.thinkingSignature === "string" && b.thinkingSignature ? { signature: b.thinkingSignature } : {}),
+          });
+        } else if (b.type === "text" && typeof b.text === "string" && stripRefTag(b.text).trim().length > 0) {
+          content.push({ type: "text", text: stripRefTag(b.text) });
+        } else if (b.type === "toolCall") {
+          let input: unknown = {};
+          try { input = b.arguments && typeof b.arguments === "object" ? b.arguments : JSON.parse(JSON.stringify(b.arguments ?? {})); } catch { input = {}; }
+          content.push({ type: "tool_use", id: b.id, name: b.name ?? "", input });
+        }
       }
       if (content.length > 0) messages.push({ role: "assistant", content });
     } else if (m.role === "toolResult") {
