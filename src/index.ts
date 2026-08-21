@@ -57,6 +57,32 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
 export default createAcpExtension();
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  // Restart+resume (/resume, /fork, handoff, reload) fires session_switch —
+  // NOT session_start — with the transcript already loaded; session_start on
+  // a resumed boot fires before the old transcript is mounted. Without a
+  // switch handler the fold is never primed and /acp shows "Blocks: none"
+  // until the first LLM call (issue #103). Config/prompts re-resolution is
+  // idempotent and keeps the switch path self-sufficient when session_start
+  // never saw this session.
+  const prepareAndPrime = async (ctx: ExtensionContext, phase: string): Promise<void> => {
+    const sid = ctx.sessionManager.getSessionId();
+    try {
+      const user = await loadUserConfig(ctx.cwd);
+      runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+      if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
+    } catch (e) {
+      logThrow("config", e, { sid, phase });
+    }
+    try {
+      runtime.setPrompts(resolvePrompts(runtime.adapter.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
+    } catch (e) {
+      logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
+      runtime.setPrompts(defaultPrompts);
+    }
+    // Rebuild blocks from the persisted session right away so /acp and
+    // acp_status show them immediately on resume — before the first LLM call.
+    runtime.primeFold(ctx);
+  };
   pi.on("session_start", async (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
@@ -75,22 +101,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
         // notify unavailable — log line above is the durable record
       }
     }
-    try {
-      const user = await loadUserConfig(ctx.cwd);
-      runtime.setAdapter(applyUserConfig(runtime.adapter, user));
-      if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
-    } catch (e) {
-      logThrow("config", e, { sid, phase: "session_start" });
-    }
-    try {
-      runtime.setPrompts(resolvePrompts(runtime.adapter.prompts, { acknowledgeRisk: runtime.adapter.acknowledgePromptsRisk === true }));
-    } catch (e) {
-      logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
-      runtime.setPrompts(defaultPrompts);
-    }
-    // Rebuild blocks from the persisted session right away so /acp and
-    // acp_status show them immediately on resume — before the first LLM call.
-    runtime.primeFold(ctx);
+    await prepareAndPrime(ctx, "session_start");
     // Fire-and-forget: the registry fetch (5s) or an auto-install (60s)
     // must not sit on the session-start critical path (issue #89). A
     // short-lived host still cannot exit mid-install: autoInstallLatest's
@@ -98,6 +109,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     }).catch((e) => logThrow("update", e, { sid, phase: "session_start" }));
+  });
+  pi.on("session_switch", async (event, ctx) => {
+    logInfo("session", { event: "switch", sid: ctx.sessionManager.getSessionId(), reason: event.reason, previous: event.previousSessionFile ?? null });
+    await prepareAndPrime(ctx, "session_switch");
+  });
+  pi.on("session_branch", async (_event, ctx) => {
+    logInfo("session", { event: "branch", sid: ctx.sessionManager.getSessionId() });
+    await prepareAndPrime(ctx, "session_branch");
   });
   pi.on("session_shutdown", (_event, ctx) => {
     try {

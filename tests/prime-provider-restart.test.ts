@@ -270,3 +270,110 @@ test("context mode: restart primeFold folds the session view (unchanged path)", 
   const post = await statusText(host2);
   assert.equal(activeBlocks(post), "1", "context-mode post-LLM acp_status still shows the block");
 });
+
+// Issue #103: `omp --resume` / reload / fork boots fire session_start
+// BEFORE the old transcript is mounted (prime sees an empty view), then
+// session_switch (or session_branch) once it is loaded. Without a handler
+// for those events the fold is never primed for the resumed session and
+// /acp shows "Blocks: none" until the first LLM call.
+
+test("provider+openai: session_switch after resume rebuilds the block BEFORE the first provider request (issue #103)", async () => {
+  const session: Msg[] = [];
+  for (let i = 0; i < 7; i++) {
+    session.push(userMsg(`u${i} ` + FILLER));
+    session.push(botMsg(`b${i} ` + FILLER));
+  }
+
+  // process 1: live provider-mode session
+  const host = makeHost(session, "p103-openai", openaiWire);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(host.api as ExtensionAPI);
+  await livePhase(host, session);
+
+  // process 2: restart+resume — the extension boots with an EMPTY session;
+  // the transcript lands afterwards (switchSession load), then the host
+  // emits session_switch with reason "resume".
+  const live: Msg[] = [];
+  const host2 = makeHost(live, "p103-openai", openaiWire);
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+  const before = await statusText(host2);
+  assert.equal(activeBlocks(before), "0", "session_start saw the empty pre-resume view");
+
+  live.push(...session);
+  await host2.handlers.get("session_switch")![0]!({ type: "session_switch", reason: "resume", previousSessionFile: "/tmp/p103-openai.json" }, host2.ctx);
+
+  // The regression: /acp / acp_status right after resume, before any LLM
+  // call, must already show the block.
+  const prime = await statusText(host2);
+  assert.equal(activeBlocks(prime), "1", "post-resume pre-LLM acp_status shows the block:\n" + prime);
+
+  // The first provider request re-folds authoritatively and must keep it.
+  const out = await llmCall(host2, host2.wire(live));
+  const flat = JSON.stringify(out ?? {});
+  assert.ok(flat.includes("COVERED WORK SUMMARY"), "post-resume wire payload carries the summary");
+  const post = await statusText(host2);
+  assert.equal(activeBlocks(post), "1", "post-resume post-LLM acp_status still shows the block");
+});
+
+test("provider+anthropic: session_branch also rebuilds the block before the first provider request (issue #103)", async () => {
+  const session: Msg[] = [];
+  for (let i = 0; i < 7; i++) {
+    session.push(userMsg(`u${i} ` + FILLER));
+    session.push(botMsg(`b${i} ` + FILLER));
+  }
+
+  const host = makeHost(session, "p103-anthropic", anthropicWire, { api: "anthropic-messages", contextWindow: 200_000 });
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(host.api as ExtensionAPI);
+  await livePhase(host, session);
+
+  const live: Msg[] = [...session];
+  const host2 = makeHost(live, "p103-anthropic", anthropicWire, { api: "anthropic-messages", contextWindow: 200_000 });
+  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+  await host2.handlers.get("session_branch")![0]!({ type: "session_branch", previousSessionFile: "/tmp/p103-anthropic.json" }, host2.ctx);
+
+  const prime = await statusText(host2);
+  assert.equal(activeBlocks(prime), "1", "post-branch pre-LLM acp_status shows the block:\n" + prime);
+
+  const out = await llmCall(host2, host2.wire(live));
+  const flat = JSON.stringify(out ?? {});
+  assert.ok(flat.includes("COVERED WORK SUMMARY"), "post-branch wire payload carries the summary");
+  assert.ok(!flat.includes(`u2 ${FILLER.slice(0, 20)}`), "post-branch wire payload prunes the covered filler");
+  const post = await statusText(host2);
+  assert.equal(activeBlocks(post), "1", "post-branch post-LLM acp_status still shows the block");
+});
+
+test("context mode: session_switch after resume rebuilds the view fold (issue #103)", async () => {
+  const session: Msg[] = [];
+  for (let i = 0; i < 7; i++) {
+    session.push(userMsg(`u${i} ` + FILLER));
+    session.push(botMsg(`b${i} ` + FILLER));
+  }
+
+  const host = makeHost(session, "p103-ctx", openaiWire);
+  createAcpExtension({ transformMode: "context", autoUpdate: false } as never)(host.api as ExtensionAPI);
+  await host.handlers.get("session_start")![0]!({ type: "session_start" }, host.ctx);
+  const fireCtx = () => host.handlers.get("context")![0]!({ type: "context", messages: session }, host.ctx);
+  await fireCtx();
+  const args = { content: [{ startId: "m00001", endId: "m00013", summary: SUMMARY }] };
+  const res: AgentToolResult<unknown> = await host.tools.get("compress")!.execute("call_c1", args, undefined, undefined, host.ctx);
+  const resText = (res.content as Array<{ text?: string }>).map((b) => b.text ?? "").join("\n");
+  assert.match(resText, /\[fp=[0-9a-f,-]+\]/, "compress result carries span fingerprints");
+  session.push(toolCallMsg("call_c1", "compress", args));
+  session.push(toolResultMsg("call_c1", "compress", resText));
+  session.push(userMsg("tail " + FILLER));
+  await fireCtx();
+
+  const live: Msg[] = [];
+  const host2 = makeHost(live, "p103-ctx", openaiWire);
+  createAcpExtension({ transformMode: "context", autoUpdate: false } as never)(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+  live.push(...session);
+  await host2.handlers.get("session_switch")![0]!({ type: "session_switch", reason: "resume", previousSessionFile: "/tmp/p103-ctx.json" }, host2.ctx);
+
+  const prime = await statusText(host2);
+  assert.equal(activeBlocks(prime), "1", "context-mode post-resume acp_status shows the block:\n" + prime);
+  await host2.handlers.get("context")![0]!({ type: "context", messages: live }, host2.ctx);
+  const post = await statusText(host2);
+  assert.equal(activeBlocks(post), "1", "context-mode post-LLM acp_status still shows the block");
+});
