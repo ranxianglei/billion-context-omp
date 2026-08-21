@@ -370,7 +370,7 @@ test("viewToCoreStream mirrors thinking blocks as reasoning pieces (issue #103)"
   const callIdx = core.findIndex((m) => m.contentType === "tool-call" && m.toolCallId === "t1");
   const reasoningIdx = core.findIndex((m) => m.contentType === "reasoning" && m.text === "plan the call");
   assert.ok(reasoningIdx >= 0 && callIdx > reasoningIdx, "reasoning piece precedes its tool-call piece");
-  assert.ok(!core.some((m) => m.contentType === "reasoning" && m.text.trim() === ""), "whitespace-only thinking dropped");
+  assert.ok(!core.some((m) => m.contentType === "reasoning" && !(m.text ?? "").trim()), "whitespace-only thinking dropped");
 });
 
 test("viewToAnthropicCore mirrors thinking blocks as reasoning pieces (issue #103)", () => {
