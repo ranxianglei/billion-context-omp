@@ -127,9 +127,10 @@ export function payloadRepresentable(payload: unknown, fmt: ProviderWireFormat):
 
 /** Responses round-trip guard: the kernel codec parses every known item
  *  type (unknown types pass through as preamble verbatim), with ONE lossy
- *  case — a `type: "message"` item with role system/developer is folded
- *  into `systemParts` and dropped from the rebuilt input. omp never emits
- *  those (system rides top-level `instructions`), so fail open on them. */
+ *  case — a message item with role system/developer (typed or EasyInput
+ *  shorthand) is folded into `systemParts` and dropped from the rebuilt
+ *  input. omp never emits those (system rides top-level `instructions`),
+ *  so fail open on them. */
 function responsesRepresentable(payload: unknown): Representability {
   const input = (payload as { input?: unknown }).input;
   if (typeof input === "string") return { ok: true };
@@ -137,7 +138,7 @@ function responsesRepresentable(payload: unknown): Representability {
   for (const item of input) {
     if (item === null || typeof item !== "object") return { ok: false, reason: "input item not an object" };
     const { type, role } = item as { type?: unknown; role?: unknown };
-    if (type === "message" && (role === "system" || role === "developer")) {
+    if ((type === "message" || type === undefined) && (role === "system" || role === "developer")) {
       return { ok: false, reason: "input message role system/developer is folded into systemParts and dropped on rebuild" };
     }
   }

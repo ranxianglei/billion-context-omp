@@ -100,6 +100,8 @@ test("payloadRepresentable: system/developer message items inside input fail ope
   const bad = payloadRepresentable({ input: [{ type: "message", role: "system", content: "s" }] }, "responses");
   assert.equal(bad.ok, false);
   if (!bad.ok) assert.match(bad.reason, /systemParts/);
+  const easyBad = payloadRepresentable({ input: [{ role: "developer", content: "s" }] }, "responses");
+  assert.equal(easyBad.ok, false, "EasyInput shorthand system/developer also folds into systemParts");
   assert.equal(payloadRepresentable({ model: "x" }, "responses").ok, false, "input missing → unrepresentable");
 });
 
