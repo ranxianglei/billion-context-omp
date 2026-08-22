@@ -43,7 +43,7 @@ function fakeCtx() {
     hasUI: false,
     cwd: "/tmp",
     ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-    model: { contextWindow: 200_000 },
+    model: { contextWindow: 200_000, api: "anthropic-messages" },
     sessionManager: {
       getSessionId: () => "test-session",
       getSessionFile: () => "/tmp/nonexistent-omp-it.session.json",
@@ -58,13 +58,13 @@ function userMsg(text: string) {
 function assistantCompressCall(callId: string, ranges: Array<{ startId: string; endId: string; summary: string }>) {
   return {
     role: "assistant",
-    content: [{ type: "toolCall", id: callId, name: "compress", arguments: JSON.stringify({ content: ranges }) }],
+    content: [{ type: "tool_use", id: callId, name: "compress", input: { content: ranges } }],
     timestamp: Date.now(),
   };
 }
 
 function toolResult(callId: string, text: string) {
-  return { role: "toolResult", content: [{ type: "text", text }], toolName: "compress", toolCallId: callId, timestamp: Date.now() };
+  return { role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: text }], timestamp: Date.now() };
 }
 
 function refOf(message: any): string {
@@ -79,7 +79,7 @@ function bigText(seed: string) {
 
 test("factory registers the compress tool and 4 flat commands", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "context" } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
 
   assert.ok(api.tools.some((t) => t.name === "compress"), "compress tool registered");
   assert.deepEqual([...api.commands.keys()].sort(), ["acp", "acp-decompress", "acp-search", "acp-status"]);
@@ -90,7 +90,7 @@ test("factory registers the compress tool and 4 flat commands", () => {
 
 test("before_agent_start appends the ACP system prompt", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "context" } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, fakeCtx());
   const sp = result.systemPrompt.join("\n");
   assert.ok(sp.startsWith("BASE"));
@@ -100,10 +100,10 @@ test("before_agent_start appends the ACP system prompt", () => {
 
 test("context handler tags every stream message with sequential refs (no tree access needed)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
 
   const stream = [userMsg("first"), userMsg("second"), userMsg("third")];
-  const result = await handlers.get("context")![0]!({ type: "context", messages: stream }, fakeCtx());
+  const result = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: stream } }, fakeCtx());
   assert.ok(result, "must return transformed array so tags apply");
   const out = result.messages;
   assert.equal(out.length, 3);
@@ -114,8 +114,8 @@ test("context handler tags every stream message with sequential refs (no tree ac
 
 test("refs stay stable as the stream grows (append-only turns)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
-  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, fakeCtx());
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
+  const fire = (messages: any[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, fakeCtx());
 
   const turn1 = [userMsg(bigText("one")), userMsg("short")];
   const r1 = await fire(turn1);
@@ -128,8 +128,8 @@ test("refs stay stable as the stream grows (append-only turns)", async () => {
 
 test("metadata fields (attribution, usage, timestamps) never shift refs", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
-  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, fakeCtx());
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
+  const fire = (messages: any[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, fakeCtx());
 
   const base = [userMsg(bigText("meta")), { role: "assistant", content: [{ type: "text", text: "answer" }] }];
   const r1 = await fire(base);
@@ -147,9 +147,9 @@ test("metadata fields (attribution, usage, timestamps) never shift refs", async 
 
 test("compress tool prunes the covered range on the next context event", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: any[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
 
   const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
   const r1 = await fire(stream);
@@ -172,9 +172,9 @@ test("compress tool prunes the covered range on the next context event", async (
 
 test("in-stream compress calls are deduped — a replayed tool call does not double-apply", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: any[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
 
   const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
   const r1 = await fire(stream);
@@ -197,23 +197,23 @@ test("in-stream compress calls are deduped — a replayed tool call does not dou
 
 test("restart recovery: a fresh extension rebuilds blocks by replaying in-stream compress calls", async () => {
   const first = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(first.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(first.api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
-  const r1 = await first.handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  const r1 = await first.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: stream } }, ctx);
   const start = refOf(r1.messages[0]);
   const end = refOf(r1.messages[1]);
 
   const call = assistantCompressCall("call_c1", [{ startId: start, endId: end, summary: "Both large messages were compressed into this durable summary before the restart." }]);
   const withCall = [...stream, call, toolResult("call_c1", "compressed 1 block"), userMsg("post-compress turn")];
-  await first.handlers.get("context")![0]!({ type: "context", messages: withCall }, ctx);
+  await first.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: withCall } }, ctx);
 
   // New process: brand-new extension instance, no sidecar state file — the
   // stream alone must reconstruct the block.
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
-  const r3 = await second.handlers.get("context")![0]!({ type: "context", messages: withCall }, ctx);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(second.api as unknown as ExtensionAPI);
+  const r3 = await second.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: withCall } }, ctx);
 
   const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
   // First user message is protected by kernel design; the second covered
@@ -228,12 +228,12 @@ test("restart recovery: a fresh extension rebuilds blocks by replaying in-stream
 
 test("restart replay skips compress calls that were rejected live", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const filler = (n: string) => `filler ${n} `.repeat(400);
   const stream = [userMsg(bigText("rejected target")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(filler(n)))];
-  const r1 = await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  const r1 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: stream } }, ctx);
   const targetRef = refOf(r1.messages[0]);
 
   // The model issued a compress call live, and the tool REJECTED it.
@@ -243,12 +243,12 @@ test("restart replay skips compress calls that were rejected live", async () => 
     rejectedCall,
     toolResult("call_r1", "Compression rejected: Total compressible content too small (12 chars across 1 range(s), min 5000).. No changes applied — run acp_status to verify current state."),
   ];
-  await handlers.get("context")![0]!({ type: "context", messages: withRejection }, ctx);
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: withRejection } }, ctx);
 
   // Restart: fresh extension must NOT resurrect the rejected call.
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
-  const r2 = await second.handlers.get("context")![0]!({ type: "context", messages: withRejection }, ctx);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(second.api as unknown as ExtensionAPI);
+  const r2 = await second.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: withRejection } }, ctx);
   const statusTool = second.api.tools.find((t) => t.name === "acp_status")!;
   const status = await statusTool.execute("tc-rejected", {}, undefined, undefined, ctx);
   assert.doesNotMatch(status.content[0].text, /\d+ active/, "rejected call must not replay into a block");
@@ -257,14 +257,14 @@ test("restart replay skips compress calls that were rejected live", async () => 
 
 test("host compaction rewriting the prefix must NOT replay stale compress calls onto shifted positions", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   // 40 large user messages, model compresses m00005..m00035 (call at pos 36..37).
   const filler = (n: number) => `message number ${n} `.repeat(120);
   const stream: any[] = [];
   for (let i = 1; i <= 40; i++) stream.push(userMsg(filler(i)));
-  const r1 = await handlers.get("context")![0]!({ type: "context", messages: [...stream] }, ctx);
+  const r1 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: [...stream] } }, ctx);
   const startRef = refOf(r1.messages[4]);
   const endRef = refOf(r1.messages[34]);
 
@@ -284,51 +284,21 @@ test("host compaction rewriting the prefix must NOT replay stale compress calls 
   const rewritten = [userMsg(bigText("host compaction summary")), ...compacted.slice(5)];
 
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
-  await second.handlers.get("context")![0]!({ type: "context", messages: rewritten }, ctx);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(second.api as unknown as ExtensionAPI);
+  await second.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: rewritten } }, ctx);
   const statusTool = second.api.tools.find((t) => t.name === "acp_status")!;
   const status = await statusTool.execute("tc_fp2", {}, undefined, undefined, ctx);
   assert.doesNotMatch(status.content[0].text, /\d+ active/, "stale call must NOT replay onto shifted positions");
 });
 
-test("issue #35: the compactionSummary message is itself already compressed and must never be recommended", async () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
-  const ctx = fakeCtx();
-
-  // After native /compact, the stream starts with the compaction entry
-  // re-projected as a role:"compactionSummary" message (summary field, no
-  // content). That message is itself an already-compressed record — ACP must
-  // account for it like its own block summaries, not recommend compressing it.
-  const compactionMsg = {
-    role: "compactionSummary",
-    summary: "Prior conversation summarized in detail. ".repeat(200),
-    shortSummary: "prior work",
-    tokensBefore: 80_000,
-    timestamp: Date.now(),
-  };
-  const stream = [compactionMsg, ...Array.from({ length: 7 }, (_, i) => userMsg(bigText(`kept ${i + 1}`)))];
-  const r = await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
-  assert.equal(refOf(r.messages[0]), "m00001", "compaction message takes the first ref");
-
-  const statusTool = api.tools.find((t) => t.name === "acp_status")!;
-  const status = await statusTool.execute("tc_i35", {}, undefined, undefined, ctx);
-  const text = (status as any).content[0].text;
-  const idx = text.indexOf("Compressible ranges");
-  assert.ok(idx >= 0, "status reports compressible ranges");
-  const rangesSection = text.slice(idx);
-  assert.doesNotMatch(rangesSection, /m00001/, "compaction summary must not appear in any compressible range");
-  assert.match(rangesSection, /m00002/, "kept messages are still recommended");
-});
-
 test("live-rejected compress call stays rejected on the next INCREMENTAL context event", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const filler = (n: number) => `content ${n} `.repeat(600);
   const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), userMsg(filler(1)), userMsg(filler(2)), userMsg(filler(3)), userMsg(filler(4)), userMsg(filler(5)), userMsg(filler(6))];
-  const r1 = await handlers.get("context")![0]!({ type: "context", messages: [...stream] }, ctx);
+  const r1 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: [...stream] } }, ctx);
   const ref1 = refOf(r1.messages[0]);
   const ref2 = refOf(r1.messages[1]);
   const compress = api.tools.find((t) => t.name === "compress")!;
@@ -344,7 +314,7 @@ test("live-rejected compress call stays rejected on the next INCREMENTAL context
 
   // Next context event: the stream now carries the call + rejection result.
   const stream2 = [...stream, assistantCompressCall("tc_ok", [{ startId: ref1, endId: ref2, summary: "First target compressed with a summary that is definitely long enough to pass." }]), toolResult("tc_ok", (ok as any).content[0].text), assistantCompressCall("tc_dup", [{ startId: ref1, endId: ref2, summary: "Duplicate attempt with a summary that is definitely long enough to pass." }]), toolResult("tc_dup", (rejected as any).content[0].text), userMsg(filler(7))];
-  await handlers.get("context")![0]!({ type: "context", messages: stream2 }, ctx);
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: stream2 } }, ctx);
 
   const statusTool = api.tools.find((t) => t.name === "acp_status")!;
   const status = await statusTool.execute("tc_inc", {}, undefined, undefined, ctx);
@@ -354,9 +324,9 @@ test("live-rejected compress call stays rejected on the next INCREMENTAL context
 
 test("tail rewind (retry) re-folds deterministically without losing prefix refs", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: any[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
 
   const prefix = [userMsg(bigText("stable one")), userMsg(bigText("stable two"))];
   const abandonedTail = [userMsg("abandoned question"), { role: "assistant", content: [{ type: "text", text: "abandoned answer" }] }];
@@ -373,11 +343,11 @@ test("tail rewind (retry) re-folds deterministically without losing prefix refs"
 
 test("acp_status refs remain usable by the next compress call", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const stream = [userMsg(bigText("status target")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
-  await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: stream } }, ctx);
 
   const statusTool = api.tools.find((t) => t.name === "acp_status")!;
   const status = await statusTool.execute("tc-status", {}, undefined, undefined, ctx);
@@ -391,7 +361,7 @@ test("acp_status refs remain usable by the next compress call", async () => {
 
 test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "context" } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, fakeCtx());
   const sp = result.systemPrompt.join("\n");
   assert.ok(sp.includes("Work from summaries, not raw tool outputs"), "kernel COMPRESS_PHILOSOPHY inlined");
@@ -416,9 +386,9 @@ test("system prompt never includes the ACP_DELEGATE NOTIFICATIONS section (omp d
 
 test("restart replay preserves tier-2 blocks (block-boundary ranges must not be treated as stale)", async () => {
   const first = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(first.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(first.api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: any[]) => first.handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: any[]) => first.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
 
   const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
   const r1 = await fire(stream);
@@ -440,8 +410,8 @@ test("restart replay preserves tier-2 blocks (block-boundary ranges must not be 
 
   // New process: the stream alone must rebuild BOTH tiers.
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
-  const r3 = await second.handlers.get("context")![0]!({ type: "context", messages: withCalls }, ctx);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(second.api as unknown as ExtensionAPI);
+  const r3 = await second.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: withCalls } }, ctx);
   const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
   assert.ok(!texts.includes("second large enough"), "covered original stays pruned under the tier-2 block");
 
@@ -454,9 +424,9 @@ test("restart replay preserves tier-2 blocks (block-boundary ranges must not be 
 
 test("mixed message/block boundary batch keeps fingerprint index alignment on replay", async () => {
   const first = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(first.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(first.api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: any[]) => first.handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: any[]) => first.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
 
   const stream = [userMsg(bigText("first")), userMsg(bigText("second")), userMsg(bigText("third")), ...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} `.repeat(400)))];
   const r1 = await fire(stream);
@@ -482,8 +452,8 @@ test("mixed message/block boundary batch keeps fingerprint index alignment on re
   const withCalls = [...stream, call1, toolResult("call_c1", res1.content[0].text), call2, toolResult("call_c2", res2.content[0].text), userMsg("post mixed-batch turn")];
 
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
-  const r3 = await second.handlers.get("context")![0]!({ type: "context", messages: withCalls }, ctx);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(second.api as unknown as ExtensionAPI);
+  const r3 = await second.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: withCalls } }, ctx);
   const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
   assert.ok(!texts.includes("second large enough"), "block-range content stays pruned (call not mis-skipped)");
   assert.ok(!texts.includes("third large enough"), "message-range content stays pruned");
@@ -501,18 +471,18 @@ test("mixed message/block boundary batch keeps fingerprint index alignment on re
 // so the boundary fingerprints match) — no block loss, no double-apply.
 test("mid-stream mutation triggers re-fold and the in-stream compress call still replays", async () => {
   const cap = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(cap.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(cap.api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   const fillers = (s: string) => [...["a", "b", "c", "d", "e", "f", "g"].map((n) => userMsg(`filler ${n} ${s} `.repeat(400)))];
   const stream = [userMsg(bigText("first")), userMsg(bigText("second")), ...fillers("v1")];
-  const r1 = await cap.handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  const r1 = await cap.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: stream } }, ctx);
   const start = refOf(r1.messages[0]);
   const end = refOf(r1.messages[1]);
 
   const call = assistantCompressCall("call_mut", [{ startId: start, endId: end, summary: "Both large messages were compressed before the mid-stream mutation." }]);
   const applied = [...stream, call, toolResult("call_mut", "compressed 1 block")];
-  await cap.handlers.get("context")![0]!({ type: "context", messages: applied }, ctx);
+  await cap.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: applied } }, ctx);
 
   // Mutate a filler that sits AFTER the covered range but BEFORE the tail:
   // the LCP check fails at that position → freshSlot → full re-fold →
@@ -520,7 +490,7 @@ test("mid-stream mutation triggers re-fold and the in-stream compress call still
   const mutated = [applied[0], applied[1], ...applied.slice(2).map((m: any, i: number) =>
     i === 2 ? { ...m, content: [{ type: "text", text: m.content[0].text.replaceAll("filler c v1", "filler c REWRITTEN v2") }] } : m,
   ), userMsg("post-mutation turn")];
-  const r3 = await cap.handlers.get("context")![0]!({ type: "context", messages: mutated }, ctx);
+  const r3 = await cap.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: mutated } }, ctx);
 
   const texts = r3.messages.map((m: any) => JSON.stringify(m.content)).join("\n");
   assert.ok(!texts.includes("second large enough"), "covered original stays pruned after re-fold (call replayed)");
@@ -544,7 +514,7 @@ test("mid-stream mutation triggers re-fold and the in-stream compress call still
 // top-level ("essential") so the model calls them with structured args.
 test("all ACP tools are registered as essential (top-level, not xd:// devices)", async () => {
   const cap = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(cap.api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(cap.api as unknown as ExtensionAPI);
   const expected = ["compress", "decompress", "search_context", "acp_status"];
   assert.equal(cap.api.tools.length, expected.length, `expected ${expected.length} tools`);
   for (const name of expected) {

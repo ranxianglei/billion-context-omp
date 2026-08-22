@@ -16,7 +16,6 @@ import { resolveConfig, type AdapterConfig } from "./config.js";
 import { debug, logInfo, logWarn } from "./log.js";
 import { getSystemPromptText } from "./compat.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
-import { resolveTransformMode } from "./transform-mode.js";
 import {
   coreIdentity,
   findCompressCallsCore,
@@ -25,16 +24,10 @@ import {
   toolResultTextsCore,
   viewToAnthropicCore,
   viewToCoreStream,
+  viewToResponsesCore,
 } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
-import { boundaryRaw, findCompressCalls, isBlockRef, messageIdentity, rawPos, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage, type BlockLike } from "./messages.js";
-
-export interface FoldResult {
-  state: CompressionState;
-  coreMessages: CoreMessage[];
-  originalById: Map<string, AgentMessage>;
-  streamLen: number;
-}
+import type { AgentMessage } from "./messages.js";
 
 /** Core-space fold result (provider mode): no originalById — the output
  *  rebuilds straight onto the wire via the kernel codecs. */
@@ -52,9 +45,6 @@ interface FoldSlot {
   coreMessages: CoreMessage[];
   appliedCallIds: Set<string>;
   rejectStreak: number;
-  /** Identity sequence of the last recorded rebuilt output (issue #52
-   *  feedback-view reuse). null = not yet recorded. */
-  lastRebuiltOutput: string[] | null;
 }
 
 export interface AcpRuntime {
@@ -65,19 +55,14 @@ export interface AcpRuntime {
   setPrompts(prompts: Prompts): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
-  foldStream(ctx: ExtensionContext, stream: AgentMessage[]): FoldResult;
   /** Core-space fold (provider mode): the wire payload already parsed to
- *  BiliMessage[] by the kernel codec; same incremental LCP + replay
- *  semantics as foldStream, content-hash id space (wire-fold.ts). */
+ *  BiliMessage[] by the kernel codec; incremental LCP + replay semantics,
+ *  content-hash id space (wire-fold.ts). */
   foldStreamCore(ctx: ExtensionContext, stream: BiliMessage[]): CoreFoldResult;
   stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: CoreMessage[] }>;
-  /** Commit the folded state to the slot space the session's CURRENT mode
-   *  folds in (provider -> core slot, context -> context slot) — the mirror
-   *  of stateFor: a commit must land where the next read goes (issue #90). */
+  /** Commit the folded state to the core slot — the mirror of stateFor: a
+   *  commit must land where the next read goes (issue #90). */
   commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void;
-  /** Record the identity sequence of the last rebuilt output so the next
-   *  foldStream can recognize omp re-feeding it (issue #52). */
-  recordRebuiltOutput(ctx: ExtensionContext, rebuilt: AgentMessage[]): void;
   /** Track the per-session streak of consecutively REJECTED compress calls.
    *  `ok=false` increments and returns the new streak; `ok=true` resets to 0.
    *  A re-fold (rewritten stream prefix) drops the slot and starts at 0. */
@@ -99,7 +84,7 @@ export interface AcpRuntime {
 }
 
 function freshSlot(preserveFrom?: FoldSlot): FoldSlot {
-  const slot: FoldSlot = { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set(), rejectStreak: 0, lastRebuiltOutput: null };
+  const slot: FoldSlot = { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set(), rejectStreak: 0 };
   // Cadence stamps and the reject streak are SESSION-level accounting ("when
   // was the model last reminded" / "how many compress calls has it had
   // rejected in a row"), not stream-derived state. A re-fold rebuilds blocks
@@ -161,10 +146,8 @@ function stateHasCompressCall(state: CompressionState, callId: string): boolean 
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const core = createCore({ countTokens: defaultCountTokens });
   const locks = new Map<string, Promise<void>>();
-  const slots = new Map<string, FoldSlot>();
-  // Disjoint slot space for the provider (core-space) fold — content-hash
-  // ids must never mix with the pN ids of the context-space fold (see
-  // wire-fold.ts header).
+  // Core-space slot space for the provider fold — content-hash ids
+  // (wire-fold.ts). The legacy context-space slot (pN ids) was removed.
   const coreSlots = new Map<string, FoldSlot>();
   let adapterRef = adapter;
   let promptsRef: Prompts = defaultPrompts;
@@ -189,15 +172,6 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return resolveConfig(adapterRef, liveContextLimit(ctx));
   }
 
-  function slotFor(sid: string): FoldSlot {
-    let slot = slots.get(sid);
-    if (!slot) {
-      slot = freshSlot();
-      slots.set(sid, slot);
-    }
-    return slot;
-  }
-
   function coreSlotFor(sid: string): FoldSlot {
     let slot = coreSlots.get(sid);
     if (!slot) {
@@ -219,131 +193,6 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   // cross-view alignment. Retry/rewind/compaction shrink or rewrite the
   // stream; the fold detects a mutated prefix and re-folds from scratch, so
   // state always equals fold(stream).
-  function foldStream(ctx: ExtensionContext, stream: AgentMessage[]): FoldResult {
-    const sid = sidOf(ctx);
-    let slot = slotFor(sid);
-    if (slot.preview) {
-      // A primed slot is a disposable preview built from the persisted view —
-      // the first live context event always re-folds from scratch so the
-      // authoritative stream (not the persisted projection) rules.
-      debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp: 0, streamLen: stream.length, reason: "preview" });
-      slot = freshSlot(slot);
-      slots.set(sid, slot);
-    }
-    const ids = stream.map(messageIdentity);
-    // Feedback-view reuse (issue #52): omp's recap/subagent pipelines re-feed
-    // our own rebuilt output as the next context event (411 of 1286 events
-    // measured). When the input stream's identity sequence exactly matches the
-    // last recorded rebuilt output, reuse the slot wholesale — blocks, message
-    // refs, cadence stamps and rejectStreak all stay continuous. Compress-call
-    // replay is skipped on this path: the fingerprint guard mis-fires against
-    // our own summary content (fold-replay-stale was the #52 symptom).
-    const lastOut = slot.lastRebuiltOutput;
-    if (
-      lastOut !== null &&
-      ids.length === lastOut.length &&
-      ids.every((id, i) => id === lastOut[i])
-    ) {
-      const coreMessages = streamToCoreMessages(stream);
-      const originalById = new Map<string, AgentMessage>();
-      stream.forEach((message, i) => originalById.set(`p${i + 1}`, message));
-      slot.identities = ids;
-      slot.foldedLen = ids.length;
-      slot.coreMessages = coreMessages;
-      debug.event("feedback-reuse", { sid, msgs: ids.length, blocks: slot.state.blocks.length });
-      return { state: slot.state, coreMessages, originalById, streamLen: ids.length };
-    }
-    let lcp = 0;
-    while (lcp < Math.min(ids.length, slot.identities.length) && ids[lcp] === slot.identities[lcp]) lcp++;
-    if (lcp < slot.foldedLen) {
-      const flip = isViewFlip(slot.foldedLen, lcp);
-      debug.event("fold-refold", { sid, foldedLen: slot.foldedLen, lcp, streamLen: ids.length, flip });
-      // View flip (variant pipeline re-projecting the same history): carry
-      // the live compression blocks — they were earned against the session,
-      // not against this particular projection. Real prefix rewrite
-      // (compaction / rewind): deterministic full re-fold, blocks replay
-      // from the stream.
-      slot = flip ? preserveCompressedSlot(slot) : freshSlot(slot);
-      slots.set(sid, slot);
-      lcp = 0;
-    }
-
-    const coreMessages = streamToCoreMessages(stream);
-    const config = configFor(ctx);
-
-    // Prime refs for the current stream before replaying calls —
-    // applyCompression resolves start/end refs through state.messageRefs.
-    // isProtected mirrors the kernel's assign-refs node so protected-tool
-    // messages (compress results, protectedTools config) keep BLOCKED_REF.
-    const assigned = assignRefs(coreMessages, {
-      existing: slot.state.messageRefs,
-      nextIndex: highestUsedIndex(slot.state.messageRefs) + 1,
-      isProtected: (m) => {
-        if (m.role !== "tool" || !m.toolName) return false;
-        if (m.toolName === "compress") return true;
-        return (config.protectedTools ?? []).includes(m.toolName);
-      },
-    });
-    slot.state = { ...slot.state, messageRefs: assigned.map };
-
-    // Replay compress calls found in the stream (fresh folds scan everything,
-    // incremental folds only NEW positions). Calls whose live tool result said
-    // "No changes applied" must never resurrect — checked on every fold, since
-    // a live rejection can also be followed by an incremental context event.
-    const isFreshFold = slot.foldedLen === 0;
-    const resultTexts = toolResultTexts(stream);
-    let replayed = 0;
-    for (let i = isFreshFold ? 0 : slot.foldedLen; i < stream.length; i++) {
-      for (const call of findCompressCalls(stream[i]!)) {
-        const resultText = resultTexts.get(call.id) ?? "";
-        if (resultText.includes("No changes applied")) {
-          debug.event("fold-replay-skipped", { sid, callId: call.id });
-          continue;
-        }
-        // Already applied (live tool call committed, or replayed on an
-        // earlier fold) — checked BEFORE the stale guard: a call applied
-        // against a sibling view is legitimately applied; running the
-        // fingerprint check first would log it as stale on every view
-        // flip (the block is carried by preserveCompressedSlot, not replay).
-        if (slot.appliedCallIds.has(call.id) || stateHasCompressCall(slot.state, call.id)) continue;
-        // Guard against host-side prefix rewrites (native compaction, edits):
-        // the call's ranges must resolve to messages that precede the call
-        // itself in the stream, and the span fingerprint recorded in the
-        // success result must still match — otherwise skip rather than
-        // silently compress the wrong messages with a stale summary.
-        const stale = call.ranges.map((r, ri) => staleRange(r, ri, resultText, coreMessages, i, slot.state.messageRefs.byRef, slot.state.blocks)).find((s) => s !== false);
-        if (stale) {
-          debug.event("fold-replay-stale", { sid, callId: call.id, reason: stale });
-          continue;
-        }
-        if (slot.appliedCallIds.has(call.id) || stateHasCompressCall(slot.state, call.id)) continue;
-        try {
-          const applied = core.applyCompression({ ranges: call.ranges, messages: coreMessages, state: slot.state, config });
-          if (applied.result.errors.length === 0) {
-            slot.state = applied.state;
-            replayed++;
-            debug.event("fold-replay", { sid, callId: call.id, ranges: call.ranges.length });
-          } else {
-            logWarn("fold", { sid, event: "replay-rejected", callId: call.id, errors: applied.result.errors.slice(0, 3) });
-          }
-        } catch (e) {
-          logWarn("fold", { sid, event: "replay-failed", callId: call.id, error: e instanceof Error ? e.message : String(e) });
-        }
-        slot.appliedCallIds.add(call.id);
-      }
-    }
-    if (replayed > 0) logWarn("fold", { sid, event: "replayed", calls: replayed });
-
-    slot.identities = ids;
-    slot.foldedLen = ids.length;
-    slot.coreMessages = coreMessages;
-
-    const originalById = new Map<string, AgentMessage>();
-    stream.forEach((message, i) => originalById.set(`p${i + 1}`, message));
-
-    return { state: slot.state, coreMessages, originalById, streamLen: stream.length };
-  }
-
   // Core-space fold (provider mode, wire-fold.ts): identical LCP + replay
   // semantics on BiliMessage[] with content-hash ids. No feedback-view
   // reuse (the wire payload is request-local and never re-enters) and no
@@ -474,61 +323,60 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       };
       const view = sm.buildSessionContext?.().messages ?? [];
       if (view.length === 0) return;
-      // Provider mode: the authoritative fold runs on the WIRE projection —
-      // a different space than this view. The raw view is NOT equivalent:
-      // for openai-style payloads the system prompt is a message in the
-      // wire body (it takes m00001) and tool entries carry no names (a
-      // compress result would not be ref-BLOCKED); folding the raw view puts
-      // the fold in a different ref/fingerprint space: stored span
-      // fingerprints mismatch, the guard rejects every in-stream replay, and
-      // a resumed session shows "Blocks: none" until the first provider
-      // request (issue #64). Fold the format-matched wire mirror instead —
-      // openai-shape (system first) for openai/ollama payloads, anthropic-
-      // shape for anthropic-messages (system stays top-level, out of the
-      // fold space). The system text mirrors what before_agent_start puts on
-      // the wire (base + ACP block — not yet appended at session_start).
-      if (resolveTransformMode(adapterRef, ctx.model) === "provider") {
-        const api = (ctx.model as { api?: string } | undefined)?.api ?? "";
-        let stream: BiliMessage[];
-        if (api === "anthropic-messages") {
-          stream = viewToAnthropicCore(view);
-        } else {
-          const base = getSystemPromptText(ctx);
-          const acp = buildAcpSystemPrompt(promptsRef);
-          stream = viewToCoreStream(view, base.includes(acp) ? base : `${base}\n\n${acp}`);
-        }
-        const r = foldStreamCore(ctx, stream);
-        coreSlotFor(sid).preview = true;
-        logInfo("fold", { sid, event: "prime-fold", msgs: stream.length, wire: true, blocks: r.state.blocks.length });
-        return;
+      // The authoritative fold runs on the WIRE projection — a different
+      // space than this view. The raw view is NOT equivalent: for openai-
+      // style payloads the system prompt is a message in the wire body (it
+      // takes m00001) and tool entries carry no names (a compress result
+      // would not be ref-BLOCKED); folding the raw view puts the fold in a
+      // different ref/fingerprint space: stored span fingerprints mismatch,
+      // the guard rejects every in-stream replay, and a resumed session
+      // shows "Blocks: none" until the first provider request (issue #64).
+      // Fold the format-matched wire mirror instead — openai-shape (system
+      // first) for openai/ollama payloads, anthropic-shape for anthropic-
+      // messages (system stays top-level, out of the fold space), responses-
+      // shape for openai-responses (system in `instructions`, out of the
+      // fold space). The system text mirrors what before_agent_start puts
+      // on the wire (base + ACP block — not yet appended at session_start).
+      const api = (ctx.model as { api?: string } | undefined)?.api ?? "";
+      let stream: BiliMessage[];
+      if (api === "anthropic-messages") {
+        stream = viewToAnthropicCore(view);
+      } else if (api === "openai-responses") {
+        // Responses wire: system prompt lives in the top-level `instructions`
+        // field (out of the fold space), conversation in the `input` array.
+        // Mirror that layout, or the preview lands in a different ref space
+        // than the live request (issue #64, responses variant).
+        const base = getSystemPromptText(ctx);
+        const acp = buildAcpSystemPrompt(promptsRef);
+        stream = viewToResponsesCore(view, base.includes(acp) ? base : `${base}\n\n${acp}`);
+      } else {
+        const base = getSystemPromptText(ctx);
+        const acp = buildAcpSystemPrompt(promptsRef);
+        stream = viewToCoreStream(view, base.includes(acp) ? base : `${base}\n\n${acp}`);
       }
-      const r = foldStream(ctx, view);
-      slotFor(sid).preview = true;
-      logInfo("fold", { sid, event: "prime-fold", msgs: view.length, wire: false, blocks: r.state.blocks.length });
+      const r = foldStreamCore(ctx, stream);
+      coreSlotFor(sid).preview = true;
+      logInfo("fold", { sid, event: "prime-fold", msgs: stream.length, wire: true, blocks: r.state.blocks.length });
     } catch (e) {
       logWarn("fold", { sid, event: "prime-fold-failed", error: e instanceof Error ? e.message : String(e) });
     }
   }
 
   function forgetSession(sid: string): void {
-    slots.delete(sid);
     coreSlots.delete(sid);
     locks.delete(sid);
   }
 
-  function slotForMode(ctx: ExtensionContext, sid: string): FoldSlot {
-    return resolveTransformMode(adapterRef, ctx.model) === "provider" ? coreSlotFor(sid) : slotFor(sid);
+  function slotForMode(_ctx: ExtensionContext, sid: string): FoldSlot {
+    // Provider mode only: the fold always runs in core space on the wire
+    // projection. The legacy context-mode slot (slotFor) was removed.
+    return coreSlotFor(sid);
   }
 
   function commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void {
     const slot = slotForMode(ctx, sidOf(ctx));
     slot.state = state;
     if (toolCallId) slot.appliedCallIds.add(toolCallId);
-  }
-
-  function recordRebuiltOutput(ctx: ExtensionContext, rebuilt: AgentMessage[]): void {
-    const slot = slotFor(sidOf(ctx));
-    slot.lastRebuiltOutput = rebuilt.map(messageIdentity);
   }
 
   function noteCompressOutcome(ctx: ExtensionContext, ok: boolean): number {
@@ -549,48 +397,13 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     setPrompts: (p) => { promptsRef = p; },
     liveContextLimit,
     configFor,
-    foldStream,
     foldStreamCore,
     stateFor,
     commitFoldState,
-    recordRebuiltOutput,
     noteCompressOutcome,
     rejectStreakFor,
     forgetSession,
     primeFold,
     acquireLock,
   };
-}
-
-function staleRange(
-  r: { startRef: string; endRef: string },
-  rangeIndex: number,
-  resultText: string,
-  coreMessages: CoreMessage[],
-  callIndex: number,
-  byRef: Record<string, string>,
-  blocks: BlockLike[],
-): string | false {
-  const start = boundaryRaw(r.startRef, byRef, blocks, "min");
-  const end = boundaryRaw(r.endRef, byRef, blocks, "max");
-  if (start === "" || end === "") {
-    // A vanished MESSAGE ref means the prefix was rewritten → stale. A block
-    // ref we cannot resolve is left to the kernel's BoundaryNotFoundError —
-    // nested blocks rebuild in replay order and may legitimately be missing
-    // only if the call list itself is inconsistent.
-    if (!isBlockRef(r.startRef) && !isBlockRef(r.endRef))
-      return `unresolved ${r.startRef}..${r.endRef} -> ${start}..${end}`;
-    return false;
-  }
-  // Ranges always cover messages BEFORE the call that issued them — a call
-  // resolving to positions at/after itself means the prefix was rewritten.
-  if (rawPos(end) > callIndex) return `end ${rawPos(end)} > callIndex ${callIndex}`;
-  const m = resultText.match(/\[fp=([0-9a-f,-]+)\]/);
-  if (!m) return false;
-  const expected = m[1]!.split(",");
-  const want = expected[rangeIndex];
-  if (want === undefined || want === "-") return false;
-  const got = spanFingerprint(coreMessages, start, end);
-  if (want !== got) return `fp ${r.startRef}..${r.endRef} want ${want} got ${got} @${start}..${end}`;
-  return false;
 }

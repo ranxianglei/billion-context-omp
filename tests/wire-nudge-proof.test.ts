@@ -57,7 +57,7 @@ function toWire(stream: Array<{ role: string; content: Array<{ text: string }> }
 
 async function fireWithGrowth(sid: string, fillerTurns: number, growthTurns: number) {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const stream: Array<{ role: "user" | "assistant"; content: Array<{ text: string }> }> = [];
   for (let i = 0; i < fillerTurns; i++) stream.push(agentMsg(i % 2 ? "assistant" : "user", `f${i} ${FILLER}`));
   const payload = () => ({ model: "qwen-proof", max_completion_tokens: 2048, messages: toWire(stream) });
@@ -94,7 +94,7 @@ test("wire-level: efficiency nudge rides the returned HTTP payload (growth path)
 
 test("wire-level: emergency alert rides the returned HTTP payload (single BIG message)", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const stream: Array<{ role: "user" | "assistant"; content: Array<{ text: string }> }> = [];
   for (let i = 0; i < 50; i++) stream.push(agentMsg(i % 2 ? "assistant" : "user", `f${i} ${FILLER}`));
   stream.push(agentMsg("user", "B ".repeat(400_000))); // ~100K tok → emergency band

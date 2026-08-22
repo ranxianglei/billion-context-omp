@@ -3,7 +3,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createAcpExtension } from "../src/index.js";
-import { createRuntime } from "../src/runtime.js";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 interface MockApi {
@@ -40,7 +39,7 @@ function fakeCtx() {
     hasUI: false,
     cwd: "/tmp",
     ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-    model: { contextWindow: 200_000 },
+    model: { contextWindow: 200_000, api: "anthropic-messages" },
     sessionManager: {
       getSessionId: () => "loop-guard-session",
       getSessionFile: () => "/tmp/nonexistent-omp-lg.session.json",
@@ -52,46 +51,16 @@ function userMsg(text: string) {
   return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
 }
 
-// Regression (port of #48 onto #50): the reject streak must survive a
-// view-flip re-fold. omp re-feeds our rebuilt output as the next context
-// event (observed live, 411 of 1286 context events); the re-fold replaces
-// the FoldSlot — if rejectStreak lived only on the replaced slot, every view
-// flip mid-loop would reset it to 0 and the escalation threshold (3) would
-// never be reached. That was exactly the issue-47 amplifier.
-test("reject streak survives a view-flip re-fold", () => {
-  const runtime = createRuntime({ modelContextLimit: 200_000 });
-  const ctx = fakeCtx();
-
-  const FILL = "lorem ipsum dolor sit amet consectetur. ".repeat(40);
-  const raw = [{ role: "user", content: [{ type: "text", text: "s " + FILL }], timestamp: Date.now() }];
-  for (let i = 1; i <= 6; i++) raw.push(i % 2 ? { role: "assistant", content: [{ type: "text", text: `a${i}` }] } : { role: "user", content: [{ type: "text", text: `u${i} ` + FILL }], timestamp: Date.now() });
-
-  runtime.foldStream(ctx, raw);
-  assert.equal(runtime.noteCompressOutcome(ctx, false), 1);
-  assert.equal(runtime.noteCompressOutcome(ctx, false), 2);
-
-  // Feedback view: identities diverge at the first position → forced freshSlot.
-  const rebuilt = [{ role: "user", content: [{ type: "text", text: "[Compressed conversation section 1 — gone]" }], timestamp: Date.now() }, ...raw.slice(2)];
-  runtime.foldStream(ctx, rebuilt);
-  // The streak must still be 2 — one more rejection escalates to the STOP
-  // directive (threshold 3), instead of starting over from 0.
-  assert.equal(runtime.noteCompressOutcome(ctx, false), 3, "streak carried across the re-fold");
-  // A success clears it — even across a subsequent re-fold.
-  assert.equal(runtime.noteCompressOutcome(ctx, true), 0);
-  runtime.foldStream(ctx, raw);
-  assert.equal(runtime.noteCompressOutcome(ctx, false), 1, "reset sticks after another re-fold");
-});
-
 function assistantCompressCall(callId: string, ranges: Array<{ startId: string; endId: string; summary: string }>) {
   return {
     role: "assistant",
-    content: [{ type: "toolCall", id: callId, name: "compress", arguments: JSON.stringify({ content: ranges }) }],
+    content: [{ type: "tool_use", id: callId, name: "compress", input: { content: ranges } }],
     timestamp: Date.now(),
   };
 }
 
 function toolResult(callId: string, text: string) {
-  return { role: "toolResult", content: [{ type: "text", text }], toolName: "compress", toolCallId: callId, timestamp: Date.now() };
+  return { role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: text }], timestamp: Date.now() };
 }
 
 function refOf(message: unknown): string | null {
@@ -115,9 +84,9 @@ const FILLERS = [1, 2, 3, 4, 5, 6].map((n) => userMsg(`filler ${n} `.repeat(600)
 
 test("loop guard: repeated rejected compress calls escalate, then suppress, then reset on success", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: unknown[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
   const compress = api.tools.find((t) => t.name === "compress")!;
 
   const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), ...FILLERS];
@@ -187,9 +156,9 @@ test("loop guard: repeated rejected compress calls escalate, then suppress, then
 
 test("loop guard: a fresh extension instance starts at streak 0 (no cross-session bleed)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: unknown[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
   const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), ...FILLERS];
   const r1 = await fire([...stream]);
   const ref1 = refOf(r1.messages[0]);
@@ -203,8 +172,8 @@ test("loop guard: a fresh extension instance starts at streak 0 (no cross-sessio
   // consumed refs to the owning block, so re-compressing a covered range
   // now succeeds instead of rejecting).
   const second = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(second.api as unknown as ExtensionAPI);
-  await second.handlers.get("context")![0]!({ type: "context", messages: [...stream, assistantCompressCall("tc_ok", [call]), toolResult("tc_ok", ok.content[0].text)] }, ctx);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(second.api as unknown as ExtensionAPI);
+  await second.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: [...stream, assistantCompressCall("tc_ok", [call]), toolResult("tc_ok", ok.content[0].text)] } }, ctx);
   const badCall = { startId: "m99999", endId: "m99999", summary: SUMMARY };
   const rejected = await second.api.tools.find((t) => t.name === "compress")!.execute("tc_new", { content: [badCall] }, undefined, undefined, ctx);
   assert.match(rejected.content[0].text, /No changes applied/, "fresh instance: rejection is a real rejection");
@@ -214,9 +183,9 @@ test("loop guard: a fresh extension instance starts at streak 0 (no cross-sessio
 
 test("loop guard: malformed compress args count toward the reject streak", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: unknown[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
   const compress = api.tools.find((t) => t.name === "compress")!;
   const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), ...FILLERS];
   await fire([...stream]);
@@ -252,9 +221,9 @@ test("loop guard: malformed compress args count toward the reject streak", async
 // guards that the rejected pair stays visible exactly once (no duplication).
 test("issue #104: rejected compress call+result stay visible in the model's view", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: unknown[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
   const compress = api.tools.find((t) => t.name === "compress")!;
   const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), ...FILLERS];
   await fire([...stream]);
@@ -263,17 +232,12 @@ test("issue #104: rejected compress call+result stay visible in the model's view
   const rejected = await compress.execute("tc_v1", bad, undefined, undefined, ctx);
   assert.match(rejected.content[0].text, /No changes applied/);
 
-  // Next context event: omp's session view carries the call+result pair.
+  // Next provider request: the wire payload carries the call+result pair.
   const r = await fire([...stream, assistantCompressCall("tc_v1", bad.content), toolResult("tc_v1", rejected.content[0].text)]);
   const json = JSON.stringify(r.messages);
   assert.ok(json.includes("No changes applied"), "the rejection result must stay visible to the model");
   assert.ok(json.includes("m99999"), "the rejected call itself must stay visible to the model");
   assert.equal((json.match(/No changes applied/g) ?? []).length, 1, "exactly one copy of the rejection — no duplication");
-
-  // Feedback view (omp re-feeds our output verbatim): still exactly one copy.
-  const r2 = await fire(r.messages);
-  const json2 = JSON.stringify(r2.messages);
-  assert.equal((json2.match(/No changes applied/g) ?? []).length, 1, "feedback view keeps exactly one copy");
 });
 
 // Issue #104 coherence: the over-limit/emergency nudge re-fires on every LLM
@@ -283,9 +247,9 @@ test("issue #104: rejected compress call+result stay visible in the model's view
 // restore the normal nudge.
 test("issue #104: nudge becomes a hold during a reject streak, resets on success", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 10_000, transformMode: "context" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ modelContextLimit: 10_000, autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
-  const fire = (messages: unknown[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: unknown[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
   const compress = api.tools.find((t) => t.name === "compress")!;
 
   const stream = [userMsg(bigText("target one")), userMsg(bigText("target two")), ...FILLERS];

@@ -146,7 +146,6 @@ billion-context-omp 开箱即用，无需配置。可选键写入 JSON 配置文
 | `debug` | `false` | 开启**debug 级**详细日志事件。常开日志（生命周期事件、错误、警告）无论如何都会写；`debug` 只增加诊断信息。也可用环境变量 `ACP_DEBUG=1` 开启。 |
 | `autoUpdate` | `true` | 会话启动时（节流为每 3 分钟最多一次）检查 npm 是否有新版本并自动安装。关闭可避免所有启动期网络请求。 |
 | `modelContextLimit` | *(自动)* | 覆盖上下文上限（token 数）。默认取模型的 `contextWindow`。 |
-| `transformMode` | 未设置（按 API 解析）或显式 `"provider"` / `"context"` | 压缩手术拦截位置。未设置：host 会应用 wire 载荷替换且 wire 体有编解码路径的 API 用 `provider`（anthropic-messages、ollama-chat；openai-completions 需 host >= 17.3.8，上游 PR can1357/oh-my-pi#8717，issue #83），其余用 `context`（issue #79）。显式设置总是生效。`provider` 变换 provider wire 载荷（请求局部，结构性免疫回灌环路）；`context` 改写 context 事件（旧版模式）。 |
 | `toolBashDefaultTimeout` | `60` | 模型省略 `timeout` 时注入 `bash` 工具的秒数。没有它，一次忘记的 timeout 可能挂起数千秒。`0` 恢复无限制。 |
 | `toolOutputMaxBytes` | `200000` | 工具结果文本的硬字节上限（经 `tool_result` 钩子实施）。拦截 omp 自身上限管不住的失控输出。触发时模型会被告知完整输出在哪；调低（如 `8192`）可更省上下文，`0` 禁用。 |
 | `compress.maxContextLimit` | `"75%"` | 触发**强制压缩**提醒的上下文用量阈值（绕过增长门控与节拍）。接受比例（`0.75`）或百分比字符串（`"75%"`）。越低 = 越早/越激进压缩。 |

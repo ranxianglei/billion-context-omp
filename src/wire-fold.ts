@@ -6,23 +6,29 @@
 // single-sourced in the kernel, shared with the billion-context proxy.
 //
 // The fold runs in CONTENT-HASH ID space (deriveMessageId inside the kernel
-// codecs) — not the positional p1..pN space the context-mode fold uses. The
-// spaces are deliberately disjoint: a session's provider requests and
-// context events never share a fold slot, and a mid-session model switch
-// (mode flip) re-folds deterministically from the stream, deactivating the
+// codecs). The spaces are deliberately disjoint: a session's provider
+// requests never share a fold slot, and a mid-session model switch
+// re-folds deterministically from the stream, deactivating the
 // old space's orphaned blocks (syncBlocks) rather than mixing ids.
 //
-// Responses bodies are fail-open: the kernel ships a responses codec, but
-// the omp pipeline has no responses rebuild path (the proxy covers responses
-// at the wire level).
+// Responses bodies (/v1/responses) rebuild through the kernel's responses
+// codec: responsesToCore parses the `input` into a layout-preserving
+// projection, and patchResponsesInput re-emits the input with the
+// compressed pieces patched in place (opaque items like additional_tools
+// survive verbatim).
 
 import {
   anthropicToCore,
   coreToAnthropic,
   coreToOpenai,
+  coreToResponses,
   detectWireFormat as kernelDetectWireFormat,
   openaiToCore,
+  patchResponsesInput,
+  responsesToCore,
   type BiliMessage,
+  type ResponsesProjection,
+  type ResponsesRequestBody,
 } from "acp-kernel/wire";
 import {
   createRenderRefsNode,
@@ -35,13 +41,18 @@ import { compressToolArgs, stripRefTag } from "./messages.js";
 import type { AgentMessage, BlockLike, StreamCompressCall } from "./messages.js";
 import { createHash } from "node:crypto";
 
-export type ProviderWireFormat = "anthropic" | "openai";
+export type ProviderWireFormat = "anthropic" | "openai" | "responses";
 
 /** Kernel format detection narrowed to the formats the omp pipeline can
- *  rebuild onto the wire. null = fail-open (pass the payload through). */
+ *  rebuild onto the wire. null = fail-open (pass the payload through).
+ *  The kernel's detectWireFormat only recognizes `input` arrays as
+ *  "responses"; string inputs (a single user message) are also responses
+ *  bodies (the kernel's responsesToCore handles them), so we add that case. */
 export function detectProviderWireFormat(payload: unknown): ProviderWireFormat | null {
   const fmt = kernelDetectWireFormat(payload);
-  return fmt === "anthropic" || fmt === "openai" ? fmt : null;
+  if (fmt === "anthropic" || fmt === "openai" || fmt === "responses") return fmt;
+  if (payload !== null && typeof payload === "object" && typeof (payload as { input?: unknown }).input === "string") return "responses";
+  return null;
 }
 
 export function payloadToCore(
@@ -52,8 +63,27 @@ export function payloadToCore(
     const { msgs, cacheControls } = anthropicToCore(payload as Parameters<typeof anthropicToCore>[0]);
     return { msgs, cacheControls };
   }
+  if (fmt === "responses") {
+    const { msgs } = responsesToCore(payload as ResponsesRequestBody);
+    return { msgs };
+  }
   const { msgs } = openaiToCore(payload as Parameters<typeof openaiToCore>[0]);
   return { msgs };
+}
+
+/** Parse a responses body into the kernel's projection (layout + core pieces).
+ *  The projection is needed for the rebuild (patchResponsesInput) — it carries
+ *  the original item layout so the round-trip preserves opaque items and
+ *  patches text in place rather than rebuilding from scratch. */
+export function responsesProjection(payload: unknown): ResponsesProjection {
+  return responsesToCore(payload as ResponsesRequestBody);
+}
+
+/** Rebuild the responses `input` from the projection + transformed core
+ *  messages. Returns a string when the original input was a string (and the
+ *  transform kept it a single user text piece); otherwise an item array. */
+export function responsesRebuild(projection: ResponsesProjection, msgs: BiliMessage[]): string | unknown[] {
+  return patchResponsesInput(projection, msgs as Parameters<typeof patchResponsesInput>[1]);
 }
 
 export function coreToPayloadMessages(
@@ -61,6 +91,13 @@ export function coreToPayloadMessages(
   fmt: ProviderWireFormat,
   cacheControls?: Map<string, unknown>,
 ): unknown[] {
+  if (fmt === "responses") {
+    // Fallback rebuild (no projection): the main path uses responsesRebuild
+    // (patchResponsesInput) which preserves the original layout. This path is
+    // only reached when the projection is unavailable — custom tool call ids
+    // are unknown, so all tool calls emit as function_call.
+    return coreToResponses(msgs as Parameters<typeof coreToResponses>[0]);
+  }
   return fmt === "anthropic" ? coreToAnthropic(msgs, cacheControls) : coreToOpenai(msgs);
 }
 
@@ -82,6 +119,15 @@ export type Representability = { ok: true } | { ok: false; reason: string };
  *  the rebuild. Unrepresentable payloads must fail the transform OPEN —
  *  pass through untouched rather than lose content (issue #3 review). */
 export function payloadRepresentable(payload: unknown, fmt: ProviderWireFormat): Representability {
+  if (fmt === "responses") {
+    // The kernel's responsesToCore preserves every input item (core pieces or
+    // opaque preamble) and patchResponsesInput rebuilds from the layout — the
+    // round-trip is lossless by construction. The only content loss is the
+    // opt-in ACP_REASONING_KEEP=none drop, which is intentional.
+    const input = (payload as { input?: unknown }).input;
+    if (typeof input !== "string" && !Array.isArray(input)) return { ok: false, reason: "responses input neither string nor array" };
+    return { ok: true };
+  }
   const messages = (payload as { messages?: unknown }).messages;
   if (!Array.isArray(messages)) return { ok: false, reason: "messages not an array" };
   for (const message of messages) {
@@ -603,6 +649,52 @@ export function viewToAnthropicCore(view: AgentMessage[]): BiliMessage[] {
   }
   const { msgs, cacheControls } = anthropicToCore({ model: "prime-fold", messages } as Parameters<typeof anthropicToCore>[0]);
   void cacheControls;
+  return msgs;
+}
+
+/** Responses-flavoured wire mirror for primeFold: the live /v1/responses
+ *  request carries the system prompt in the TOP-LEVEL `instructions` field
+ *  (out of the fold space) and the conversation as an `input` item array —
+ *  a different ref space than the openai mirror (system as m00001). Folding
+ *  the openai shape for a responses model puts the preview in the wrong
+ *  ref/fingerprint space: stored span fingerprints mismatch, the guard
+ *  rejects every in-stream replay, and a resumed session shows "Blocks:
+ *  none" until the first provider request (issue #64, responses variant).
+ *  Mirror the responses layout exactly: build the `input` item array from
+ *  the view and run it through the kernel's responsesToCore, so the preview
+ *  lands in the same ref/fingerprint space as the live request. */
+export function viewToResponsesCore(view: AgentMessage[], systemText: string): BiliMessage[] {
+  const input: Array<Record<string, unknown>> = [];
+  for (const message of view) {
+    const m = message as { role?: string; content?: unknown; toolCallId?: string; summary?: string };
+    if (m.role === "user") {
+      const text = extractViewText(m.content);
+      if (text) input.push({ type: "message", role: "user", content: [{ type: "input_text", text }] });
+    } else if (m.role === "assistant") {
+      const blocks = Array.isArray(m.content) ? m.content : [];
+      const typed = blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown; text?: unknown; thinking?: unknown }>;
+      // Emit items in block order (thinking, text, tool calls) so the core
+      // message sequence matches the live wire (issue #103 parity).
+      for (const b of typed) {
+        if (b === null || typeof b !== "object") continue;
+        if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0) {
+          input.push({ type: "reasoning", summary: [{ type: "summary_text", text: b.thinking }] });
+        } else if (b.type === "text" && typeof b.text === "string" && stripRefTag(b.text).trim().length > 0) {
+          input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: stripRefTag(b.text) }] });
+        } else if (b.type === "toolCall") {
+          let args = "{}";
+          try { args = JSON.stringify(b.arguments ?? {}); } catch { args = "{}"; }
+          input.push({ type: "function_call", call_id: b.id ?? "", name: b.name ?? "", arguments: args });
+        }
+      }
+    } else if (m.role === "toolResult") {
+      input.push({ type: "function_call_output", call_id: m.toolCallId ?? "", output: extractViewText(m.content) });
+    } else {
+      const text = extractViewText(m.content) || (typeof m.summary === "string" ? m.summary : "");
+      if (text) input.push({ type: "message", role: "user", content: [{ type: "input_text", text }] });
+    }
+  }
+  const { msgs } = responsesToCore({ model: "prime-fold", instructions: systemText, input } as Parameters<typeof responsesToCore>[0]);
   return msgs;
 }
 

@@ -78,10 +78,6 @@ async function settlesWithin(p: Promise<unknown>, budget: number): Promise<boole
   return Promise.race([p.then(() => true), sleep(budget).then(() => false)]);
 }
 
-function userMsg(text: string) {
-  return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
-}
-
 test("session_start fires checkForUpdate without awaiting it (issue #89)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({})(api as unknown as ExtensionAPI);
@@ -106,38 +102,9 @@ test("session_start fires checkForUpdate without awaiting it (issue #89)", async
   await d.promise;
 });
 
-test("context event returns the transformed messages without awaiting the update check (issue #89)", async () => {
-  const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "context" })(api as unknown as ExtensionAPI);
-  const ctx = {
-    mode: "rpc",
-    hasUI: false,
-    cwd: "/tmp",
-    ui: { notify: () => {} },
-    model: { contextWindow: 200_000 },
-    sessionManager: { getSessionId: () => "upd-fwf-ctx", getSessionFile: () => "/tmp/upd-fwf-ctx.json" },
-  };
-
-  const stream = [userMsg("first"), userMsg("second"), userMsg("third")];
-  const started = calls;
-  const p = handlers.get("context")![0]!({ type: "context", messages: stream }, ctx) as Promise<unknown>;
-  await sleep(50); // the fire-and-forget call has happened; the 100ms fallback has not
-  assert.equal(calls, started + 1, "checkForUpdate was fired per LLM call");
-  const d = pending[pending.length - 1]!;
-  let updateSettled = false;
-  d.promise.then(() => { updateSettled = true; });
-  assert.equal(await settlesWithin(p, 2000), true, "the context handler must settle on its own, not behind the 5s/65s update check");
-  const out = (await p) as { messages: unknown[] };
-  assert.ok(out, "transformed messages returned while the update check was still pending");
-  assert.equal(out.messages.length, 3, "all stream messages rebuilt");
-  assert.equal(updateSettled, false, "the update check was still pending when the handler settled");
-  d.resolve();
-  await d.promise;
-});
-
 test("before_provider_request returns the transformed payload without awaiting the update check (issue #89)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = {
     mode: "rpc",
     hasUI: false,

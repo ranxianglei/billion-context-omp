@@ -130,7 +130,7 @@ test("restoreOpenaiWireFidelity: merges details when the rebuild merges two assi
 
 test("provider transform: reasoning_details and empty-string content survive the wire surgery (issue #105)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: Array<Record<string, unknown>>) =>
     handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: openaiPayload(messages) }, ctx) as Promise<{ messages: unknown[] } | undefined>;
@@ -158,7 +158,7 @@ test("provider transform: reasoning_details and empty-string content survive the
 
 test("provider transform: reasoning_details survive an active compression replay (issue #105)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: Array<Record<string, unknown>>) =>
     handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: openaiPayload(messages) }, ctx) as Promise<{ messages: unknown[] } | undefined>;
@@ -197,7 +197,7 @@ test("provider transform: reasoning_details survive an active compression replay
 
 test("provider transform: unrestorable wire fields fail open (issue #105)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (messages: Array<Record<string, unknown>>) =>
     handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: openaiPayload(messages) }, ctx) as Promise<{ messages: unknown[] } | undefined>;

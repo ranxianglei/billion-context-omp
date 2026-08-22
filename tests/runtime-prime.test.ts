@@ -2,11 +2,12 @@ import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createRuntime } from "../src/runtime.js";
 import type { AgentMessage } from "../src/messages.js";
+import type { BiliMessage } from "acp-kernel/wire";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 const FILLER = "filler ".repeat(1200);
 
-function makeStream(withCompression: boolean): AgentMessage[] {
+function makeAgentStream(withCompression: boolean): AgentMessage[] {
   const assistantBase = { api: "anthropic" as const, provider: "anthropic" as const, model: "test-model", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop" as const, timestamp: Date.now() };
   const stream: AgentMessage[] = [
     { role: "user", content: [{ type: "text", text: "kick " + FILLER }], timestamp: Date.now() },
@@ -31,10 +32,33 @@ function makeStream(withCompression: boolean): AgentMessage[] {
   return stream;
 }
 
+let idCounter = 0;
+const nextId = () => `m${++idCounter}`;
+
+function makeBiliStream(withCompression: boolean): BiliMessage[] {
+  const stream: BiliMessage[] = [
+    { id: nextId(), role: "user", contentType: "text", text: "kick " + FILLER } as BiliMessage,
+  ];
+  if (withCompression) {
+    stream.push(
+      { id: nextId(), role: "assistant", contentType: "tool-call", toolName: "compress", toolCallId: "call_c1", text: JSON.stringify({ content: [{ startId: "m00001", endId: "m00001", summary: "Opener consumed by compression for the test harness run. ".repeat(4) }] }) } as BiliMessage,
+      { id: nextId(), role: "tool", contentType: "tool-result", toolName: "compress", toolCallId: "call_c1", text: "Compressed 1 range — 1.2k tokens saved" } as BiliMessage,
+    );
+  }
+  stream.push({ id: nextId(), role: "assistant", contentType: "text", text: "done" } as BiliMessage);
+  for (let i = 0; i < 6; i++) {
+    stream.push(
+      { id: nextId(), role: "user", contentType: "text", text: `turn ${i} ` + FILLER } as BiliMessage,
+      { id: nextId(), role: "assistant", contentType: "text", text: `ack ${i}` } as BiliMessage,
+    );
+  }
+  return stream;
+}
+
 function makeCtx(stream: AgentMessage[]): ExtensionContext {
   return {
     cwd: "/tmp",
-    model: { contextWindow: 200_000 },
+    model: { contextWindow: 200_000, api: "anthropic-messages" },
     sessionManager: {
       getSessionId: () => "prime-test",
       getSessionFile: () => "/tmp/prime-test.json",
@@ -45,7 +69,7 @@ function makeCtx(stream: AgentMessage[]): ExtensionContext {
 
 test("primeFold: blocks visible at session_start, before any LLM call", async () => {
   const runtime = createRuntime({} as never);
-  const persisted = makeStream(true);
+  const persisted = makeAgentStream(true);
   runtime.primeFold(makeCtx(persisted));
 
   const { state } = await runtime.stateFor(makeCtx(persisted));
@@ -53,20 +77,20 @@ test("primeFold: blocks visible at session_start, before any LLM call", async ()
   assert.equal(state.blocks[0]!.tier, 1);
 });
 
-test("primeFold: first live context event re-folds authoritatively (preview never leaks)", () => {
+test("primeFold: first live event re-folds authoritatively (preview never leaks)", () => {
   const runtime = createRuntime({} as never);
-  const persisted = makeStream(true);
+  const persisted = makeAgentStream(true);
   runtime.primeFold(makeCtx(persisted));
 
-  const live = makeStream(true);
-  const r1 = runtime.foldStream(makeCtx(live), live);
+  const live = makeBiliStream(true);
+  const r1 = runtime.foldStreamCore(makeCtx(live as unknown as AgentMessage[]), live);
   assert.equal(r1.state.blocks.length, 1);
   assert.notEqual(r1.state.blocks[0]!.blockId, "", "authoritative block exists");
 
   // An appended message afterwards must NOT trigger another replay of the
   // already-applied call (appliedCallIds of the authoritative fold).
-  const grown = [...live, { role: "user", content: [{ type: "text", text: "next " + FILLER }] }] as AgentMessage[];
-  const r2 = runtime.foldStream(makeCtx(grown), grown);
+  const grown = [...live, { id: nextId(), role: "user", contentType: "text", text: "next " + FILLER } as BiliMessage];
+  const r2 = runtime.foldStreamCore(makeCtx(grown as unknown as AgentMessage[]), grown);
   assert.equal(r2.state.blocks.length, 1);
 });
 

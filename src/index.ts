@@ -2,7 +2,6 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ExtensionFactory,
-  SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent";
 import type { NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
@@ -13,9 +12,9 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages } from "./messages.js";
-import { resolveTransformMode, providerDeliveryWarning, type ProviderDeliveryWarning } from "./transform-mode.js";
-import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
+import { providerDeliveryWarning, hostMeetsMinimum, MIN_HOST_VERSION, type ProviderDeliveryWarning } from "./transform-mode.js";
+import { VERSION } from "@oh-my-pi/pi-utils";
+import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, responsesProjection, responsesRebuild, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -24,11 +23,9 @@ import { stampAndDetect } from "./instance-guard.js";
 import { debug, setDebugEnabled, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTextTokens, estimateTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
-import { dumpContextMessages, dumpProviderRequest } from "./dump.js";
+import { dumpProviderRequest } from "./dump.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-
-type AgentMessage = SessionMessageEntry["message"];
 
 declare const CURRENT_VERSION: string;
 
@@ -37,11 +34,11 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     const runtime = createRuntime(adapter);
     const warnDelivery = makeDeliveryWarner();
     wireSessionLifecycle(pi, runtime);
-    wireContextTransform(pi, runtime, warnDelivery);
+    wireContextTransform(pi, warnDelivery);
     wireSystemPrompt(pi, runtime);
     // BEFORE wireProviderDebug: handlers fire in registration order, so the
     // provider dumps capture the POST-transform payload (what actually goes
-    // to fetch), mirroring what context dumps show in context mode.
+    // to fetch).
     wireProviderTransform(pi, runtime, warnDelivery);
     wireProviderDebug(pi);
     wireToolGuardrails(pi, runtime);
@@ -92,6 +89,21 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // was. id + contextWindow also catch window misconfigurations.
     const modelInfo = ctx.model as { id?: string; contextWindow?: number; api?: string } | undefined;
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
+    // Minimum-host gate: omp requires a host that applies the
+    // before_provider_request (onPayload) replacement (pi-ai >= 17.3.8,
+    // upstream can1357/oh-my-pi#8717, issue #83). Older hosts drop the
+    // replacement fire-and-forget, so provider mode would deliver NOTHING to
+    // the model (issue #79). Warn once, loudly — compression is a no-op there.
+    if (!hostMeetsMinimum()) {
+      logWarn("session", { event: "host-too-old", version: VERSION, min: MIN_HOST_VERSION.join(".") });
+      try {
+        if (ctx.hasUI) {
+          ctx.ui.notify(`⚠ billion-context-omp requires omp host >= ${MIN_HOST_VERSION.join(".")} (found ${VERSION}). The host discards payload rewrites, so compression is NOT applied. Upgrade with 'omp update'.`);
+        }
+      } catch {
+        // notify unavailable — log line above is the durable record
+      }
+    }
     // Dual-instance guard (AGENTS.md #14): `omp install` + a manual
     // extensions path both loading this package fight over two fold
     // states — observed live as evaporating blocks. Warn once, loudly.
@@ -134,265 +146,28 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
 }
 
-// The core integration. Two interception points share one pipeline
-// (fold → processTurn → nudge → rebuild). The effective mode per API is
-// resolved in transform-mode.ts (issue #79): an explicit `transformMode`
-// always wins; the unset default is "provider" where the host applies the
-// wire-payload replacement AND the wire body has a codec path
-// (anthropic-messages, ollama-chat; openai-completions on hosts >= 17.3.8,
-// issue #83) and "context" everywhere else.
-//  - "context": omp's `context` event fires before every LLM call with the
-//    messages about to be sent; we return the transformed AgentMessage[].
-//    Known defect: omp's recap/subagent pipelines re-feed our output as INPUT
-//    on the next event (the feedback-view / two-truth-source problem, issues
-//    #22/#47/#52 and the 01a0059b loop).
-//  - "provider": the context event is left untouched (observer) and the
-//    surgery runs at `before_provider_request` on the WIRE payload —
-//    request-local, structurally impossible to re-feed.
-//    See wireProviderTransform + wire-fold.ts.
-async function transformStream(
-  ctx: ExtensionContext,
-  runtime: AcpRuntime,
-  input: AgentMessage[],
-  mode: "context" | "provider",
-): Promise<{ rebuilt: AgentMessage[]; nudgeInjected: boolean } | undefined> {
-  const sid = ctx.sessionManager.getSessionId();
-  const release = await runtime.acquireLock(sid);
-  let result: { rebuilt: AgentMessage[]; nudgeInjected: boolean } | undefined;
-  try {
-    // A transient empty message list must not wipe a non-empty fold — bypass
-    // instead of rebuilding (an empty {messages} return would clear the LLM
-    // context).
-    if (input.length === 0) {
-      debug.event("empty-stream-bypass", { sid });
-      return undefined;
-    }
-    debug.event("context-in-raw", { sid, msgs: input.length, mode });
-    const { state, coreMessages, originalById, streamLen } = runtime.foldStream(ctx, input);
-    // Nudge stamps as of the last context event. The pipeline never mutates
-    // the pre-turn nudge object (nudgeNode spreads into a fresh one), so
-    // these values drive the over-limit cadence guard below (issue #22).
-    const preTurnNudgeBaseline = state.nudge.lastPerMessageNudgeTokens;
-    const preTurnNudgeShownTokens = state.nudge.lastNudgeShownTokens;
-    const preTurnNudgeShownByTier = state.nudge.lastShownByTier;
-      const config = runtime.configFor(ctx);
-      const coveredIds = collectCoveredMessageIds(state);
-      // Nudge arbitration MUST run on the SENT-VIEW scale (chars/4 estimate
-      // over the pruned projection + measured system prompt). The host's
-      // getContextUsage() is SESSION-TREE accounting: append-only, includes
-      // compressed originals, never shrinks — on a session where the tree
-      // outgrew the model's context window (e.g. 366K tree vs 180K window
-      // after switching models), it reads as a permanent "204%" emergency
-      // while the real sent view is ~5%. The tree number stays in the log
-      // and the panel (labeled "host footer scale") — it must not drive
-      // emergency decisions for the sent view.
-      const systemPromptTokens = estimateTextTokens(getSystemPromptText(ctx) ?? "");
-      const sentTokens = estimateTokens(coreMessages, coveredIds) + systemPromptTokens;
-      const sessionTokens = ctx.getContextUsage?.()?.tokens ?? null;
-      const tokenCount = sentTokens;
+// The core integration. The compression surgery runs at
+// `before_provider_request` on the WIRE payload (wireProviderTransform) —
+// request-local, structurally impossible to re-feed as input. The `context`
+// event is a pure observer (wireContextTransform): touching the message array
+// there is what created the feedback-view / two-truth-source loop (issues
+// #22/#47/#52 and the 01a0059b loop), so the legacy "context" transform mode
+// was removed. Delivery is gated on the kernel having a codec for the wire
+// body (transform-mode.ts, issue #83); APIs without one pass through
+// untransformed (fail-open) and surface a delivery warning.
+// See wireProviderTransform + wire-fold.ts.
 
-      debug.event("context-in", {
-        sid,
-        mode,
-        streamLen,
-        coreMsgs: coreMessages.length,
-        tokenCount,
-        sessionTokens,
-        limit: config.modelContextLimit,
-        blocksBefore: state.blocks.length,
-        activeBefore: state.blocks.filter((b) => b.active).length,
-      });
-
-      const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
-      runtime.commitFoldState(ctx, turn.state);
-
-      logInfo("turn", {
-        sid,
-        model: (ctx.model as { id?: string } | undefined)?.id ?? null,
-        inMsgs: coreMessages.length,
-        outMsgs: turn.messages.length,
-        tokens: tokenCount,
-        sessionTokens,
-        pct: config.modelContextLimit > 0 ? Math.round((tokenCount / config.modelContextLimit) * 100) : null,
-        limit: config.modelContextLimit,
-        nudge: turn.nudge?.shouldInject ? (turn.nudge.breakdown?.emergencyOverride === 1 ? "emergency" : "active") : "idle",
-        nudgeReason: turn.nudge?.reason ?? null,
-        blocks: turn.state.blocks.length,
-        activeBlocks: turn.state.blocks.filter((b) => b.active).length,
-      });
-
-      debug.event("processTurn", {
-        outMsgs: turn.messages.length,
-        summaryMsgs: turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
-        prunedMsgs: coreMessages.length - turn.messages.length + turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
-        nudgeShouldInject: turn.nudge?.shouldInject ?? false,
-        nudgeReason: turn.nudge?.reason ?? null,
-        nudgeVoice: turn.nudge ? renderNudgeText(turn.nudge, runtime.prompts).voice : null,
-      nudgePct: turn.nudge ? Math.round(turn.nudge.contextUsage * 100) : null,
-      nudgeTier: turn.nudge?.tier ?? null,
-      nudgeCompressibleCount: turn.nudge?.compressibleRanges.length ?? 0,
-      nudgeProtectedCount: turn.nudge?.protectedRanges?.length ?? 0,
-      nothingToCompress: turn.nudge?.reason?.includes("nothing to compress") ?? false,
-      blocksAfter: turn.state.blocks.length,
-      activeAfter: turn.state.blocks.filter((b) => b.active).length,
-    });
-
-    const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
-    debug.event("core-out", {
-      sid,
-      coreOutMsgs: turn.messages.length,
-      originalByIdSize: originalById.size,
-      rebuiltMsgs: rebuilt.length,
-    });
-
-    // omp appends the pending prompt to the session tree only after its
-    // message_end is processed — but the input stream already carries it, and
-    // the stream (not the tree) is our single source of truth, so no tail
-    // salvage is needed.
-    const debugOn = debug.enabled;
-    let nudgeInjected = false;
-
-    if (turn.nudge?.shouldInject) {
-      // Feedback-view guard (defense in depth): omp fires back-to-back
-      // context events on DIFFERENT views of the same session — its
-      // recap/subagent pipelines re-feed our own rebuilt output as the next
-      // event.messages (observed live: our 78-msg context-out at 13:41:11.430
-      // became context-in the same millisecond). The PRIMARY fix for the
-      // double-nudge is cadence-stamp preservation across re-folds
-      // (runtime.ts freshSlot) — with stamps intact the kernel's growth gate
-      // holds the line on its own. This guard covers the forms the cadence
-      // gate cannot (e.g. emergency-band re-fires on a feedback view): if the
-      // incoming stream already ENDS with our nudge text, the model has been
-      // reminded in this very turn; stacking a second copy is noise. Matched
-      // on stable kernel template phrases; historical nudges deeper in the
-      // stream are normal and ignored — only the trailing message counts.
-      const lastUser = [...input].reverse().find((m) => m.role === "user");
-      const tailText = lastUser ? JSON.stringify(lastUser.content ?? "") : "";
-      const isFeedbackView = tailText.includes("efficiency nudge to compress early") || tailText.includes("Context limit reached") || tailText.includes("compress calls were rejected in a row");
-      if (isFeedbackView) {
-        debug.event("nudge-feedback-skip", { sid: ctx.sessionManager.getSessionId(), msgs: input.length });
-      } else {
-      const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
-      // Issue #104 coherence: while compress calls are being rejected in a
-      // row, a fresh "compress now" demand is the engine of the retry loop —
-      // the model obeys the newest, loudest instruction and re-calls the same
-      // doomed range. Replace the demand with a hold consistent with the
-      // tool's STOP directive until a success resets the streak. Stamps roll
-      // back like the cadence-suppressed path so the next real nudge is not
-      // delayed.
-      const rejectStreak = runtime.rejectStreakFor(ctx);
-      const epochReset = turn.state.nudge.lastPerMessageNudgeTokens !== preTurnNudgeBaseline;
-      if (rejectStreak >= LOOP_GUARD_STOP) {
-        turn.state.nudge.lastNudgeShownTokens = epochReset ? 0 : preTurnNudgeShownTokens;
-        turn.state.nudge.lastShownByTier = preTurnNudgeShownByTier;
-        nudgeInjected = true;
-        rebuilt.push(holdMessage(rejectStreak));
-        logInfo("nudge", { sid, event: "hold-injected", streak: rejectStreak, pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
-        debug.event("nudge-hold", { sid, streak: rejectStreak });
-      } else {
-      // The kernel's over-limit branch (usage >= maxContextLimitPct) applies no
-      // growth cadence — it re-fires on every context event, i.e. every LLM
-      // call of an agentic turn (issue #22: the nudge injects twice in a row).
-      // Re-apply the kernel's own floor at the injection point: suppress unless
-      // the sent view grew >= growthFloor since the last nudge the model
-      // actually saw. Every legal re-nudge still passes: growth-path re-fires
-      // already satisfy the kernel's per-tier floor, and a compress or
-      // epoch-shrink reset zeroes the stamps (fresh epoch → prevShown 0).
-      // Emergency stays unguarded: while usage >= emergencyThresholdPct the
-      // overflow reminder must keep firing on every call.
-      const prevShown = epochReset ? 0 : preTurnNudgeShownTokens;
-      const cadenceFloor = turn.nudge.breakdown?.growthFloor ?? 0;
-      const suppressed = !emergency && prevShown > 0 && tokenCount - prevShown < cadenceFloor;
-      if (suppressed) {
-        // processTurn already stamped lastNudgeShownTokens/lastShownByTier with
-        // this suppressed event — roll both back so the stamps keep pointing
-        // at the last nudge the model actually saw. turn.state IS the committed
-        // slot state (commitFoldState stores the reference), so this lands.
-        turn.state.nudge.lastNudgeShownTokens = prevShown;
-        turn.state.nudge.lastShownByTier = preTurnNudgeShownByTier;
-        logInfo("nudge", { sid, event: "cadence-suppressed", growth: tokenCount - prevShown, floor: cadenceFloor, pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
-        debug.event("nudge-suppressed", { sid, growth: tokenCount - prevShown, floor: cadenceFloor, pct: Math.round(turn.nudge.contextUsage * 100), reason: turn.nudge.reason });
-      } else {
-        nudgeInjected = true;
-        // Two independent channels for the nudge:
-        //  1. CONTEXT injection (always on): the nudge is appended to the
-        //     messages returned to the LLM so the model sees it and compresses.
-        //     This is a per-turn append — the next context event rebuilds the
-        //     array from scratch, so it does NOT permanently pollute context.
-        //  2. TERMINAL echo (debug only): when debug is on, also print the exact
-        //     text via ctx.ui.notify so the user can observe what is being
-        //     injected while debugging. The model never sees terminal output.
-        {
-          // Hide degenerate ranges (<200 tokens) before rendering: they cannot
-          // carry the 50-char minimum summary and turn "compress all ranges in
-          // one call" into an atomic-rejection trap.
-          turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
-          const rendered = renderNudgeText(turn.nudge, runtime.prompts);
-          const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
-          const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
-          rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts, example));
-          if (emergency) {
-            logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
-          }
-          if (debugOn && ctx.hasUI) {
-            ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
-          }
-          debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, text: rendered.text + example });
-        }
-      }
-      }
-      }
-    }
-    // Record the rebuilt output's identity sequence so the next context event
-    // can recognize omp re-feeding it (issue #52). Context mode only: the
-    // provider-mode wire payload is request-local and never re-enters.
-    if (mode === "context") {
-      runtime.recordRebuiltOutput(ctx, rebuilt);
-    }
-
-    // Always rebuild the full array: every message needs its [mNNNNN] ref
-    // tag applied, so there is no meaningful "no change" case to short-circuit.
-    dumpContextMessages(rebuilt, {
-      sid,
-      injected: nudgeInjected,
-      emergency: turn.nudge?.breakdown?.emergencyOverride === 1,
-    });
-    result = { rebuilt, nudgeInjected };
-    } catch (e) {
-      logThrow("context", e, { sid, phase: "transform", mode });
-      throw e;
-    } finally {
-      release();
-    }
-    // Also check for updates here (not only on session_start): resuming a
-    // long-running session never re-fires session_start. Fire-and-forget
-    // (issue #89): the host awaits this handler in the LLM pipeline with a
-    // 30s budget, while the registry fetch (5s) plus an auto-install (60s)
-    // can exceed it — awaiting here would make the host drop this turn's
-    // transformed messages. checkForUpdate throttles internally (3 min)
-    // and guards concurrent calls; the install survives a short-lived host
-    // via autoInstallLatest's keepAlive interval.
-    void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
-      if (ctx.hasUI) ctx.ui.notify(msg);
-    }).catch((e) => logThrow("update", e, { sid, phase: "context" }));
-    return result;
-}
-
-function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelivery: DeliveryWarner): void {
+function wireContextTransform(pi: ExtensionAPI, warnDelivery: DeliveryWarner): void {
   pi.on("context", async (event, ctx) => {
-    if (resolveTransformMode(runtime.adapter, ctx.model) === "provider") {
-      // Provider mode: the context event is an observer. The fold runs at
-      // before_provider_request instead (wireProviderTransform); touching the
-      // message array here is what creates the feedback-view loop.
-      const sid = ctx.sessionManager.getSessionId();
-      debug.event("context-observer-skip", { sid, msgs: event.messages?.length ?? 0 });
-      const warning = providerDeliveryWarning(runtime.adapter, ctx.model);
-      if (warning) warnDelivery(ctx, sid, warning);
-      return undefined;
-    }
-    const result = await transformStream(ctx, runtime, event.messages ?? [], "context");
-    if (!result) return undefined;
-    return { messages: result.rebuilt };
+    // The context event is a pure observer. The fold runs at
+    // before_provider_request instead (wireProviderTransform); touching the
+    // message array here is what created the feedback-view loop (issues
+    // #22/#47/#52). The legacy "context" transform mode was removed.
+    const sid = ctx.sessionManager.getSessionId();
+    debug.event("context-observer-skip", { sid, msgs: event.messages?.length ?? 0 });
+    const warning = providerDeliveryWarning(ctx.model);
+    if (warning) warnDelivery(ctx, sid, warning);
+    return undefined;
   });
 }
 
@@ -424,23 +199,26 @@ function makeDeliveryWarner(): DeliveryWarner {
 // and the original payload passes through.
 function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelivery: DeliveryWarner): void {
   pi.on("before_provider_request", async (event, ctx) => {
-    if (resolveTransformMode(runtime.adapter, ctx.model) !== "provider") return undefined;
     const payload = (event as { payload?: unknown }).payload;
-    if (payload === null || typeof payload !== "object" || !Array.isArray((payload as { messages?: unknown }).messages)) return undefined;
+    if (payload === null || typeof payload !== "object") return undefined;
+    // The wire body carries either a `messages` array (anthropic / openai
+    // chat) or an `input` array/string (openai-responses). Anything else is
+    // not a transformable provider body — pass through untouched.
+    const p = payload as { messages?: unknown; input?: unknown };
+    const hasMessages = Array.isArray(p.messages);
+    const hasInput = Array.isArray(p.input) || typeof p.input === "string";
+    if (!hasMessages && !hasInput) return undefined;
     const sid = ctx.sessionManager?.getSessionId?.() ?? "";
     const fmt = detectProviderWireFormat(payload);
     if (fmt === null) {
-      // Responses bodies and the like: the kernel codec does not parse them
-      // into a rebuildable message list yet (the proxy covers responses at
-      // the wire level) — pass through untouched.
+      // The kernel codec does not parse this body into a rebuildable message
+      // list — pass through untouched.
       debug.event("provider-transform-unknown-format", { sid });
-      if (runtime.adapter.transformMode === "provider") {
-        warnDelivery(ctx, sid, {
-          key: "unknown-wire-format",
-          reason: "explicit provider mode but the wire body has no codec path (unknown format) — payload passes through",
-          message: '⚠ billion-context-omp: transformMode "provider" is set, but this wire body has no codec path — compression is NOT applied here. Remove the override to use context mode.',
-        });
-      }
+      warnDelivery(ctx, sid, {
+        key: "unknown-wire-format",
+        reason: "the wire body has no codec path (unknown format) — payload passes through",
+        message: "⚠ billion-context-omp: this wire body has no codec path — compression is NOT applied here. Kernel codec tracked upstream (issue #83).",
+      });
       return undefined;
     }
     const representable = payloadRepresentable(payload, fmt);
@@ -454,25 +232,33 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelive
       return undefined;
     }
     try {
+      // Responses bodies rebuild from a projection (layout-preserving patch);
+      // anthropic / openai rebuild from the core message list.
+      const projection = fmt === "responses" ? responsesProjection(payload) : undefined;
       const { msgs, cacheControls } = payloadToCore(payload, fmt);
       if (msgs.length === 0) return undefined;
       const result = await transformStreamCore(ctx, runtime, msgs, fmt);
       if (!result) return undefined;
-      const inMessages = (payload as { messages?: unknown[] }).messages ?? [];
-      // Openai rebuilds restore the host's wire contract first (issue #105):
-      // content "" on assistant tool-call messages and reasoning_details
-      // replay — the codec drops/flips both and strict backends trip.
-      const rebuilt =
-        fmt === "openai"
-          ? restoreOpenaiWireFidelity(inMessages, coreToPayloadMessages(result.coreOut, fmt, cacheControls))
-          : coreToPayloadMessages(result.coreOut, fmt, cacheControls);
-      const outMsgs = rebuilt.length;
-      const inMsgs = inMessages.length;
+      let rebuilt: unknown;
+      if (fmt === "responses") {
+        rebuilt = responsesRebuild(projection!, result.coreOut);
+      } else {
+        const inMessages = (payload as { messages?: unknown[] }).messages ?? [];
+        // Openai rebuilds restore the host's wire contract first (issue #105):
+        // content "" on assistant tool-call messages and reasoning_details
+        // replay — the codec drops/flips both and strict backends trip.
+        rebuilt =
+          fmt === "openai"
+            ? restoreOpenaiWireFidelity(inMessages, coreToPayloadMessages(result.coreOut, fmt, cacheControls))
+            : coreToPayloadMessages(result.coreOut, fmt, cacheControls);
+      }
+      const outMsgs = Array.isArray(rebuilt) ? rebuilt.length : 1;
+      const inMsgs = Array.isArray(p.messages) ? p.messages.length : Array.isArray(p.input) ? p.input.length : 1;
       if (outMsgs !== inMsgs) {
         logInfo("provider-transform", { sid, fmt, inMsgs, outMsgs, nudge: result.nudgeInjected ? "injected" : "idle" });
       }
       debug.event("provider-transform", { sid, fmt, inMsgs, outMsgs, nudgeInjected: result.nudgeInjected });
-      return { ...(payload as object), messages: rebuilt };
+      return fmt === "responses" ? { ...(payload as object), input: rebuilt } : { ...(payload as object), messages: rebuilt };
     } catch (e) {
       // Fail-open: never break the request itself.
       logThrow("provider-transform", e, { sid, fmt });
@@ -481,10 +267,9 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelive
   });
 }
 
-// Core-space transform (provider mode): the wire payload already parsed to
-// BiliMessage[] by the kernel codec. Same fold → processTurn → nudge
-// mechanics as transformStream (context mode), but the output stays in core
-// space and rebuilds straight onto the wire — no AgentMessage detour.
+// Core-space transform: the wire payload already parsed to BiliMessage[] by
+// the kernel codec. Fold → processTurn → nudge, output stays in core space
+// and rebuilds straight onto the wire — no AgentMessage detour.
 async function transformStreamCore(
   ctx: ExtensionContext,
   runtime: AcpRuntime,
@@ -710,25 +495,9 @@ function nudgeText(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Pr
   return lines.join("\n");
 }
 
-function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts, example: string): AgentMessage {
-  return {
-    role: "user",
-    content: [{ type: "text", text: nudgeText(nudge, blocks, prompts, example) }],
-    timestamp: Date.now(),
-  } as AgentMessage;
-}
-
 // Issue #104: the nudge-to-hold text when compress calls are being rejected
 // in a row. The trailing marker phrase doubles as the feedback-view guard
 // match so a re-fed view does not stack a second hold.
 function holdText(streak: number): string {
   return `[ACP hold] Your last ${streak} compress calls were rejected in a row. Do NOT call compress again now and do NOT retry the same range — the compress reminder is suspended until context actually changes. Continue the actual task. If context still needs relief, run acp_status first and target ONLY a range that meets the minimum size.`;
-}
-
-function holdMessage(streak: number): AgentMessage {
-  return {
-    role: "user",
-    content: [{ type: "text", text: holdText(streak) }],
-    timestamp: Date.now(),
-  } as AgentMessage;
 }

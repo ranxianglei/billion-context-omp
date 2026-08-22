@@ -34,7 +34,7 @@ function fakeCtx() {
     mode: "rpc",
     hasUI: false,
     ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-    model: { contextWindow: 200_000 },
+    model: { contextWindow: 200_000, api: "anthropic-messages" },
     sessionManager: {
       getSessionId: () => "test-session",
       getSessionFile: () => STATE_FILE,
@@ -44,10 +44,11 @@ function fakeCtx() {
 
 async function setup(entries: any[]) {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as any);
   const ctx = fakeCtx();
+  // Fire the before_provider_request handler to set up the session state.
   const stream = entries.map((e: any) => e.message);
-  await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: stream } }, ctx);
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
   return { compressTool, ctx };
 }
