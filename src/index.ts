@@ -241,11 +241,22 @@ async function transformStream(
     // Issue #104: hide-compress-calls strips the orphaned call+result from
     // turn.messages, so the model never sees its own last rejection (the
     // loop-guard STOP included — observed: 92 identical retries). Re-append
-    // the pair so the outcome of the last attempt stays visible.
+    // the pair so the outcome of the last attempt stays visible. Kernel
+    // >=0.0.32 (KEEP_LAST_ORPHANED=2) keeps the newest orphan pair visible
+    // natively — re-append only when it is missing, never duplicate.
     const rejectedPair = lastRejectedCompressPair(input);
     if (rejectedPair) {
-      rebuilt.push(...rejectedPair);
-      debug.event("rejected-pair-visible", { sid, callId: (rejectedPair[1] as { toolCallId?: string }).toolCallId ?? null });
+      const rejectedCallId = (rejectedPair[1] as { toolCallId?: string }).toolCallId;
+      const nativelyVisible = rebuilt.some((m) => {
+        const r = m as { role?: string; toolCallId?: string };
+        return r.role === "toolResult" && r.toolCallId === rejectedCallId;
+      });
+      if (nativelyVisible) {
+        debug.event("rejected-pair-native", { sid, callId: rejectedCallId ?? null });
+      } else {
+        rebuilt.push(...rejectedPair);
+        debug.event("rejected-pair-visible", { sid, callId: rejectedCallId ?? null });
+      }
     }
     debug.event("core-out", {
       sid,
@@ -584,11 +595,21 @@ async function transformStreamCore(
     );
     // Issue #104 twin of the context path: keep the last REJECTED compress
     // call+result on the wire — hide-compress-calls strips orphans, erasing
-    // the rejection the model needs to see.
+    // the rejection the model needs to see. Kernel >=0.0.32 keeps the newest
+    // orphan pair visible natively — re-append only when missing.
     const rejectedPair = lastRejectedPairCore(wireMsgs);
     if (rejectedPair) {
-      coreOut.push(...rejectedPair);
-      debug.event("rejected-pair-visible", { sid, space: "core", callId: rejectedPair[1]?.toolCallId ?? null });
+      const rejectedCallId = rejectedPair[1]?.toolCallId;
+      const nativelyVisible = coreOut.some((m) => {
+        const r = m as { contentType?: string; toolCallId?: string };
+        return r.contentType === "tool-result" && r.toolCallId === rejectedCallId;
+      });
+      if (nativelyVisible) {
+        debug.event("rejected-pair-native", { sid, space: "core", callId: rejectedCallId ?? null });
+      } else {
+        coreOut.push(...rejectedPair);
+        debug.event("rejected-pair-visible", { sid, space: "core", callId: rejectedCallId ?? null });
+      }
     }
 
     let nudgeInjected = false;
