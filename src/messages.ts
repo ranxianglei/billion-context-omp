@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
 import { SUMMARY_HEADER, type CoreMessage } from "acp-kernel";
 import { debug } from "./log.js";
+import { lenientJsonParse } from "./compress-args.js";
 type AgentMessage = SessionMessageEntry["message"];
 export type { AgentMessage };
 
@@ -105,19 +106,26 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
 export function compressToolArgs(call: { name: string; arguments?: unknown }): { content: unknown[]; topic?: unknown; summaryMaxChars?: unknown } | null {
   let args = call.arguments;
   if (typeof args === "string") {
-    try { args = JSON.parse(args); } catch { return null; }
+    args = lenientJsonParse(args);
+    if (!args) return null;
   }
   if (!args || typeof args !== "object" || Array.isArray(args)) return null;
   const a = args as Record<string, unknown>;
   if (call.name === "compress") {
-    return Array.isArray(a.content) ? { content: a.content, topic: a.topic, summaryMaxChars: a.summaryMaxChars } : null;
+    let content = a.content;
+    if (typeof content === "string") {
+      content = lenientJsonParse(content);
+      if (!content) return null;
+    }
+    return Array.isArray(content) ? { content, topic: a.topic, summaryMaxChars: a.summaryMaxChars } : null;
   }
   if (call.name !== "write") return null;
   const path = typeof a.path === "string" ? a.path.split("?")[0]!.replace(/\/+$/, "") : "";
   if (path !== "xd://compress") return null;
   let inner: unknown = a.content;
   if (typeof inner === "string") {
-    try { inner = JSON.parse(inner); } catch { return null; }
+    inner = lenientJsonParse(inner);
+    if (!inner) return null;
   }
   if (!inner || typeof inner !== "object") return null;
   if (Array.isArray(inner)) return { content: inner };
