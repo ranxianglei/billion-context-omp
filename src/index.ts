@@ -13,9 +13,9 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages, lastRejectedCompressPair } from "./messages.js";
+import { coreOutToAgentMessages } from "./messages.js";
 import { resolveTransformMode, providerDeliveryWarning, type ProviderDeliveryWarning } from "./transform-mode.js";
-import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, lastRejectedPairCore, payloadRepresentable, payloadToCore, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
+import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -238,15 +238,6 @@ async function transformStream(
     });
 
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
-    // Issue #104: hide-compress-calls strips the orphaned call+result from
-    // turn.messages, so the model never sees its own last rejection (the
-    // loop-guard STOP included — observed: 92 identical retries). Re-append
-    // the pair so the outcome of the last attempt stays visible.
-    const rejectedPair = lastRejectedCompressPair(input);
-    if (rejectedPair) {
-      rebuilt.push(...rejectedPair);
-      debug.event("rejected-pair-visible", { sid, callId: (rejectedPair[1] as { toolCallId?: string }).toolCallId ?? null });
-    }
     debug.event("core-out", {
       sid,
       coreOutMsgs: turn.messages.length,
@@ -582,14 +573,6 @@ async function transformStreamCore(
       turn.state,
       { config, tokenCount },
     );
-    // Issue #104 twin of the context path: keep the last REJECTED compress
-    // call+result on the wire — hide-compress-calls strips orphans, erasing
-    // the rejection the model needs to see.
-    const rejectedPair = lastRejectedPairCore(wireMsgs);
-    if (rejectedPair) {
-      coreOut.push(...rejectedPair);
-      debug.event("rejected-pair-visible", { sid, space: "core", callId: rejectedPair[1]?.toolCallId ?? null });
-    }
 
     let nudgeInjected = false;
     if (turn.nudge?.shouldInject) {
