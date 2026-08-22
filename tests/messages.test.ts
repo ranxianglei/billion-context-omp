@@ -569,6 +569,42 @@ test("findCompressCalls extracts ranges from assistant compress tool calls", () 
   assert.equal(r.topic, "exploration");
 });
 
+test("findCompressCalls salvages truncated compress arguments (issue #121)", () => {
+  // Weak/local model stream cut mid-args: strict JSON.parse fails, the old
+  // compressToolArgs returned null and the compress call silently vanished
+  // from replay. The kernel salvage ladder must recover the complete entry.
+  // Cut AFTER the first entry closes but mid-way through the second entry —
+  // the wrapper never closes, so strict JSON.parse fails on the whole payload
+  // while the balanced first entry is still recoverable by the brace scanner.
+  const truncated =
+    '{"content":[{"startId":"m00010","endId":"m00020","summary":"salvaged complete summary entry for the truncated replay test."},{"startId":"m00';
+  const assistant = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "call_trunc", name: "compress", arguments: truncated },
+    ],
+  };
+  const calls = findCompressCalls(assistant as unknown as SessionMessageEntry["message"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.id, "call_trunc");
+  assert.equal(calls[0]!.ranges.length, 1);
+  const r = calls[0]!.ranges[0]!;
+  assert.equal(r.startRef, "m00010");
+  assert.equal(r.endRef, "m00020");
+  assert.ok(r.summary.length > 0);
+});
+
+test("findCompressCalls still drops unparseable garbage arguments", () => {
+  const assistant = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "call_garbage", name: "compress", arguments: "not json at all, just words" },
+    ],
+  };
+  const calls = findCompressCalls(assistant as unknown as SessionMessageEntry["message"]);
+  assert.equal(calls.length, 0);
+});
+
 test("findCompressCalls recognizes omp xd://compress write-device invocations", () => {
   // omp mounts extension tools as xd:// devices: the model calls the write
   // tool with path xd://compress and the compress args JSON-encoded in content.

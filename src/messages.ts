@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
-import { SUMMARY_HEADER, type CoreMessage } from "acp-kernel";
-import { debug } from "./log.js";
+import { SUMMARY_HEADER, salvageParseRanges, type CoreMessage } from "acp-kernel";
+import { debug, logWarn } from "./log.js";
 type AgentMessage = SessionMessageEntry["message"];
 export type { AgentMessage };
 
@@ -105,7 +105,20 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
 export function compressToolArgs(call: { name: string; arguments?: unknown }): { content: unknown[]; topic?: unknown; summaryMaxChars?: unknown } | null {
   let args = call.arguments;
   if (typeof args === "string") {
-    try { args = JSON.parse(args); } catch { return null; }
+    try { args = JSON.parse(args); } catch {
+      // Weak/local models emit truncated or malformed compress arguments
+      // ~50% of the time (issue #121). Strict parse used to return null here,
+      // silently dropping the call from replay. Route through the kernel's
+      // lenient salvage ladder (fences/repairs/truncated-prefix/field-regex)
+      // so recoverable calls replay; anything truly unparseable still drops.
+      const raw = args as string;
+      const sal = salvageParseRanges(raw);
+      logWarn("messages", { event: "compress-args-salvage", layer: sal.layer, note: sal.note, ranges: sal.ranges.length });
+      if (sal.ranges.length === 0) return null;
+      return {
+        content: sal.ranges.map((r) => ({ startId: r.startRef, endId: r.endRef, summary: r.summary, ...(r.topic ? { topic: r.topic } : {}) })),
+      };
+    }
   }
   if (!args || typeof args !== "object" || Array.isArray(args)) return null;
   const a = args as Record<string, unknown>;
