@@ -339,6 +339,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       // on the wire (base + ACP block — not yet appended at session_start).
       const api = (ctx.model as { api?: string } | undefined)?.api ?? "";
       let stream: BiliMessage[];
+      let openaiSystem: string | null = null;
       if (api === "anthropic-messages") {
         stream = viewToAnthropicCore(view);
       } else if (api === "openai-responses") {
@@ -352,10 +353,28 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       } else {
         const base = getSystemPromptText(ctx);
         const acp = buildAcpSystemPrompt(promptsRef);
-        stream = viewToCoreStream(view, base.includes(acp) ? base : `${base}\n\n${acp}`);
+        openaiSystem = base.includes(acp) ? base : `${base}\n\n${acp}`;
+        stream = viewToCoreStream(view, openaiSystem);
       }
-      const r = foldStreamCore(ctx, stream);
+      let r = foldStreamCore(ctx, stream);
       coreSlotFor(sid).preview = true;
+      // Some hosts fold thinking INTO the assistant content string
+      // ("<think>…</think>" demoted inline — glm/qwen3/deepseek/kimi
+      // profiles) instead of the `reasoning_content` field; the default
+      // mirror then diverges every post-thinking fingerprint and the
+      // replay guards reject ALL in-stream compress calls. If exactly that
+      // happened (zero blocks replayed while compress calls are present in
+      // the stream), refold once with the demoted-inline mirror (issue
+      // #64, demoted variant). preview=true above makes the retry a
+      // fresh-slot refold of the whole stream.
+      if (
+        openaiSystem !== null &&
+        r.state.blocks.length === 0 &&
+        stream.some((m) => findCompressCallsCore(m).length > 0)
+      ) {
+        stream = viewToCoreStream(view, openaiSystem, { demoteThinking: true });
+        r = foldStreamCore(ctx, stream);
+      }
       logInfo("fold", { sid, event: "prime-fold", msgs: stream.length, wire: true, blocks: r.state.blocks.length });
     } catch (e) {
       logWarn("fold", { sid, event: "prime-fold-failed", error: e instanceof Error ? e.message : String(e) });

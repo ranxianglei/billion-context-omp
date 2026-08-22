@@ -550,8 +550,22 @@ export function rangePositionsCore(
  *  of the host's convertToLlm for openai chat) and parse it with the kernel
  *  codec, so primeFold (provider mode) folds exactly the space the live
  *  provider requests fold: system prompt first (it takes m00001), one
- *  tool-result piece per tool result, thinking dropped (issue #64). */
-export function viewToCoreStream(view: AgentMessage[], systemText: string): BiliMessage[] {
+ *  tool-result piece per tool result, thinking dropped (issue #64).
+ *
+ *  Hosts serialize thinking on the openai wire two ways: the
+ *  `reasoning_content` field (zai/replay profiles — the default mirror) or
+ *  DEMOTED INLINE: the host's transform-messages replaces each thinking
+ *  block with a `<think>\n{text}\n</think>` text block (glm/qwen3/deepseek/
+ *  kimi demoted profiles), appends a paragraph-break "\n" when another
+ *  block follows, and concatenates blocks with NO separator. Folding one
+ *  shape while the live request folded the other diverges every
+ *  fingerprint after a thinking turn, so restart replay rejects the
+ *  in-stream compress calls (issue #64, demoted variant). */
+export function viewToCoreStream(
+  view: AgentMessage[],
+  systemText: string,
+  opts?: { demoteThinking?: boolean },
+): BiliMessage[] {
   const messages: Array<Record<string, unknown>> = [{ role: "system", content: systemText }];
   for (const message of view) {
     const m = message as { role?: string; content?: unknown; toolCallId?: string; summary?: string };
@@ -560,19 +574,40 @@ export function viewToCoreStream(view: AgentMessage[], systemText: string): Bili
       if (text) messages.push({ role: "user", content: text });
     } else if (m.role === "assistant") {
       const blocks = Array.isArray(m.content) ? m.content : [];
-      const typed = blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown; thinking?: unknown }>;
+      const typed = blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown; thinking?: unknown; text?: unknown }>;
       const calls = typed.filter((b) => b !== null && typeof b === "object" && b.type === "toolCall");
       // Thinking blocks ride the openai wire as the `reasoning_content` field
       // (host encoder, zai/replay paths); the kernel codec turns each one into
       // an assistant/reasoning piece. Dropping them shifted every index and
-      // fingerprint after a thinking-bearing turn, so restart replay guards
+      // fingerprint after a thinking turn, so restart replay guards
       // rejected the in-stream compress calls and /acp showed no blocks
       // until the first provider request (issue #103).
-      const reasoning = typed
-        .filter((b) => b !== null && typeof b === "object" && b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0)
-        .map((b) => b.thinking as string)
-        .join("\n");
-      const text = extractViewText(m.content);
+      const reasoning =
+        opts?.demoteThinking
+          ? ""
+          : typed
+              .filter((b) => b !== null && typeof b === "object" && b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0)
+              .map((b) => b.thinking as string)
+              .join("\n");
+      let text = extractViewText(m.content);
+      if (opts?.demoteThinking) {
+        // Byte-exact mirror of the host's demoted-inline serialization
+        // (verified against live glm-5.3 request dumps): demoted thinking
+        // blocks and text blocks interleave in CONTENT order, empty text
+        // blocks drop, demoted blocks gain a trailing "\n" when another
+        // block follows, and blocks concatenate with no separator — the
+        // text part's own leading whitespace included.
+        const flat: Array<{ demoted: boolean; text: string }> = [];
+        for (const b of typed) {
+          if (b === null || typeof b !== "object") continue;
+          if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0) {
+            flat.push({ demoted: true, text: `<think>\n${b.thinking}\n</think>` });
+          } else if (b.type === "text" && typeof b.text === "string" && stripRefTag(b.text).trim().length > 0) {
+            flat.push({ demoted: false, text: stripRefTag(b.text) });
+          }
+        }
+        text = flat.map((b, i) => (b.demoted && i < flat.length - 1 ? `${b.text}\n` : b.text)).join("");
+      }
       if (calls.length > 0) {
         messages.push({
           role: "assistant",

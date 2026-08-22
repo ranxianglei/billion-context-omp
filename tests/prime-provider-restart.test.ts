@@ -126,6 +126,44 @@ function openaiWire(session: Msg[]): Record<string, unknown> {
   return { model: "glm-x", max_completion_tokens: 4096, messages };
 }
 
+// Host convertToLlm mirror (openai chat, demoted-thinking profiles like glm /
+// deepseek / qwen): the host renders assistant thinking INLINE as
+// <think>...</think> inside the content string — no reasoning_content field.
+// transform-messages demotes unsigned thinking to text and
+// openai-completions concatenates blocks with a "\n" glue after the tag when
+// another block follows.
+function demotedOpenaiWire(session: Msg[]): Record<string, unknown> {
+  const messages: unknown[] = [{ role: "system", content: WIRE_SYSTEM }];
+  for (const m of session) {
+    if (m.role === "user") {
+      messages.push({ role: "user", content: m.content.map((b) => b.text ?? "").join("\n") });
+    } else if (m.role === "assistant") {
+      const flat: Array<{ demoted: boolean; text: string }> = [];
+      for (const b of m.content) {
+        if (b.type === "thinking" && (b.thinking ?? "").trim().length > 0) {
+          flat.push({ demoted: true, text: `<think>\n${b.thinking}\n</think>` });
+        } else if (b.type === "text" && (b.text ?? "").trim().length > 0) {
+          flat.push({ demoted: false, text: b.text });
+        }
+      }
+      const text = flat.map((b, i) => (b.demoted && i < flat.length - 1 ? b.text + "\n" : b.text)).join("");
+      const calls = m.content.filter((b) => b.type === "toolCall");
+      if (calls.length > 0) {
+        messages.push({
+          role: "assistant",
+          content: text,
+          tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.arguments ?? {}) } })),
+        });
+      } else if (text) {
+        messages.push({ role: "assistant", content: text });
+      }
+    } else if (m.role === "toolResult") {
+      messages.push({ role: "tool", tool_call_id: m.toolCallId, content: m.content.map((b) => b.text ?? "").join("\n") });
+    }
+  }
+  return { model: "glm-x", max_completion_tokens: 4096, messages };
+}
+
 // Host convertToLlm mirror (anthropic): system top-level, tool_result blocks
 // ride in user messages, tool_use blocks in assistant messages.
 function anthropicWire(session: Msg[]): Record<string, unknown> {
@@ -416,6 +454,39 @@ test("provider+responses: restart primeFold rebuilds blocks from thinking-bearin
   await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
   const prime = await statusText(host2);
   assert.equal(activeBlocks(prime), "1", "responses post-restart pre-LLM acp_status shows the block:\n" + prime);
+
+  const out = await llmCall(host2, host2.wire(session));
+  const flat = JSON.stringify(out ?? {});
+  assert.ok(flat.includes("COVERED WORK SUMMARY"), "post-restart wire payload carries the summary");
+  const post = await statusText(host2);
+  assert.equal(activeBlocks(post), "1", "post-restart post-LLM acp_status still shows the block");
+});
+
+// Issue #64 (demoted-thinking variant): on glm-style openai-completions
+// profiles the host serializes assistant thinking INLINE as <think>...</think>
+// inside the content string — there is no reasoning_content field. When the
+// prime mirror emitted reasoning pieces instead, the reasoning+text split
+// landed the span fingerprints in a different space, every in-stream compress
+// replay was rejected, and restart showed "Blocks: none" until the first
+// provider request refolded. primeFold must retry with the demoted mirror.
+test("provider+openai: restart primeFold rebuilds blocks from demoted inline-<think> turns (issue #64 demoted)", async () => {
+  const session: Msg[] = [];
+  for (let i = 0; i < 7; i++) {
+    session.push(userMsg(`u${i} ` + FILLER));
+    session.push(thinkBot(`b${i} ` + FILLER));
+  }
+
+  // process 1: live session where the host inlines every assistant's thinking
+  const host = makeHost(session, "p64-dethink", demotedOpenaiWire);
+  createAcpExtension({ autoUpdate: false })(host.api as ExtensionAPI);
+  await livePhase(host, session);
+
+  // process 2: restart — /acp must show the block BEFORE any LLM call
+  const host2 = makeHost(session, "p64-dethink", demotedOpenaiWire);
+  createAcpExtension({ autoUpdate: false })(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+  const prime = await statusText(host2);
+  assert.equal(activeBlocks(prime), "1", "post-restart pre-LLM acp_status shows the block:\n" + prime);
 
   const out = await llmCall(host2, host2.wire(session));
   const flat = JSON.stringify(out ?? {});
