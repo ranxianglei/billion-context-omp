@@ -148,6 +148,36 @@ function anthropicWire(session: Msg[]): Record<string, unknown> {
   return { model: "claude-x", max_tokens: 8192, system: WIRE_SYSTEM, messages };
 }
 
+// Host convertToLlm mirror (openai-responses): system in top-level
+// `instructions`, conversation as an `input` item array. Reasoning items
+// carry a host-generated `id` (the kernel derives the reasoning core id
+// from it) — the primeFold mirror must land in the same ref/fingerprint
+// space (issue #64, responses variant).
+function responsesWire(session: Msg[]): Record<string, unknown> {
+  const input: unknown[] = [];
+  for (const m of session) {
+    if (m.role === "user") {
+      input.push({ type: "message", role: "user", content: [{ type: "input_text", text: m.content.map((b) => b.text ?? "").join("\n") }] });
+    } else if (m.role === "assistant") {
+      const thinking = m.content.filter((b) => b.type === "thinking" && (b.thinking ?? "").trim().length > 0).map((b) => b.thinking ?? "");
+      const calls = m.content.filter((b) => b.type === "toolCall");
+      const text = m.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n");
+      if (thinking.length > 0) {
+        input.push({ type: "reasoning", id: `rs_${thinking.join("").length}`, summary: [], content: [{ type: "reasoning_text", text: thinking.join("\n") }] });
+      }
+      if (text) {
+        input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text, annotations: [] }], status: "completed" });
+      }
+      for (const c of calls) {
+        input.push({ type: "function_call", call_id: c.id, name: c.name, arguments: JSON.stringify(c.arguments ?? {}) });
+      }
+    } else if (m.role === "toolResult") {
+      input.push({ type: "function_call_output", call_id: m.toolCallId, output: m.content.map((b) => b.text ?? "").join("\n") });
+    }
+  }
+  return { model: "qwen-x", instructions: WIRE_SYSTEM, input };
+}
+
 async function llmCall(host: Host, payload: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
   const hs = host.handlers.get("before_provider_request") ?? [];
   let out: Record<string, unknown> | undefined;
@@ -361,4 +391,35 @@ test("provider+anthropic: restart primeFold rebuilds blocks from thinking-bearin
   await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
   const prime = await statusText(host2);
   assert.equal(activeBlocks(prime), "1", "anthropic post-restart pre-LLM acp_status shows the block:\n" + prime);
+});
+
+// Issue #64 (responses variant): the live /v1/responses request carries
+// assistant thinking as reasoning items with a host-generated `id`; the
+// kernel derives the reasoning core id from that id. The primeFold mirror
+// (viewToResponsesCore) emits reasoning items WITHOUT an id, so the kernel
+// falls back to a hash of the item — a DIFFERENT core id. The span
+// fingerprints mismatch, every in-stream compress replay is rejected, and
+// restart shows "Blocks: none" until the first provider request refolds.
+test("provider+responses: restart primeFold rebuilds blocks from thinking-bearing turns (issue #64 responses)", async () => {
+  const session: Msg[] = [];
+  for (let i = 0; i < 7; i++) {
+    session.push(userMsg(`u${i} ` + FILLER));
+    session.push(thinkBot(`b${i} ` + FILLER));
+  }
+
+  const host = makeHost(session, "p64-resp-think", responsesWire, { api: "openai-responses", contextWindow: 200_000 });
+  createAcpExtension({ autoUpdate: false })(host.api as ExtensionAPI);
+  await livePhase(host, session);
+
+  const host2 = makeHost(session, "p64-resp-think", responsesWire, { api: "openai-responses", contextWindow: 200_000 });
+  createAcpExtension({ autoUpdate: false })(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+  const prime = await statusText(host2);
+  assert.equal(activeBlocks(prime), "1", "responses post-restart pre-LLM acp_status shows the block:\n" + prime);
+
+  const out = await llmCall(host2, host2.wire(session));
+  const flat = JSON.stringify(out ?? {});
+  assert.ok(flat.includes("COVERED WORK SUMMARY"), "post-restart wire payload carries the summary");
+  const post = await statusText(host2);
+  assert.equal(activeBlocks(post), "1", "post-restart post-LLM acp_status still shows the block");
 });
