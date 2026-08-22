@@ -633,6 +633,53 @@ test("findCompressCalls accepts already-object arguments and skips empty ranges"
   const none = findCompressCalls({ role: "user", content: [{ type: "text", text: "hi" }] } as SessionMessageEntry["message"]);
   assert.equal(none.length, 0);
 });
+
+test("findCompressCalls salvages stringified content on direct compress path", () => {
+  // vLLM / weak models sometimes emit content as a JSON string instead of an
+  // array (billion-context #176). The lenient parser decodes it.
+  const assistant = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "call_str", name: "compress", arguments: JSON.stringify({
+        content: JSON.stringify([{ startId: "m00001", endId: "m00002", "summary": "stringified content range for replay." }]),
+      }) },
+    ],
+  };
+  const calls = findCompressCalls(assistant as unknown as SessionMessageEntry["message"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.ranges.length, 1);
+  assert.equal(calls[0]!.ranges[0]!.startRef, "m00001");
+});
+
+test("findCompressCalls salvages truncated content array from raw args", () => {
+  // The model emitted a content array cut off mid-entry. The lenient parser
+  // salvages the complete prefix entries so partial compression beats total
+  // failure (issue #121).
+  const assistant = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "call_trunc", name: "compress", arguments:
+        '{"content": [{"startId": "m00001", "endId": "m00002", "summary": "complete first range"}, {"startId": "m00003", "endId": "m00004", "summary": "trunca' },
+    ],
+  };
+  const calls = findCompressCalls(assistant as unknown as SessionMessageEntry["message"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.ranges.length, 1);
+  assert.equal(calls[0]!.ranges[0]!.startRef, "m00001");
+});
+
+test("findCompressCalls strips code fences from raw compress args", () => {
+  const inner = JSON.stringify({ content: [{ startId: "m00005", endId: "m00006", summary: "fenced compress call range." }] });
+  const assistant = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "call_fence", name: "compress", arguments: "```json\n" + inner + "\n```" },
+    ],
+  };
+  const calls = findCompressCalls(assistant as unknown as SessionMessageEntry["message"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.ranges[0]!.startRef, "m00005");
+});
 import { rangeFingerprints, spanFingerprint } from "../src/messages.js";
 
 test("spanFingerprint binds the exact split piece at a parallel-toolcall boundary", async () => {
