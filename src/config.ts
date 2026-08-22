@@ -15,6 +15,18 @@ export interface DelegateConfig {
   displayUsage?: "merged" | "separate";
 }
 
+/** Fold-state persistence (issue #130): checkpoint the live fold slot to
+ * disk so a restarted session restores its compression blocks without
+ * waiting for the first provider request to refold the wire. */
+export interface FoldPersistenceConfig {
+  /** Default: enabled. `false` keeps the fold memory-only — restart falls
+   * back to the primeFold mirror. */
+  enabled?: boolean;
+  /** Directory for fold checkpoints. Default `~/.omp/acp-omp-folds/`
+   * (env `ACP_OMP_FOLD_DIR` overrides). */
+  dir?: string;
+}
+
 /** Compression tuning. All fields accept a ratio (0.75) or percent string
  *  ("75%") where noted. */
 export interface CompressConfig {
@@ -61,10 +73,14 @@ export interface AdapterConfig {
    *  head-truncated with a notice telling the model how to see the full output
    *  (bash: read BashToolDetails.fullOutputPath). */
   toolOutputMaxBytes?: number;
-  /** Delegate sub-agent config. Accepts a boolean shorthand (`true` →
+  /** Delegate sub-agent config. Accepts a boolean shorthand (`true`
    *  `{ enabled: true }`, `false` → `{ enabled: false }`) or a DelegateConfig
    *  object. Default: enabled. */
   delegate?: boolean | DelegateConfig;
+  /** Fold-state persistence (issue #130). Accepts a boolean shorthand (`true`
+   * → `{ enabled: true }`, `false` → `{ enabled: false }`) or a
+   * FoldPersistenceConfig object. Default: enabled. */
+  foldPersistence?: boolean | FoldPersistenceConfig;
   /** Compression tuning. */
   compress?: CompressConfig;
   /** Legacy flat alias for `delegate.displayUsage`. Kept for backward
@@ -102,6 +118,16 @@ export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; dis
     enabled: d !== false,
     displayUsage: adapter.displayUsage ?? "separate",
   };
+}
+
+/** Resolve fold persistence config from the adapter, handling the boolean
+ * shorthand. */
+export function resolveFoldPersistence(adapter: AdapterConfig): { enabled: boolean; dir?: string } {
+  const fp = adapter.foldPersistence;
+  if (typeof fp === "object" && fp !== null) {
+    return { enabled: fp.enabled !== false, dir: fp.dir };
+  }
+  return { enabled: fp !== false };
 }
 
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {

@@ -76,9 +76,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       logWarn("config", { event: "prompts-resolve-failed", error: e instanceof Error ? e.message : String(e) });
       runtime.setPrompts(defaultPrompts);
     }
-    // Rebuild blocks from the persisted session right away so /acp and
-    // acp_status show them immediately on resume — before the first LLM call.
-    runtime.primeFold(ctx);
+    // Restore the checkpointed LIVE fold before any mirror runs (issue
+    // #130): the checkpoint carries identities in the wire's own
+    // content-hash space, so the first live fold re-validates it via LCP.
+    // Only when nothing restores (first-ever session, disabled persistence,
+    // corrupt/foreign checkpoint) does the primeFold mirror run — and a
+    // mirror that guesses the host's view→wire projection lands in a
+    // different fingerprint space, which is the bug the checkpoint fixes.
+    if (!runtime.restoreFold(ctx)) runtime.primeFold(ctx);
   };
   pi.on("session_start", async (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
@@ -136,6 +141,16 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     await prepareAndPrime(ctx, "session_branch");
   });
   pi.on("session_shutdown", (_event, ctx) => {
+    // Flush the fold checkpoint synchronously BEFORE forgetting the slot:
+    // the host may exit as soon as this handler returns, dropping any
+    // debounced save with the process (issue #130). A failed write logs;
+    // the in-memory slot dies with the process either way.
+    try {
+      const sid = ctx.sessionManager.getSessionId();
+      if (!runtime.flushFoldSync(sid)) logWarn("fold", { sid, event: "fold-flush-failed" });
+    } catch {
+      // session id unavailable — nothing to flush
+    }
     try {
       runtime.forgetSession(ctx.sessionManager.getSessionId());
     } catch {
@@ -319,6 +334,7 @@ async function transformStreamCore(
     // tool pieces, so blocks cover them; the model cites them by block ref).
     const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount, renderTags: "text-only" });
     runtime.commitFoldState(ctx, turn.state);
+    runtime.scheduleFoldSnapshot(ctx);
 
     logInfo("turn", {
       sid,
