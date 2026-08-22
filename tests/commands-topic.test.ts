@@ -1,6 +1,6 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { topicFallback } from "billion-context-kit";
+import { topicFallback } from "acp-kernel/panel";
 import { makeCommands } from "../src/commands.js";
 import type { AcpRuntime } from "../src/runtime.js";
 import type { ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";

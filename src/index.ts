@@ -4,7 +4,7 @@ import type {
   ExtensionFactory,
 } from "@oh-my-pi/pi-coding-agent";
 import type { NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
-import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
+import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool, LOOP_GUARD_STOP } from "./compress-tool.js";
@@ -16,7 +16,6 @@ import { providerDeliveryWarning, hostMeetsMinimum, MIN_HOST_VERSION, type Provi
 import { VERSION } from "@oh-my-pi/pi-utils";
 import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, responsesProjection, responsesRebuild, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
-import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { stampAndDetect } from "./instance-guard.js";
