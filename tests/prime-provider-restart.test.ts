@@ -310,6 +310,55 @@ test("provider+anthropic: restart primeFold still rebuilds the block (unchanged 
   assert.equal(activeBlocks(post), "1", "post-restart post-LLM acp_status still shows the block");
 });
 
+// Kernel 0.0.37 system hoist: the live wire's system message (host prompt +
+// RUNTIME injections — date reminders, model notes) is not reproducible from
+// the restarted process. When it sat inside the fold space as m00001, every
+// span fingerprint derived from a restart's reconstruction mismatched (guard
+// rejected all replays -> "Blocks: none"), and a compression covering the
+// system piece deleted the system prompt from every rebuilt payload. The
+// kernel now hoists the leading system prefix out of the id space and omp
+// re-attaches the ORIGINAL wire system on rebuild.
+test("provider+openai: restart survives when the live wire system differs from primeFold's reconstruction (system hoist)", async () => {
+  const INJECTED = "<runtime-injected>current date 2026-08-22; adaptive context policy v2</runtime-injected>";
+  const LIVE_WIRE_SYSTEM = WIRE_SYSTEM + "\n\n" + INJECTED;
+  const liveSystemWire = (session: Msg[]): Record<string, unknown> => {
+    const body = openaiWire(session) as { messages: unknown[] };
+    return { ...body, messages: [{ role: "system", content: LIVE_WIRE_SYSTEM }, ...body.messages.slice(1)] };
+  };
+
+  const session: Msg[] = [];
+  for (let i = 0; i < 7; i++) {
+    session.push(userMsg(`u${i} ` + FILLER));
+    session.push(botMsg(`b${i} ` + FILLER));
+  }
+
+  // process 1: live session whose wire carries runtime injections the
+  // restart cannot reproduce.
+  const host = makeHost(session, "hoist-openai", liveSystemWire);
+  createAcpExtension({ autoUpdate: false })(host.api as ExtensionAPI);
+  await livePhase(host, session);
+  const out1 = await llmCall(host, host.wire(session));
+  const flat1 = JSON.stringify(out1 ?? {});
+  assert.ok(flat1.includes(INJECTED), "original (injected) wire system survives the compression rebuild");
+
+  // process 2: restart — primeFold reconstructs system WITHOUT the runtime
+  // injections. Pre-hoist this mismatched every span fp -> "Blocks: none".
+  const host2 = makeHost(session, "hoist-openai", liveSystemWire);
+  createAcpExtension({ autoUpdate: false })(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+
+  const prime = await statusText(host2);
+  assert.equal(activeBlocks(prime), "1", "post-restart pre-LLM block survives despite system drift:\n" + prime);
+
+  const out2 = await llmCall(host2, host2.wire(session));
+  const flat2 = JSON.stringify(out2 ?? {});
+  assert.ok(flat2.includes("COVERED WORK SUMMARY"), "post-restart payload carries the summary");
+  assert.ok(!flat2.includes(`u2 ${FILLER.slice(0, 20)}`), "post-restart payload prunes the covered filler");
+  assert.ok(flat2.includes(INJECTED), "post-restart payload re-attaches the original wire system verbatim");
+  const post = await statusText(host2);
+  assert.equal(activeBlocks(post), "1", "post-restart post-LLM block still active");
+});
+
 // Issue #103: `omp --resume` / reload / fork boots fire session_start
 // BEFORE the old transcript is mounted (prime sees an empty view), then
 // session_switch (or session_branch) once it is loaded. Without a handler

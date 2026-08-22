@@ -63,7 +63,7 @@ export function detectProviderWireFormat(payload: unknown): ProviderWireFormat |
 export function payloadToCore(
   payload: unknown,
   fmt: ProviderWireFormat,
-): { msgs: BiliMessage[]; cacheControls?: Map<string, unknown> } {
+): { msgs: BiliMessage[]; cacheControls?: Map<string, unknown>; systemText?: string } {
   if (fmt === "anthropic") {
     const { msgs, cacheControls } = anthropicToCore(payload as Parameters<typeof anthropicToCore>[0]);
     return { msgs, cacheControls };
@@ -72,8 +72,14 @@ export function payloadToCore(
     const { msgs } = responsesToCore(payload as ResponsesRequestBody);
     return { msgs };
   }
-  const { msgs } = openaiToCore(payload as Parameters<typeof openaiToCore>[0]);
-  return { msgs };
+  // openai: the kernel hoists the contiguous leading system/developer prefix
+  // out of the fold id space (acp-kernel 0.0.37) — system content is host
+  // runtime state, so excluding it from the fingerprints is what makes
+  // restart replay converge when the live wire system differs from the
+  // primeFold reconstruction. The prefix rides back onto the rebuilt wire
+  // via restoreOpenaiSystemPrefix (index.ts), not through the fold.
+  const { msgs, systemText } = openaiToCore(payload as Parameters<typeof openaiToCore>[0]);
+  return { msgs, systemText };
 }
 
 /** Parse a responses body into the kernel's projection (layout + core pieces).
@@ -240,6 +246,26 @@ export function restoreOpenaiWireFidelity(originalMessages: unknown[], rebuilt: 
     if (attached.length > 0) out.reasoning_details = attached;
     return out;
   });
+}
+
+/** Re-attach the leading system/developer messages the kernel hoisted out of
+ *  the fold id space (acp-kernel 0.0.37). The rebuilt message list no longer
+ *  carries them; without this pass, a compression covering the old system
+ *  piece dropped the model's system prompt from the wire entirely (observed
+ *  on glm-5.3: post-compression requests went from systemLen 45151 to 0).
+ *  Original messages are re-attached verbatim so the host's wire shape —
+ *  system vs developer roles, message count, name fields — survives
+ *  byte-for-byte. Mirrors the anthropic path, where the top-level system
+ *  field never enters the fold at all. */
+export function restoreOpenaiSystemPrefix(originalMessages: unknown[], rebuilt: unknown[]): unknown[] {
+  let prefixEnd = 0;
+  for (const message of originalMessages) {
+    const role = (message as { role?: unknown } | null)?.role;
+    if (role === "system" || role === "developer") prefixEnd += 1;
+    else break;
+  }
+  if (prefixEnd === 0) return rebuilt;
+  return [...originalMessages.slice(0, prefixEnd), ...rebuilt];
 }
 
 const renderRefsAll = createRenderRefsNode("all");
