@@ -131,6 +131,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     }
     runtime.noteCompressOutcome(ctx, true);
     await runtime.commitFoldState(ctx, applied.state, toolCallId);
+    runtime.scheduleFoldSnapshot(ctx);
     const { blocksCreated, tokensCompressed, warnings } = applied.result;
 
     const afterTokens = Math.max(0, beforeTokens - tokensCompressed);
