@@ -241,22 +241,11 @@ async function transformStream(
     // Issue #104: hide-compress-calls strips the orphaned call+result from
     // turn.messages, so the model never sees its own last rejection (the
     // loop-guard STOP included — observed: 92 identical retries). Re-append
-    // the pair so the outcome of the last attempt stays visible. Kernel
-    // >=0.0.32 (KEEP_LAST_ORPHANED=2) keeps the newest orphan pair visible
-    // natively — re-append only when it is missing, never duplicate.
+    // the pair so the outcome of the last attempt stays visible.
     const rejectedPair = lastRejectedCompressPair(input);
     if (rejectedPair) {
-      const rejectedCallId = (rejectedPair[1] as { toolCallId?: string }).toolCallId;
-      const nativelyVisible = rebuilt.some((m) => {
-        const r = m as { role?: string; toolCallId?: string };
-        return r.role === "toolResult" && r.toolCallId === rejectedCallId;
-      });
-      if (nativelyVisible) {
-        debug.event("rejected-pair-native", { sid, callId: rejectedCallId ?? null });
-      } else {
-        rebuilt.push(...rejectedPair);
-        debug.event("rejected-pair-visible", { sid, callId: rejectedCallId ?? null });
-      }
+      rebuilt.push(...rejectedPair);
+      debug.event("rejected-pair-visible", { sid, callId: (rejectedPair[1] as { toolCallId?: string }).toolCallId ?? null });
     }
     debug.event("core-out", {
       sid,
@@ -595,21 +584,11 @@ async function transformStreamCore(
     );
     // Issue #104 twin of the context path: keep the last REJECTED compress
     // call+result on the wire — hide-compress-calls strips orphans, erasing
-    // the rejection the model needs to see. Kernel >=0.0.32 keeps the newest
-    // orphan pair visible natively — re-append only when missing.
+    // the rejection the model needs to see.
     const rejectedPair = lastRejectedPairCore(wireMsgs);
     if (rejectedPair) {
-      const rejectedCallId = rejectedPair[1]?.toolCallId;
-      const nativelyVisible = coreOut.some((m) => {
-        const r = m as { contentType?: string; toolCallId?: string };
-        return r.contentType === "tool-result" && r.toolCallId === rejectedCallId;
-      });
-      if (nativelyVisible) {
-        debug.event("rejected-pair-native", { sid, space: "core", callId: rejectedCallId ?? null });
-      } else {
-        coreOut.push(...rejectedPair);
-        debug.event("rejected-pair-visible", { sid, space: "core", callId: rejectedCallId ?? null });
-      }
+      coreOut.push(...rejectedPair);
+      debug.event("rejected-pair-visible", { sid, space: "core", callId: rejectedPair[1]?.toolCallId ?? null });
     }
 
     let nudgeInjected = false;
