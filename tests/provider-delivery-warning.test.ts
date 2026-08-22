@@ -100,15 +100,16 @@ test("unknown wire format surfaces the dynamic warning once per session", async 
   const { api, handlers } = captureApi();
   createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
   const notify: string[] = [];
-  // `input` array + `messages` array: detectWireFormat short-circuits to
-  // "responses" — no codec path → pass-through + warning (host-version independent).
-  const payload = { model: "x", input: [{ role: "user", content: "hi" }], messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] };
+  // A body with neither an `input` array/string nor a `messages` array is not
+  // a transformable provider body — the early shape check passes it through
+  // before format detection, so no warning fires (the warning is reserved for
+  // bodies that have a recognizable shape but no codec path).
+  const payload = { model: "x", foo: 1 };
   const fire = () =>
     handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, uiCtx({ sid: "warn-dynamic", api: "custom-api", notify }));
   assert.equal(await fire(), undefined, "unrecognized body passes through untouched");
   await fire();
-  assert.equal(notify.length, 1, "notify fires exactly once per session");
-  assert.match(notify[0]!, /no codec path/);
+  assert.equal(notify.length, 0, "no warning for a body with no transformable shape");
 });
 
 test("distinct sessions each get the warning once", async () => {

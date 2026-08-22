@@ -25,6 +25,7 @@ import {
   toolResultTextsCore,
   viewToAnthropicCore,
   viewToCoreStream,
+  viewToResponsesCore,
 } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { boundaryRaw, findCompressCalls, isBlockRef, messageIdentity, rawPos, spanFingerprint, streamToCoreMessages, toolResultTexts, type AgentMessage, type BlockLike } from "./messages.js";
@@ -492,6 +493,14 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
         let stream: BiliMessage[];
         if (api === "anthropic-messages") {
           stream = viewToAnthropicCore(view);
+        } else if (api === "openai-responses") {
+          // Responses wire: system prompt lives in the top-level `instructions`
+          // field (out of the fold space), conversation in the `input` array.
+          // Mirror that layout, or the preview lands in a different ref space
+          // than the live request (issue #64, responses variant).
+          const base = getSystemPromptText(ctx);
+          const acp = buildAcpSystemPrompt(promptsRef);
+          stream = viewToResponsesCore(view, base.includes(acp) ? base : `${base}\n\n${acp}`);
         } else {
           const base = getSystemPromptText(ctx);
           const acp = buildAcpSystemPrompt(promptsRef);

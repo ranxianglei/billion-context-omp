@@ -41,11 +41,11 @@ export interface AdapterConfig {
    *  When omitted, the mode is resolved per model API (issue #79):
    *  "provider" where the host actually applies the wire-payload
    *  replacement AND the wire body has a codec path — anthropic-messages,
-   *  ollama-chat, and openai-completions on hosts >= 17.3.8 (upstream PR
-   *  can1357/oh-my-pi#8717, issue #83); "context" everywhere else
-   *  (older hosts drop the replacement; bedrock/cursor/responses/google
-   *  bodies have no codec path yet). Explicit pinning in
-   *  ~/.omp/acp-omp.json always wins. */
+   *  ollama-chat, openai-responses (/v1/responses), and openai-completions
+   *  on hosts >= 17.3.8 (upstream PR can1357/oh-my-pi#8717, issue #83);
+   *  "context" everywhere else (older hosts drop the replacement;
+   *  bedrock/cursor/google bodies have no codec path yet). Explicit pinning
+   *  in ~/.omp/acp-omp.json always wins. */
   transformMode?: "context" | "provider";
   /** When omitted, the adapter reads `ctx.model.contextWindow` live each turn.
    *  Set explicitly for tests/headless runs. */

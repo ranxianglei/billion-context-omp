@@ -15,7 +15,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { resolveTransformMode, providerDeliveryWarning, type ProviderDeliveryWarning } from "./transform-mode.js";
-import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
+import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, responsesProjection, responsesRebuild, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { viableRanges } from "billion-context-kit";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -426,13 +426,19 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelive
   pi.on("before_provider_request", async (event, ctx) => {
     if (resolveTransformMode(runtime.adapter, ctx.model) !== "provider") return undefined;
     const payload = (event as { payload?: unknown }).payload;
-    if (payload === null || typeof payload !== "object" || !Array.isArray((payload as { messages?: unknown }).messages)) return undefined;
+    if (payload === null || typeof payload !== "object") return undefined;
+    // The wire body carries either a `messages` array (anthropic / openai
+    // chat) or an `input` array/string (openai-responses). Anything else is
+    // not a transformable provider body — pass through untouched.
+    const p = payload as { messages?: unknown; input?: unknown };
+    const hasMessages = Array.isArray(p.messages);
+    const hasInput = Array.isArray(p.input) || typeof p.input === "string";
+    if (!hasMessages && !hasInput) return undefined;
     const sid = ctx.sessionManager?.getSessionId?.() ?? "";
     const fmt = detectProviderWireFormat(payload);
     if (fmt === null) {
-      // Responses bodies and the like: the kernel codec does not parse them
-      // into a rebuildable message list yet (the proxy covers responses at
-      // the wire level) — pass through untouched.
+      // The kernel codec does not parse this body into a rebuildable message
+      // list — pass through untouched.
       debug.event("provider-transform-unknown-format", { sid });
       if (runtime.adapter.transformMode === "provider") {
         warnDelivery(ctx, sid, {
@@ -454,25 +460,33 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelive
       return undefined;
     }
     try {
+      // Responses bodies rebuild from a projection (layout-preserving patch);
+      // anthropic / openai rebuild from the core message list.
+      const projection = fmt === "responses" ? responsesProjection(payload) : undefined;
       const { msgs, cacheControls } = payloadToCore(payload, fmt);
       if (msgs.length === 0) return undefined;
       const result = await transformStreamCore(ctx, runtime, msgs, fmt);
       if (!result) return undefined;
-      const inMessages = (payload as { messages?: unknown[] }).messages ?? [];
-      // Openai rebuilds restore the host's wire contract first (issue #105):
-      // content "" on assistant tool-call messages and reasoning_details
-      // replay — the codec drops/flips both and strict backends trip.
-      const rebuilt =
-        fmt === "openai"
-          ? restoreOpenaiWireFidelity(inMessages, coreToPayloadMessages(result.coreOut, fmt, cacheControls))
-          : coreToPayloadMessages(result.coreOut, fmt, cacheControls);
-      const outMsgs = rebuilt.length;
-      const inMsgs = inMessages.length;
+      let rebuilt: unknown;
+      if (fmt === "responses") {
+        rebuilt = responsesRebuild(projection!, result.coreOut);
+      } else {
+        const inMessages = (payload as { messages?: unknown[] }).messages ?? [];
+        // Openai rebuilds restore the host's wire contract first (issue #105):
+        // content "" on assistant tool-call messages and reasoning_details
+        // replay — the codec drops/flips both and strict backends trip.
+        rebuilt =
+          fmt === "openai"
+            ? restoreOpenaiWireFidelity(inMessages, coreToPayloadMessages(result.coreOut, fmt, cacheControls))
+            : coreToPayloadMessages(result.coreOut, fmt, cacheControls);
+      }
+      const outMsgs = Array.isArray(rebuilt) ? rebuilt.length : 1;
+      const inMsgs = Array.isArray(p.messages) ? p.messages.length : Array.isArray(p.input) ? p.input.length : 1;
       if (outMsgs !== inMsgs) {
         logInfo("provider-transform", { sid, fmt, inMsgs, outMsgs, nudge: result.nudgeInjected ? "injected" : "idle" });
       }
       debug.event("provider-transform", { sid, fmt, inMsgs, outMsgs, nudgeInjected: result.nudgeInjected });
-      return { ...(payload as object), messages: rebuilt };
+      return fmt === "responses" ? { ...(payload as object), input: rebuilt } : { ...(payload as object), messages: rebuilt };
     } catch (e) {
       // Fail-open: never break the request itself.
       logThrow("provider-transform", e, { sid, fmt });

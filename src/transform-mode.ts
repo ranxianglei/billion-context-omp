@@ -2,9 +2,11 @@ import type { AdapterConfig } from "./config.js";
 import { VERSION } from "@oh-my-pi/pi-utils";
 
 // Model APIs where the omp host's provider layer applies the
-// before_provider_request (onPayload) replacement AND serves a `messages`-array
-// wire body the wire transform recognizes.
-const PROVIDER_VIABLE_APIS = new Set(["anthropic-messages", "ollama-chat"]);
+// before_provider_request (onPayload) replacement AND serves a wire body the
+// wire transform recognizes (anthropic-messages, ollama-chat, and
+// openai-responses — the /v1/responses protocol, whose `input` body the
+// kernel's responses codec rebuilds layout-preserving).
+const PROVIDER_VIABLE_APIS = new Set(["anthropic-messages", "ollama-chat", "openai-responses"]);
 
 // openai-completions honors the onPayload replacement only from host 17.3.8
 // (upstream PR can1357/oh-my-pi#8717, shipped in pi-ai 17.3.8; issue #83). On
