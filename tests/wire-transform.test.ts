@@ -116,8 +116,9 @@ test("kernel round-trip preserves tool_calls and tool results (openai)", () => {
       { role: "tool", tool_call_id: "t9", content: "no matches" },
     ],
   };
-  const { msgs } = payloadToCore(payload, "openai");
-  assert.ok(msgs.some((m) => m.role === "system"), "system prompt becomes a core piece (takes m00001)");
+  const { msgs, systemText } = payloadToCore(payload, "openai");
+  assert.ok(!msgs.some((m) => m.role === "system"), "leading system is hoisted out of the fold space");
+  assert.equal(systemText, "sys", "system prefix is returned alongside the core stream");
   const out = coreToPayloadMessages(msgs, "openai") as Array<Record<string, any>>;
   const flat = JSON.stringify(out);
   assert.ok(flat.includes("t9"), "tool_call_id survives");
@@ -330,8 +331,8 @@ test("viewToCoreStream mirrors the openai wire shape (system first)", () => {
     { role: "toolResult", content: [{ type: "text", text: "hit" }], toolCallId: "t1" },
   ] as unknown as Parameters<typeof viewToCoreStream>[0];
   const core = viewToCoreStream(view, "base system");
-  assert.equal(core[0]?.role, "system", "system prompt takes m00001");
-  assert.equal(core[0]?.text, "base system");
+  assert.ok(!core.some((m) => m.role === "system"), "system prompt is hoisted out of the fold space");
+  assert.equal(core[0]?.role, "user", "first fold piece is the first user message");
   assert.ok(core.some((m) => m.contentType === "tool-call" && m.toolCallId === "t1"));
   assert.ok(core.some((m) => m.role === "tool" && m.text === "hit"));
 });
