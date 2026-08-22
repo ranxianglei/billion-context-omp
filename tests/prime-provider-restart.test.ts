@@ -143,7 +143,7 @@ function demotedOpenaiWire(session: Msg[]): Record<string, unknown> {
         if (b.type === "thinking" && (b.thinking ?? "").trim().length > 0) {
           flat.push({ demoted: true, text: `<think>\n${b.thinking}\n</think>` });
         } else if (b.type === "text" && (b.text ?? "").trim().length > 0) {
-          flat.push({ demoted: false, text: b.text });
+          flat.push({ demoted: false, text: b.text ?? "" });
         }
       }
       const text = flat.map((b, i) => (b.demoted && i < flat.length - 1 ? b.text + "\n" : b.text)).join("");
