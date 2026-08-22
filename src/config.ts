@@ -31,22 +31,6 @@ export interface CompressConfig {
  * (live model context window, protected tools, state persistence).
  */
 export interface AdapterConfig {
-  /** Where the compression surgery intercepts (issue #52). "provider"
-   *  leaves the agent array untouched and transforms the WIRE payload at
-   *  before_provider_request — request-local, no re-entry, structurally
-   *  immune to omp's feedback-view loops (the recap / subagent re-feed
-   *  pathology, issues #22/#52). Unknown provider formats pass through
-   *  untransformed (fail-open). "context" rewrites the context event —
-   *  battle-tested legacy mode, kept for compat.
-   *  When omitted, the mode is resolved per model API (issue #79):
-   *  "provider" where the host actually applies the wire-payload
-   *  replacement AND the wire body has a codec path — anthropic-messages,
-   *  ollama-chat, openai-responses (/v1/responses), and openai-completions
-   *  on hosts >= 17.3.8 (upstream PR can1357/oh-my-pi#8717, issue #83);
-   *  "context" everywhere else (older hosts drop the replacement;
-   *  bedrock/cursor/google bodies have no codec path yet). Explicit pinning
-   *  in ~/.omp/acp-omp.json always wins. */
-  transformMode?: "context" | "provider";
   /** When omitted, the adapter reads `ctx.model.contextWindow` live each turn.
    *  Set explicitly for tests/headless runs. */
   modelContextLimit?: number;

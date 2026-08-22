@@ -1,7 +1,7 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createRuntime } from "../src/runtime.js";
-import type { AgentMessage } from "../src/messages.js";
+import type { BiliMessage } from "acp-kernel/wire";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 // Pin the adaptive threshold like production (nudgeGrowthTokens=20000):
@@ -13,8 +13,8 @@ const ADAPTER = {
 const BIG = "payload ".repeat(800);   // > min 5000 chars
 const MID = "lorem ".repeat(3000);    // ~4.5K tokens each — pending must cross 20000
 
-const u = (t: string): AgentMessage => ({ role: "user", content: [{ type: "text", text: t }] }) as AgentMessage;
-const a = (t: string): AgentMessage => ({ role: "assistant", content: [{ type: "text", text: t }] }) as AgentMessage;
+const u = (t: string, i: number): BiliMessage => ({ id: `u${i}`, role: "user", contentType: "text", text: t }) as BiliMessage;
+const a = (t: string, i: number): BiliMessage => ({ id: `a${i}`, role: "assistant", contentType: "text", text: t }) as BiliMessage;
 
 function makeCtx(): ExtensionContext {
   return {
@@ -32,16 +32,16 @@ test("long agentic turn: nudge re-fires every +growthFloor, never at same token"
   const ctx = makeCtx();
   const config = runtime.configFor(ctx);
 
-  const mid = (n: number) => a(`f${n} ` + MID);
-  const midU = (n: number) => u(`f${n} ` + MID);
-  const stream: AgentMessage[] = [
-    u("start " + BIG),
+  const mid = (n: number) => a(`f${n} ` + MID, n);
+  const midU = (n: number) => u(`f${n} ` + MID, n);
+  const stream: BiliMessage[] = [
+    u("start " + BIG, 0),
     mid(1), midU(2), mid(3), midU(4), mid(5), midU(6), mid(7), midU(8),
     mid(9), midU(10), mid(11), midU(12), mid(13), midU(14), mid(15), midU(16),
   ];
 
   // t0: establishes baseline (growth 0 → no fire).
-  const r0 = runtime.foldStream(ctx, stream);
+  const r0 = runtime.foldStreamCore(ctx, stream);
   const t0 = runtime.core.processTurn({ messages: r0.coreMessages, state: r0.state, config, tokenCount: 45000 });
   runtime.commitFoldState(ctx, t0.state);
   assert.equal(t0.nudge?.shouldInject, false, t0.nudge?.reason ?? "");
@@ -60,7 +60,7 @@ test("long agentic turn: nudge re-fires every +growthFloor, never at same token"
   // t2 (+20000 more, same long turn — stream grew): re-fires. The old
   // per-turn dedup swallowed exactly this injection.
   const grown = [...stream, mid(17), midU(18), mid(19)];
-  const r2 = runtime.foldStream(ctx, grown);
+  const r2 = runtime.foldStreamCore(ctx, grown);
   const t2 = runtime.core.processTurn({ messages: r2.coreMessages, state: r2.state, config, tokenCount: 85001 });
   assert.equal(t2.nudge?.shouldInject, true, `expected re-fire at +20K inside the same turn: ${t2.nudge?.reason}`);
 

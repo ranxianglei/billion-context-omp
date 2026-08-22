@@ -85,7 +85,7 @@ const text = (r: { content: Array<{ type: string; text: string }> }): string => 
 
 test("provider mode: a successful compress is visible to stateFor tools in the same turn (issue #90)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (msgs: Array<Record<string, unknown>>) =>
     handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: anthropicPayload(msgs) }, ctx) as Promise<{ messages: unknown[] } | undefined>;
@@ -126,7 +126,7 @@ test("provider mode: a successful compress is visible to stateFor tools in the s
 
 test("provider mode: reject streak lives in the core slot and survives a wire re-fold (issue #90)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ transformMode: "provider" })(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
   const fire = (msgs: Array<Record<string, unknown>>) =>
     handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: anthropicPayload(msgs) }, ctx) as Promise<{ messages: unknown[] } | undefined>;

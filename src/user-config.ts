@@ -12,7 +12,6 @@ import { debug, logWarn } from "./log.js";
 export interface UserAcpConfig {
   debug?: boolean;
   autoUpdate?: boolean;
-  transformMode?: "context" | "provider";
   modelContextLimit?: number;
   toolBashDefaultTimeout?: number;
   toolOutputMaxBytes?: number;
@@ -72,7 +71,7 @@ function join(... parts: string[]): string {
 
 const KNOWN = new Set([
   "debug", "autoUpdate", "modelContextLimit",
-  "transformMode", "toolBashDefaultTimeout", "toolOutputMaxBytes",
+  "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "compressModel", "displayUsage",
   "prompts", "acknowledgePromptsRisk",
 ]);

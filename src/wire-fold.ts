@@ -6,10 +6,9 @@
 // single-sourced in the kernel, shared with the billion-context proxy.
 //
 // The fold runs in CONTENT-HASH ID space (deriveMessageId inside the kernel
-// codecs) — not the positional p1..pN space the context-mode fold uses. The
-// spaces are deliberately disjoint: a session's provider requests and
-// context events never share a fold slot, and a mid-session model switch
-// (mode flip) re-folds deterministically from the stream, deactivating the
+// codecs). The spaces are deliberately disjoint: a session's provider
+// requests never share a fold slot, and a mid-session model switch
+// re-folds deterministically from the stream, deactivating the
 // old space's orphaned blocks (syncBlocks) rather than mixing ids.
 //
 // Responses bodies (/v1/responses) rebuild through the kernel's responses

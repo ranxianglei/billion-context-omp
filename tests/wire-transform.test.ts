@@ -18,17 +18,15 @@ import {
   viewToResponsesCore,
 } from "../src/wire-fold.js";
 import { stripRefTag } from "../src/messages.js";
-import { hostVersionAtLeast } from "../src/transform-mode.js";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { BiliMessage } from "acp-kernel/wire";
 
-// Provider mode (transformMode: "provider", issue #52): the context event is
-// an observer and the compression surgery runs on the WIRE payload at
-// before_provider_request — now in CORE SPACE on the kernel codec
-// (wire-fold.ts), the same wire contract as the billion-context proxy.
-// These tests cover format detection, kernel round-trip fidelity, core-space
-// replay helpers, in-stream compress-call replay at the wire level, and mode
-// isolation (context mode must not double-transform).
+// Provider mode (issue #52): the context event is an observer and the
+// compression surgery runs on the WIRE payload at before_provider_request —
+// in CORE SPACE on the kernel codec (wire-fold.ts), the same wire contract
+// as the billion-context proxy. These tests cover format detection, kernel
+// round-trip fidelity, core-space replay helpers, and in-stream compress-call
+// replay at the wire level.
 
 function capture() {
   const handlers = new Map<string, Array<(e: unknown, ctx: unknown) => unknown>>();
@@ -428,7 +426,7 @@ test("viewToResponsesCore mirrors thinking blocks as reasoning pieces (issue #10
 
 test("provider mode: in-stream compress call replays and prunes the wire payload", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   // 8 covered filler turns + compress tool_use + success result + 6 tail
@@ -462,7 +460,7 @@ test("provider mode: in-stream compress call replays and prunes the wire payload
 
 test("provider mode: in-stream compress call replays on the openai wire shape (review M6, issue #83)", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx();
 
   // Openai shape: the system prompt is a wire MESSAGE, so it takes m00001
@@ -499,7 +497,7 @@ test("provider mode: in-stream compress call replays on the openai wire shape (r
 
 test("provider mode: drifted replay remaps dangling refs and prunes (issue #91 e2e)", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", protectedTools: ["bash", "read"], autoUpdate: false })(api as unknown as ExtensionAPI);
+  createAcpExtension({ protectedTools: ["bash", "read"], autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx({ model: { contextWindow: 1_000_000 } });
 
   // Drift scenario (openai wire shape, system takes m00001): at RECORD time
@@ -564,7 +562,7 @@ test("provider mode: drifted replay remaps dangling refs and prunes (issue #91 e
 
 test("provider mode: emergency nudge appends a wire user message", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx({ model: { contextWindow: 8_000 }, getContextUsage: () => ({ tokens: 0, contextWindow: 8_000 }) });
 
   const msgs: Array<Record<string, unknown>> = [];
@@ -581,7 +579,7 @@ test("provider mode: emergency nudge appends a wire user message", async () => {
 
 test("provider mode: openai payloads transform too", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx({ model: { contextWindow: 1_000_000 } });
 
   const msgs: Array<Record<string, unknown>> = [
@@ -607,7 +605,7 @@ test("provider mode: openai payloads transform too", async () => {
 // so opaque items (additional_tools, ...) survive and text is patched in place.
 test("provider mode: in-stream compress call replays and prunes the responses wire payload", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx({ model: { contextWindow: 1_000_000, api: "openai-responses" } });
 
   // 8 covered filler turns + compress function_call + success output + 6 tail
@@ -641,7 +639,7 @@ test("provider mode: in-stream compress call replays and prunes the responses wi
 
 test("provider mode: emergency nudge appends a wire user message (responses)", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx({ model: { contextWindow: 8_000, api: "openai-responses" }, getContextUsage: () => ({ tokens: 0, contextWindow: 8_000 }) });
 
   const input: Array<Record<string, unknown>> = [];
@@ -659,7 +657,7 @@ test("provider mode: emergency nudge appends a wire user message (responses)", a
 
 test("provider mode: string input transforms and stays a string (responses)", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx({ model: { contextWindow: 1_000_000, api: "openai-responses" } });
 
   const payload = { model: "gpt-x", input: `hello ${FILLER}` };
@@ -671,7 +669,7 @@ test("provider mode: string input transforms and stays a string (responses)", as
 
 test("provider mode: opaque items (additional_tools) survive the responses rebuild", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const ctx = fakeCtx({ model: { contextWindow: 1_000_000, api: "openai-responses" } });
 
   const payload = { model: "gpt-x", input: [
@@ -686,101 +684,13 @@ test("provider mode: opaque items (additional_tools) survive the responses rebui
   assert.ok(flat.includes("web_search"), "opaque item content survives");
 });
 
-test("mode isolation: context mode ignores before_provider_request; provider mode ignores context", async () => {
-  const a = capture();
-  createAcpExtension({ transformMode: "context", autoUpdate: false } as never)(a.api as unknown as ExtensionAPI);
-  const payload = anthropicPayload([{ role: "user", content: [{ type: "text", text: "hi" }] }]);
-  const r1 = await a.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, fakeCtx());
-  assert.equal(r1, undefined, "context mode: provider handler is a no-op");
-
-  const b = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(b.api as unknown as ExtensionAPI);
-  const stream = [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }];
-  const r2 = await b.handlers.get("context")![0]!({ type: "context", messages: stream }, fakeCtx());
-  assert.equal(r2, undefined, "provider mode: context handler is a no-op");
-});
 
 test("fail-open: malformed payloads return undefined, never throw", async () => {
   const { api, handlers } = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(api as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(api as unknown as ExtensionAPI);
   const fire = (payload: unknown) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload }, fakeCtx());
   assert.equal(await fire({ model: "x" }), undefined, "no messages array → pass-through");
   assert.equal(await fire({ messages: [42, null] }), undefined, "garbage entries → fail-open catch → pass-through");
 });
 
-test("default (no transformMode given) resolves per model API (issues #79/#83)", async () => {
-  const make = () => {
-    const { api, handlers } = capture();
-    createAcpExtension({ autoUpdate: false } as never)(api as unknown as ExtensionAPI);
-    return handlers;
-  };
-  const model = (api: string | undefined) => fakeCtx({ model: { contextWindow: 1_000_000, ...(api ? { api } : {}) } });
-  const stream = () => [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }];
-  const wire = () => anthropicPayload([{ role: "user", content: [{ type: "text", text: "hello" }] }]);
-  type CtxOut = { messages: unknown[] } | undefined;
-  const fireCtx = (handlers: ReturnType<typeof capture>["handlers"], m: unknown): Promise<CtxOut> =>
-    handlers.get("context")![0]!({ type: "context", messages: stream() }, m) as Promise<CtxOut>;
 
-  // openai-completions (GLM/DeepSeek/vLLM): upstream PR can1357/oh-my-pi#8717
-  // (issue #83) made the host apply the wire-payload replacement from 17.3.8,
-  // and the openai wire body has a codec path — so the default is provider
-  // when the host is new enough. The expectation depends on the ambient host
-  // version (devDep pin), so assert both branches explicitly (M1).
-  {
-    const handlers = make();
-    const r1 = await fireCtx(handlers, model("openai-completions"));
-    const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("openai-completions"));
-    if (hostVersionAtLeast([17, 3, 8])) {
-      assert.equal(r1, undefined, "default+openai-completions (host >= 17.3.8): context handler is an observer");
-      assert.ok(r2, "default+openai-completions (host >= 17.3.8): provider handler transforms the wire payload");
-    } else {
-      assert.ok(r1?.messages, "default+openai-completions (host < 17.3.8): context handler transforms");
-      assert.equal(r2, undefined, "default+openai-completions (host < 17.3.8): provider handler is a no-op");
-    }
-  }
-
-  // anthropic-messages, ollama-chat, and openai-responses: the host applies
-  // the replacement → provider.
-  for (const api of ["anthropic-messages", "ollama-chat", "openai-responses"] as const) {
-    const handlers = make();
-    const r1 = await fireCtx(handlers, model(api));
-    assert.equal(r1, undefined, `default+${api}: context handler is an observer`);
-    const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model(api));
-    assert.ok(r2, `default+${api}: provider handler transforms the wire payload`);
-  }
-
-  // Missing api → context.
-  {
-    const handlers = make();
-    const r1 = await fireCtx(handlers, model(undefined));
-    assert.ok(r1?.messages, "default+(no api): context handler transforms");
-    const r2 = await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model(undefined));
-    assert.equal(r2, undefined, "default+(no api): provider handler is a no-op");
-  }
-});
-
-test("explicit transformMode wins over the per-API default", async () => {
-  const model = (api: string) => fakeCtx({ model: { contextWindow: 1_000_000, api } });
-  const stream = () => [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() }];
-  const wire = () => anthropicPayload([{ role: "user", content: [{ type: "text", text: "hello" }] }]);
-
-  // Explicit provider on openai-completions (e.g. a patched host that honors
-  // the replacement): provider engages even though the default is context.
-  const a = capture();
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(a.api as unknown as ExtensionAPI);
-  const p1 = await a.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("openai-completions"));
-  assert.ok(p1, "explicit provider+openai-completions: provider handler transforms");
-  const c1 = await a.handlers.get("context")![0]!({ type: "context", messages: stream() }, model("openai-completions"));
-  assert.equal(c1, undefined, "explicit provider+openai-completions: context handler is an observer");
-
-  // Explicit context on anthropic-messages: context engages even though the
-  // per-API default is provider.
-  const b = capture();
-  createAcpExtension({ transformMode: "context", autoUpdate: false } as never)(b.api as unknown as ExtensionAPI);
-  const c2 = (await b.handlers.get("context")![0]!({ type: "context", messages: stream() }, model("anthropic-messages"))) as
-    | { messages: unknown[] }
-    | undefined;
-  assert.ok(c2?.messages, "explicit context+anthropic-messages: context handler transforms");
-  const p2 = await b.handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: wire() }, model("anthropic-messages"));
-  assert.equal(p2, undefined, "explicit context+anthropic-messages: provider handler is a no-op");
-});

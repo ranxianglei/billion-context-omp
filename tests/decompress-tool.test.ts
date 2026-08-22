@@ -28,7 +28,7 @@ function fakeCtx() {
     mode: "rpc",
     hasUI: false,
     ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-    model: { contextWindow: 200_000 },
+    model: { contextWindow: 200_000, api: "anthropic-messages" },
     sessionManager: {
       getSessionId: () => "test-session",
       getSessionFile: () => "/tmp/omp-decompress-tool-it.session.json",
@@ -44,7 +44,7 @@ function streamUser(text: string) {
 // tool, and hand back the tool handles so tests can drive decompress.
 async function setupWithCompressedBlock() {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as any);
 
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
   const filler = (n: string) => `filler ${n} `.repeat(600);
@@ -53,7 +53,7 @@ async function setupWithCompressedBlock() {
     ...["two", "three", "four", "five", "six", "seven"].map((n) => streamUser(filler(n))),
   ];
   const ctx = fakeCtx();
-  const fire = (messages: any[]) => handlers.get("context")![0]!({ type: "context", messages }, ctx);
+  const fire = (messages: any[]) => handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages } }, ctx);
   await fire(stream);
 
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
@@ -146,25 +146,27 @@ test("decompress degrades gracefully when the covered message left the stream (h
 
 test("decompress restores multi tool-call assistant messages (split refs carry # suffix)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as any);
   const ctx = fakeCtx();
   const filler = (n: string) => `filler ${n} `.repeat(400);
 
+  // OpenAI wire format: assistant with tool_calls array, tool results with tool_call_id.
   const assistant = {
     role: "assistant",
-    content: [
-      { type: "toolCall", name: "read", id: "call-1", arguments: { path: "a.txt", payload: "p".repeat(3000) } },
-      { type: "toolCall", name: "bash", id: "call-2", arguments: { command: "ls", payload: "q".repeat(3000) } },
+    content: null,
+    tool_calls: [
+      { id: "call-1", type: "function", function: { name: "read", arguments: JSON.stringify({ path: "a.txt", payload: "p".repeat(3000) }) } },
+      { id: "call-2", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: "ls", payload: "q".repeat(3000) }) } },
     ],
     timestamp: Date.now(),
   };
   const stream = [
     assistant,
-    { role: "toolResult", content: [{ type: "text", text: "out-a" }], toolName: "read", toolCallId: "call-1", timestamp: Date.now() },
-    { role: "toolResult", content: [{ type: "text", text: "out-b" }], toolName: "bash", toolCallId: "call-2", timestamp: Date.now() },
+    { role: "tool", tool_call_id: "call-1", content: "out-a", timestamp: Date.now() },
+    { role: "tool", tool_call_id: "call-2", content: "out-b", timestamp: Date.now() },
     ...["four", "five", "six", "seven"].map((n) => streamUser(filler(n))),
   ];
-  await handlers.get("context")![0]!({ type: "context", messages: stream }, ctx);
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: stream } }, ctx);
 
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
   // The multi tool-call assistant projects to two cores (p1#call-1, p1#call-2),

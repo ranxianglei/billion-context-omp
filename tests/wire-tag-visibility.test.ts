@@ -129,7 +129,7 @@ async function providerRoundTrip(window: number, session: Msg[], wire: (s: Msg[]
       buildSessionContext: () => ({ messages: session }),
     },
   } as unknown as ExtensionContext;
-  createAcpExtension({ transformMode: "provider", autoUpdate: false } as never)(apiObj as unknown as ExtensionAPI);
+  createAcpExtension({ autoUpdate: false })(apiObj as unknown as ExtensionAPI);
   await handlers.get("session_start")![0]!({ type: "session_start" }, ctx);
   const payload = wire(session);
   const h = handlers.get("before_provider_request")![0]!;

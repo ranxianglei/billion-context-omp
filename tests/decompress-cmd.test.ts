@@ -37,7 +37,7 @@ function fakeCtx(notifies: string[]) {
     mode: "rpc",
     hasUI: false,
     ui: { notify: (m: string) => notifies.push(m), confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-    model: { contextWindow: 200_000 },
+    model: { contextWindow: 200_000, api: "anthropic-messages" },
     sessionManager: {
       getSessionId: () => "test-session",
       getSessionFile: () => "/tmp/omp-decompress-it.session.json",
@@ -45,12 +45,12 @@ function fakeCtx(notifies: string[]) {
   };
 }
 
-// Full pipeline: context handler assigns refs → compress tool creates an active
-// block → /acp-decompress returns the block's content without deactivating it
-// (append semantics: the block stays folded, content shown via notify).
+// Full pipeline: before_provider_request handler assigns refs → compress tool
+// creates an active block → /acp-decompress returns the block's content without
+// deactivating it (append semantics: the block stays folded, content shown via notify).
 test("/acp-decompress returns a block's content and stays repeatable (append mode)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as any);
 
   const stateFile = "/tmp/omp-decompress-it.session.json";
   await cleanState(stateFile);
@@ -69,7 +69,8 @@ test("/acp-decompress returns a block's content and stays repeatable (append mod
   const ctx = fakeCtx(notifies);
 
   // 1) Fold the stream so the kernel assigns refs (m00001..).
-  await handlers.get("context")![0]!({ type: "context", messages: entries.map((e: any) => e.message) }, ctx);
+  const stream = entries.map((e: any) => e.message);
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: stream } }, ctx);
 
   // 2) Compress the target message (m00001) to create an active block (b1).
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
@@ -98,7 +99,7 @@ test("/acp-decompress returns a block's content and stays repeatable (append mod
 
 test("/acp-decompress rejects invalid input with a usage message", async () => {
   const { api } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as any);
 
   const notifies: string[] = [];
   const ctx = fakeCtx(notifies);
@@ -117,11 +118,11 @@ test("/acp-decompress rejects invalid input with a usage message", async () => {
 
 test("/acp-decompress reports not-found for a valid id with no matching block", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as any);
+  createAcpExtension({ modelContextLimit: 200_000, autoUpdate: false })(api as any);
 
   const notifies: string[] = [];
   const ctx = fakeCtx(notifies);
-  await handlers.get("context")![0]!({ type: "context", messages: [{ role: "user", content: "only message", timestamp: Date.now() }] }, ctx);
+  await handlers.get("before_provider_request")![0]!({ type: "before_provider_request", payload: { model: "test", messages: [{ role: "user", content: "only message", timestamp: Date.now() }] } }, ctx);
 
   const decompressCmd = api.commands.get("acp-decompress");
   await decompressCmd.handler("b99", ctx);
