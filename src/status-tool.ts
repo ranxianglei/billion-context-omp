@@ -1,10 +1,9 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
+import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { collectCoveredMessageIds, estimateTextTokens, estimateTokens } from "./tokens.js";
 import { getSystemPromptText } from "./compat.js";
-import { viableRanges } from "billion-context-kit";
 import { logThrow } from "./log.js";
 
 const StatusParams = type({

@@ -3,7 +3,7 @@ import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { collectCoveredMessageIds, estimateTokens } from "./tokens.js";
-import { buildStatusPanel } from "billion-context-kit";
+import { buildStatusPanel } from "acp-kernel/panel";
 import { logThrow } from "./log.js";
 
 declare const CURRENT_VERSION: string;
