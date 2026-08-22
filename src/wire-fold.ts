@@ -23,10 +23,15 @@ import {
   coreToOpenai,
   coreToResponses,
   detectWireFormat as kernelDetectWireFormat,
+  mirrorAnthropicToCore,
+  mirrorOpenaiToCore,
+  mirrorResponsesToCore,
   openaiToCore,
   patchResponsesInput,
   responsesToCore,
   type BiliMessage,
+  type MirrorBlock,
+  type MirrorMessage,
   type ResponsesProjection,
   type ResponsesRequestBody,
 } from "acp-kernel/wire";
@@ -546,171 +551,73 @@ export function rangePositionsCore(
   });
 }
 
-/** Rebuild the WIRE-SHAPE projection of the persisted session (the mirror
- *  of "what the host will put on the wire after a restart") and fold it in
- *  core space. primeFold uses this so the preview lands in the same
- *  ref/fingerprint space as the live request (issue #64). Thinking rides
- *  the openai wire as the `reasoning_content` field here (issue #103);
- *  hosts that instead demote thinking INLINE as `<think>…</think>` text
- *  land in the same identity space anyway — acp-kernel ≥0.0.34
- *  openaiToCore splits the inline form (PR #112), so no mirror variant
- *  is needed. */
-export function viewToCoreStream(view: AgentMessage[], systemText: string): BiliMessage[] {
-  const messages: Array<Record<string, unknown>> = [{ role: "system", content: systemText }];
+/** Map the persisted session view onto the kernel's neutral MirrorMessage:
+ *  the only omp-side shape knowledge left in this module — ref-tag
+ *  stripping (a persisted-format concern, messages.ts) and the pi block
+ *  types. Every wire-shape rule (system placement, reasoning_content vs
+ *  thinking blocks vs summary_text, tool_result folding, whitespace
+ *  handling) lives single-sourced in the acp-kernel mirror constructors
+ *  (≥0.0.35, PR #114). */
+export function toMirrorView(view: AgentMessage[]): MirrorMessage[] {
+  const out: MirrorMessage[] = [];
   for (const message of view) {
     const m = message as { role?: string; content?: unknown; toolCallId?: string; summary?: string };
-    if (m.role === "user") {
-      const text = extractViewText(m.content);
-      if (text) messages.push({ role: "user", content: text });
+    if (m.role === "user" || m.role === "toolResult") {
+      out.push(m.role === "toolResult" ? { role: "toolResult", toolCallId: m.toolCallId ?? "", blocks: viewTextBlocks(m.content) } : { role: "user", blocks: viewTextBlocks(m.content) });
     } else if (m.role === "assistant") {
-      const blocks = Array.isArray(m.content) ? m.content : [];
-      const typed = blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown; thinking?: unknown; text?: unknown }>;
-      const calls = typed.filter((b) => b !== null && typeof b === "object" && b.type === "toolCall");
-      // Thinking blocks ride the openai wire as the `reasoning_content` field
-      // (host encoder, zai/replay paths); the kernel codec turns each one into
-      // an assistant/reasoning piece. Dropping them shifted every index and
-      // fingerprint after a thinking turn, so restart replay guards
-      // rejected the in-stream compress calls and /acp showed no blocks
-      // until the first provider request (issue #103).
-      const reasoning = typed
-        .filter((b) => b !== null && typeof b === "object" && b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0)
-        .map((b) => b.thinking as string)
-        .join("\n");
-      const text = extractViewText(m.content);
-      if (calls.length > 0) {
-        messages.push({
-          role: "assistant",
-          content: text,
-          ...(reasoning ? { reasoning_content: reasoning } : {}),
-          tool_calls: calls.map((c) => ({
-            id: c.id,
-            type: "function",
-            function: { name: c.name ?? "", arguments: JSON.stringify(c.arguments ?? {}) },
-          })),
-        });
-      } else if (text || reasoning) {
-        messages.push({ role: "assistant", content: text, ...(reasoning ? { reasoning_content: reasoning } : {}) });
-      }
-    } else if (m.role === "toolResult") {
-      messages.push({ role: "tool", tool_call_id: m.toolCallId ?? "", content: extractViewText(m.content) });
-    } else {
-      const text = extractViewText(m.content) || (typeof m.summary === "string" ? m.summary : "");
-      if (text) messages.push({ role: "developer", content: text });
-    }
-  }
-  const { msgs } = openaiToCore({ model: "prime-fold", messages } as Parameters<typeof openaiToCore>[0]);
-  return msgs;
-}
-
-/** Anthropic-flavoured wire mirror for primeFold: the live anthropic
- *  request carries the system prompt as the TOP-LEVEL `system` field (out
- *  of the fold space) and folds tool results into user messages — mirror
- *  exactly that, or the preview lands in a different ref space than the
- *  live request (issue #64). */
-export function viewToAnthropicCore(view: AgentMessage[]): BiliMessage[] {
-  const messages: Array<Record<string, unknown>> = [];
-  for (const message of view) {
-    const m = message as { role?: string; content?: unknown; toolCallId?: string; summary?: string };
-    if (m.role === "user") {
-      const text = extractViewText(m.content);
-      if (text) messages.push({ role: "user", content: [{ type: "text", text }] });
-    } else if (m.role === "assistant") {
-      const blocks = Array.isArray(m.content) ? m.content : [];
-      const typed = blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown; text?: unknown; thinking?: unknown; thinkingSignature?: unknown }>;
-      // Signed thinking blocks ride the live anthropic wire as {type:"thinking"}
-      // blocks; the kernel codec maps each to an assistant/reasoning piece
-      // (issue #103 — same parity reasoning as the openai mirror above).
-      // Unsigned thinking is demoted to text by the live encoder; mirroring it
-      // as a thinking block then diverges, the span guard rejects the replay
-      // and the preview falls back to rebuilding at the first request.
-      const content: Array<Record<string, unknown>> = [];
-      for (const b of typed) {
+      const blocks: MirrorBlock[] = [];
+      for (const b of Array.isArray(m.content) ? (m.content as Array<Record<string, unknown>>) : []) {
         if (b === null || typeof b !== "object") continue;
-        if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0) {
-          content.push({
-            type: "thinking",
-            thinking: b.thinking,
-            ...(typeof b.thinkingSignature === "string" && b.thinkingSignature ? { signature: b.thinkingSignature } : {}),
-          });
-        } else if (b.type === "text" && typeof b.text === "string" && stripRefTag(b.text).trim().length > 0) {
-          content.push({ type: "text", text: stripRefTag(b.text) });
+        if (b.type === "thinking" && typeof b.thinking === "string") {
+          blocks.push({ type: "thinking", thinking: b.thinking, ...(typeof b.thinkingSignature === "string" && b.thinkingSignature ? { signature: b.thinkingSignature } : {}) });
+        } else if (b.type === "text" && typeof b.text === "string") {
+          blocks.push({ type: "text", text: stripRefTag(b.text) });
         } else if (b.type === "toolCall") {
-          let input: unknown = {};
-          try { input = b.arguments && typeof b.arguments === "object" ? b.arguments : JSON.parse(JSON.stringify(b.arguments ?? {})); } catch { input = {}; }
-          content.push({ type: "tool_use", id: b.id, name: b.name ?? "", input });
+          blocks.push({ type: "toolCall", ...(typeof b.id === "string" ? { id: b.id } : {}), ...(typeof b.name === "string" ? { name: b.name } : {}), ...(b.arguments !== undefined ? { arguments: b.arguments } : {}) });
         }
       }
-      if (content.length > 0) messages.push({ role: "assistant", content });
-    } else if (m.role === "toolResult") {
-      messages.push({
-        role: "user",
-        content: [{ type: "tool_result", tool_use_id: m.toolCallId ?? "", content: extractViewText(m.content) }],
-      });
+      out.push({ role: "assistant", blocks });
     } else {
+      // developer + custom agent messages ride the wire as out-of-band
+      // traffic (kernel meta slot).
       const text = extractViewText(m.content) || (typeof m.summary === "string" ? m.summary : "");
-      if (text) messages.push({ role: "user", content: [{ type: "text", text }] });
+      out.push({ role: "meta", ...(text ? { text } : {}) });
     }
   }
-  const { msgs, cacheControls } = anthropicToCore({ model: "prime-fold", messages } as Parameters<typeof anthropicToCore>[0]);
-  void cacheControls;
-  return msgs;
+  return out;
 }
 
-/** Responses-flavoured wire mirror for primeFold: the live /v1/responses
- *  request carries the system prompt in the TOP-LEVEL `instructions` field
- *  (out of the fold space) and the conversation as an `input` item array —
- *  a different ref space than the openai mirror (system as m00001). Folding
- *  the openai shape for a responses model puts the preview in the wrong
- *  ref/fingerprint space: stored span fingerprints mismatch, the guard
- *  rejects every in-stream replay, and a resumed session shows "Blocks:
- *  none" until the first provider request (issue #64, responses variant).
- *  Mirror the responses layout exactly: build the `input` item array from
- *  the view and run it through the kernel's responsesToCore, so the preview
- *  lands in the same ref/fingerprint space as the live request. */
-export function viewToResponsesCore(view: AgentMessage[], systemText: string): BiliMessage[] {
-  const input: Array<Record<string, unknown>> = [];
-  for (const message of view) {
-    const m = message as { role?: string; content?: unknown; toolCallId?: string; summary?: string };
-    if (m.role === "user") {
-      const text = extractViewText(m.content);
-      if (text) input.push({ type: "message", role: "user", content: [{ type: "input_text", text }] });
-    } else if (m.role === "assistant") {
-      const blocks = Array.isArray(m.content) ? m.content : [];
-      const typed = blocks as Array<{ type?: string; id?: string; name?: string; arguments?: unknown; text?: unknown; thinking?: unknown }>;
-      // Emit items in block order (thinking, text, tool calls) so the core
-      // message sequence matches the live wire (issue #103 parity).
-      for (const b of typed) {
-        if (b === null || typeof b !== "object") continue;
-        if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim().length > 0) {
-          input.push({ type: "reasoning", summary: [{ type: "summary_text", text: b.thinking }] });
-        } else if (b.type === "text" && typeof b.text === "string" && stripRefTag(b.text).trim().length > 0) {
-          input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: stripRefTag(b.text) }] });
-        } else if (b.type === "toolCall") {
-          let args = "{}";
-          try { args = JSON.stringify(b.arguments ?? {}); } catch { args = "{}"; }
-          input.push({ type: "function_call", call_id: b.id ?? "", name: b.name ?? "", arguments: args });
-        }
-      }
-    } else if (m.role === "toolResult") {
-      input.push({ type: "function_call_output", call_id: m.toolCallId ?? "", output: extractViewText(m.content) });
-    } else {
-      const text = extractViewText(m.content) || (typeof m.summary === "string" ? m.summary : "");
-      if (text) input.push({ type: "message", role: "user", content: [{ type: "input_text", text }] });
-    }
+function viewTextBlocks(content: unknown): MirrorBlock[] {
+  if (typeof content === "string") return [{ type: "text", text: stripRefTag(content) }];
+  if (!Array.isArray(content)) return [];
+  const out: MirrorBlock[] = [];
+  for (const b of content as Array<{ type?: string; text?: string }>) {
+    if (b.type === "text" && typeof b.text === "string") out.push({ type: "text", text: stripRefTag(b.text) });
   }
-  const { msgs } = responsesToCore({ model: "prime-fold", instructions: systemText, input } as Parameters<typeof responsesToCore>[0]);
-  return msgs;
+  return out;
 }
 
 function extractViewText(content: unknown): string {
   // Same projection as the AgentMessage stream path (messages.ts extractText
   // with ref-tag stripping) — kept local so wire-fold stays import-light.
-  const clean = (s: string): string => stripRefTag(s);
-  if (typeof content === "string") return clean(content);
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const b of content as Array<{ type?: string; text?: string }>) {
-    if (b.type === "text" && typeof b.text === "string") parts.push(clean(b.text));
-  }
-  return parts.join("\n");
+  return viewTextBlocks(content).map((b) => (b as { text: string }).text).join("\n");
+}
+
+/** primeFold openai/completions mirror (issue #64): system first, thinking
+ *  as the `reasoning_content` field (issue #103); inline `<think>` hosts
+ *  land in the same identity space via kernel normalization (PR #112). */
+export function viewToCoreStream(view: AgentMessage[], systemText: string): BiliMessage[] {
+  return mirrorOpenaiToCore(toMirrorView(view), systemText);
+}
+
+/** primeFold anthropic/messages mirror (issue #64): system out of the fold
+ *  space, tool results folded into user messages, signed thinking blocks. */
+export function viewToAnthropicCore(view: AgentMessage[]): BiliMessage[] {
+  return mirrorAnthropicToCore(toMirrorView(view));
+}
+
+/** primeFold responses mirror (issue #64, responses variant): system in the
+ *  top-level `instructions` field, conversation as the `input` item array. */
+export function viewToResponsesCore(view: AgentMessage[], systemText: string): BiliMessage[] {
+  return mirrorResponsesToCore(toMirrorView(view), systemText);
 }
