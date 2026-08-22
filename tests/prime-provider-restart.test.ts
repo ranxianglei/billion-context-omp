@@ -464,11 +464,11 @@ test("provider+responses: restart primeFold rebuilds blocks from thinking-bearin
 
 // Issue #64 (demoted-thinking variant): on glm-style openai-completions
 // profiles the host serializes assistant thinking INLINE as <think>...</think>
-// inside the content string — there is no reasoning_content field. When the
-// prime mirror emitted reasoning pieces instead, the reasoning+text split
-// landed the span fingerprints in a different space, every in-stream compress
-// replay was rejected, and restart showed "Blocks: none" until the first
-// provider request refolded. primeFold must retry with the demoted mirror.
+// inside the content string — there is no reasoning_content field, while the
+// prime mirror emits reasoning pieces. Since acp-kernel 0.0.34 (PR #112)
+// openaiToCore SPLITS the inline form, both serializations share one identity
+// space: the single default mirror must replay in-stream compress calls at
+// session_start with no refold retry (the omp-side demoted retry was removed).
 test("provider+openai: restart primeFold rebuilds blocks from demoted inline-<think> turns (issue #64 demoted)", async () => {
   const session: Msg[] = [];
   for (let i = 0; i < 7; i++) {

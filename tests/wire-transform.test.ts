@@ -19,7 +19,7 @@ import {
 } from "../src/wire-fold.js";
 import { stripRefTag } from "../src/messages.js";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { BiliMessage } from "acp-kernel/wire";
+import { openaiToCore, type BiliMessage } from "acp-kernel/wire";
 
 // Provider mode (issue #52): the context event is an observer and the
 // compression surgery runs on the WIRE payload at before_provider_request —
@@ -374,13 +374,12 @@ test("viewToCoreStream mirrors thinking blocks as reasoning pieces (issue #103)"
 });
 
 // Demoted-inline hosts (glm/qwen3/deepseek/kimi via openai-completions)
-// replace thinking blocks with `<think>…</think>` text INSIDE the content
-// string: tag + "\n" glue when another block follows + text parts joined
-// with no separator, each keeping its own leading whitespace. The default
-// reasoning_content mirror diverges every post-thinking fingerprint there,
-// so restart replay fails until the demoted mirror refolds (issue #64,
-// demoted variant). Byte rules verified against live glm-5.3 request dumps.
-test("viewToCoreStream demoteThinking mirrors inline <think> serialization byte-exactly", () => {
+// serialize assistant thinking INLINE as `<think>…</think>` text instead of
+// the reasoning_content field this mirror emits. That is fine since
+// acp-kernel ≥0.0.34 (PR #112): openaiToCore splits the inline form, so
+// both serializations land in ONE identity space — no mirror variant and
+// no refold retry needed (issue #64, demoted variant, obsolete).
+test("viewToCoreStream single mirror survives inline-<think> hosts via kernel normalization (issue #64 demoted)", () => {
   const view = [
     { role: "user", content: [{ type: "text", text: "q" }] },
     {
@@ -393,16 +392,28 @@ test("viewToCoreStream demoteThinking mirrors inline <think> serialization byte-
     { role: "assistant", content: [{ type: "thinking", thinking: "only think" }] },
     { role: "assistant", content: [{ type: "text", text: "   " }] },
   ] as unknown as Parameters<typeof viewToCoreStream>[0];
-  const core = viewToCoreStream(view, "base system", { demoteThinking: true });
+  const core = viewToCoreStream(view, "base system");
+  assert.equal(core.filter((m) => m.contentType === "reasoning").length, 2, "mirror keeps reasoning pieces");
   const texts = core.filter((m) => m.role === "assistant" && m.contentType === "text").map((m) => m.text);
-  assert.deepEqual(texts, [
-    "<think>\neach.\n</think>\n\n\n两个 PR：",
-    "<think>\nonly think\n</think>",
-  ], "tag + glue \\n + text's own leading whitespace; no separator between blocks");
-  assert.ok(!core.some((m) => m.contentType === "reasoning"), "no reasoning pieces in demoted mode");
-  // Default variant unchanged: same view still yields reasoning_content pieces.
-  const def = viewToCoreStream(view, "base system");
-  assert.equal(def.filter((m) => m.contentType === "reasoning").length, 2, "default mirror keeps reasoning pieces");
+  assert.deepEqual(texts, ["\n\n两个 PR：", "   "], "default mirror keeps text bytes incl. whitespace-only (pre-#124 behavior)");
+  // The kernel normalizes the host's inline serialization into the SAME
+  // identity sequence (acp-kernel 0.0.34, PR #112) — assert it here so the
+  // dependency bump is load-bearing, not cosmetic.
+  const { msgs: live } = openaiToCore({
+    model: "glm-x",
+    messages: [
+      { role: "system", content: "base system" },
+      { role: "user", content: "q" },
+      { role: "assistant", content: "<think>\neach.\n</think>\n\n\n两个 PR：" },
+      { role: "assistant", content: "<think>\nonly think\n</think>" },
+      { role: "assistant", content: "   " },
+    ],
+  } as Parameters<typeof openaiToCore>[0]);
+  const wire = (m: { role: string; contentType: string; toolCallId?: string; text?: string }) =>
+    `${m.role}|${m.contentType}|${m.toolCallId ?? ""}|${m.text ?? ""}`;
+  const liveIds = live.map(wire);
+  const coreIds = core.map(wire);
+  assert.deepEqual(liveIds, coreIds, "inline-<think> live wire and reasoning_content mirror share one id space");
 });
 
 test("viewToAnthropicCore mirrors thinking blocks as reasoning pieces (issue #103)", () => {
