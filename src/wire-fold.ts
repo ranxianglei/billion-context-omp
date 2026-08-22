@@ -46,6 +46,31 @@ import { compressToolArgs, stripRefTag } from "./messages.js";
 import type { AgentMessage, BlockLike, StreamCompressCall } from "./messages.js";
 import { createHash } from "node:crypto";
 
+// Host summary renderers (issue #67): the live wire wraps compactionSummary /
+// branchSummary in a template (renderCompactionSummaryContext /
+// renderBranchSummaryContext from pi-agent-core). The primeFold mirror must
+// emit the SAME text or span fingerprints mismatch across a compaction
+// summary, the guard rejects every in-stream replay, and a resumed session
+// shows "Blocks: none" until the first provider request.
+//
+// Dynamic import (not static): the peer range is >=17.0.0 but the extension
+// only functions on >=17.3.8 (MIN_HOST_VERSION). On 17.0.0-17.3.7 hosts this
+// module must still LOAD to reach the graceful host-too-old warning; a static
+// import of an export that may be absent there would crash at load instead of
+// degrading. Eager top-level await keeps toMirrorView synchronous; missing
+// export falls back to bare text (the pre-fix behavior).
+let renderCompactionSummary: ((s: string) => string) | null = null;
+let renderBranchSummary: ((s: string) => string) | null = null;
+try {
+  const mod = await import("@oh-my-pi/pi-agent-core/compaction/messages");
+  if (typeof mod.renderCompactionSummaryContext === "function") renderCompactionSummary = mod.renderCompactionSummaryContext;
+  if (typeof mod.renderBranchSummaryContext === "function") renderBranchSummary = mod.renderBranchSummaryContext;
+} catch {
+  // Older pi-agent-core without these exports: keep bare-text mirror. No data
+  // risk — only the pre-existing "Blocks: none until first provider request"
+  // symptom on resume.
+}
+
 export type ProviderWireFormat = "anthropic" | "openai" | "responses";
 
 /** Kernel format detection narrowed to the formats the omp pipeline can
@@ -605,8 +630,19 @@ export function toMirrorView(view: AgentMessage[]): MirrorMessage[] {
       out.push({ role: "assistant", blocks });
     } else {
       // developer + custom agent messages ride the wire as out-of-band
-      // traffic (kernel meta slot).
-      const text = extractViewText(m.content) || (typeof m.summary === "string" ? m.summary : "");
+      // traffic (kernel meta slot). compactionSummary / branchSummary are
+      // template-wrapped on the live wire (issue #67) — mirror that exactly
+      // or span fingerprints mismatch and in-stream replays are rejected
+      // after resume.
+      const summary = typeof m.summary === "string" ? m.summary : "";
+      let text = "";
+      if (m.role === "compactionSummary" && summary.trim() !== "") {
+        text = renderCompactionSummary ? renderCompactionSummary(summary) : summary;
+      } else if (m.role === "branchSummary" && summary.trim() !== "") {
+        text = renderBranchSummary ? renderBranchSummary(summary) : summary;
+      } else {
+        text = extractViewText(m.content) || summary;
+      }
       out.push({ role: "meta", ...(text ? { text } : {}) });
     }
   }

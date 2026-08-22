@@ -737,4 +737,32 @@ test("fail-open: malformed payloads return undefined, never throw", async () => 
   assert.equal(await fire({ messages: [42, null] }), undefined, "garbage entries → fail-open catch → pass-through");
 });
 
+test("viewToAnthropicCore wraps compactionSummary/branchSummary exactly as the live wire does (issue #67)", async () => {
+  // The live anthropic wire renders these roles through pi-agent-core's summary
+  // templates (as user messages). The primeFold mirror must emit byte-identical
+  // text or span fingerprints mismatch across a compaction summary and every
+  // in-stream replay is rejected after resume ("Blocks: none"). Compare against
+  // the host renderer directly.
+  const { renderCompactionSummaryContext, renderBranchSummaryContext } = await import("@oh-my-pi/pi-agent-core/compaction/messages");
+  const view = [
+    { role: "compactionSummary", summary: "prior work here", tokensBefore: 1000, timestamp: Date.now() },
+    { role: "branchSummary", summary: "branch recap", fromId: "x", timestamp: Date.now() },
+    { role: "user", content: [{ type: "text", text: "after" }] },
+  ] as unknown as Parameters<typeof viewToAnthropicCore>[0];
+  const core = viewToAnthropicCore(view);
+  const texts = core.map((m) => m.text).filter((t): t is string => typeof t === "string");
+  assert.ok(texts.includes(renderCompactionSummaryContext("prior work here")), "compactionSummary mirror == host render");
+  assert.ok(texts.includes(renderBranchSummaryContext("branch recap")), "branchSummary mirror == host render");
+});
+
+test("viewToAnthropicCore leaves developer/custom meta text bare (issue #67 scope)", () => {
+  const view = [
+    { role: "developer", content: [{ type: "text", text: "dev note" }] },
+  ] as unknown as Parameters<typeof viewToAnthropicCore>[0];
+  const core = viewToAnthropicCore(view);
+  const flat = JSON.stringify(core);
+  assert.ok(flat.includes("dev note"), "developer text preserved");
+  assert.ok(!flat.includes("<summary>"), "developer text is NOT summary-template-wrapped");
+});
+
 
