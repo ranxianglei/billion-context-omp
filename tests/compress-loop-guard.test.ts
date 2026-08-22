@@ -244,11 +244,12 @@ test("loop guard: malformed compress args count toward the reject streak", async
   assert.match(e1.content[0].text, /No changes applied/, "empty content: fold-skip marker present");
 });
 
-// Issue #104: the kernel's hide-compress-calls node strips orphaned calls
-// (KEEP_LAST_ORPHANED=0) — a rejected compress call creates no block, so the
-// call AND its tool-result vanish from the rebuilt view. The model never saw
-// the rejection text (loop-guard STOP included) and retried 92 times in a
-// row. The transform must re-append the most recent rejected pair.
+// Issue #104: a rejected compress call creates no block, so it is orphaned.
+// acp-kernel 0.0.32 (reverts #18) sets KEEP_LAST_ORPHANED=2 — the kernel's
+// hide-compress-calls node now keeps the newest two orphaned call+result
+// pairs visible, so the model sees its own last rejection (the loop-guard
+// STOP included) and cannot sit at an unobservable fixed point. This test
+// guards that the rejected pair stays visible exactly once (no duplication).
 test("issue #104: rejected compress call+result stay visible in the model's view", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000, transformMode: "context" })(api as unknown as ExtensionAPI);

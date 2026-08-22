@@ -65,30 +65,6 @@ export interface StreamCompressCall {
   ranges: { startRef: string; endRef: string; summary: string; topic?: string; summaryMaxChars?: number; compressCallId: string }[];
 }
 
-/** Most recent REJECTED compress call+result pair (issue #104): the kernel's
- *  hide-compress-calls node strips orphaned calls (KEEP_LAST_ORPHANED=0) — a
- *  rejected call creates no block, so BOTH the call and its result vanish
- *  from the model's view on the next turn; it cannot see the rejection or
- *  the loop-guard STOP and retries forever (observed: 92 in a row). The
- *  transform re-appends this pair so the last attempt's outcome stays
- *  visible. Returns null when no rejected call exists. */
-export function lastRejectedCompressPair(stream: AgentMessage[]): AgentMessage[] | null {
-  for (let i = stream.length - 1; i >= 0; i--) {
-    const m = stream[i] as AnyMessage;
-    if (m.role !== "toolResult" || m.toolName !== "compress" || !m.toolCallId) continue;
-    if (!extractText(m.content).includes("No changes applied")) continue;
-    for (let j = stream.length - 1; j >= 0; j--) {
-      if (j === i) continue;
-      const c = stream[j] as AnyMessage;
-      if (c.role !== "assistant") continue;
-      if (!allToolCalls(c.content).some((call) => call.id === m.toolCallId && compressToolArgs(call))) continue;
-      return [stream[j]!, stream[i]!];
-    }
-    return null;
-  }
-  return null;
-}
-
 export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
   const out: StreamCompressCall[] = [];
   for (const call of allToolCalls((message as AnyMessage).content)) {
