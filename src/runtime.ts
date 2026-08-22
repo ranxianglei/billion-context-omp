@@ -12,7 +12,8 @@ import {
   type CoreMessage,
   type Prompts,
 } from "acp-kernel";
-import { resolveConfig, type AdapterConfig } from "./config.js";
+import { resolveConfig, resolveFoldPersistence, type AdapterConfig } from "./config.js";
+import { createFoldStore, foldPersistDir, restoreFoldSnapshot, type FoldSnapshot } from "./fold-persist.js";
 import { debug, logInfo, logWarn } from "./log.js";
 import { getSystemPromptText } from "./compat.js";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
@@ -41,6 +42,14 @@ interface FoldSlot {
   identities: string[];
   foldedLen: number;
   preview: boolean;
+  /** True once this slot was produced by a LIVE wire fold, a compress
+   *  commit, or a checkpoint restore — NOT by a primeFold mirror or by the
+   *  read path (stateFor → coreSlotFor) lazily materializing a placeholder.
+   *  restoreFold's skip-live guard keys on this: a placeholder slot must
+   *  never suppress a restore or the mirror fallback (observed: acp_status
+   *  between session_start and session_switch created a 0-block placeholder,
+   *  session_switch then skipped restore AND primeFold → "Blocks: none"). */
+  live: boolean;
   state: CompressionState;
   coreMessages: CoreMessage[];
   appliedCallIds: Set<string>;
@@ -71,6 +80,22 @@ export interface AcpRuntime {
    *  mode folds in (issue #104: the nudge must not demand compression while
    *  compress calls are being rejected in a row). */
   rejectStreakFor(ctx: ExtensionContext): number;
+  /** Restore the fold slot from the previous process's checkpoint (issue
+   *  #130). Returns true when the session already has a live in-memory slot
+   *  (in-process switch back — never clobbered) or a valid checkpoint was
+   *  loaded. Callers skip the primeFold mirror: a mirror that guesses the
+   *  host's view→wire projection lands in a different fingerprint space,
+   *  which is exactly the bug the checkpoint exists to fix. */
+  restoreFold(ctx: ExtensionContext): boolean;
+  /** Debounced checkpoint of the live fold slot. Called from the live fold
+   *  path only (wire fold, turn commit, compress commit) — preview/mirror
+   *  slots are never persisted. No-op when persistence is disabled. */
+  scheduleFoldSnapshot(ctx: ExtensionContext): void;
+  /** Synchronously flush the session's checkpoint. For session_shutdown:
+   *  the host may exit as soon as the handler returns, so a debounced save
+   *  would be dropped with the process. Returns false when the write
+   *  failed (the in-memory slot is unaffected either way). */
+  flushFoldSync(sid: string): boolean;
   forgetSession(sid: string): void;
   /** Rebuild blocks from the persisted session at session_start so /acp and
    *  acp_status show them BEFORE the first LLM call of a resumed session.
@@ -84,7 +109,7 @@ export interface AcpRuntime {
 }
 
 function freshSlot(preserveFrom?: FoldSlot): FoldSlot {
-  const slot: FoldSlot = { identities: [], foldedLen: 0, preview: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set(), rejectStreak: 0 };
+  const slot: FoldSlot = { identities: [], foldedLen: 0, preview: false, live: false, state: createInitialState(), coreMessages: [], appliedCallIds: new Set(), rejectStreak: 0 };
   // Cadence stamps and the reject streak are SESSION-level accounting ("when
   // was the model last reminded" / "how many compress calls has it had
   // rejected in a row"), not stream-derived state. A re-fold rebuilds blocks
@@ -151,6 +176,12 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const coreSlots = new Map<string, FoldSlot>();
   let adapterRef = adapter;
   let promptsRef: Prompts = defaultPrompts;
+  // Fold-slot checkpoint store (issue #130): mechanism in acp-kernel/persist,
+  // policy (dir, enable, schema version) in fold-persist.ts. Built once per
+  // runtime; setAdapter does not rebind it — persistence follows the plugin
+  // process, not per-session adapter config.
+  const foldPersist = resolveFoldPersistence(adapter);
+  const foldStore = createFoldStore(foldPersistDir(foldPersist.dir), foldPersist.enabled);
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
@@ -185,18 +216,26 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return ctx.sessionManager.getSessionId();
   }
 
-  // The input stream (event.messages) is the single source of truth. Identity
-  // is position-based (p1..pN); refs are assigned by order and never rebind as
-  // long as the prefix is immutable. Compression blocks are DERIVED state:
-  // each compress tool call lives in the stream itself, so the block ledger is
-  // rebuilt by replaying the calls — no sidecar state file, no host ids, no
-  // cross-view alignment. Retry/rewind/compaction shrink or rewrite the
-  // stream; the fold detects a mutated prefix and re-folds from scratch, so
-  // state always equals fold(stream).
-  // Core-space fold (provider mode, wire-fold.ts): identical LCP + replay
-  // semantics on BiliMessage[] with content-hash ids. No feedback-view
-  // reuse (the wire payload is request-local and never re-enters) and no
-  // originalById (the output rebuilds onto the wire, not to AgentMessages).
+  // The input stream (event.messages) is the single source of truth. In the
+  // wire space identity is content-hash based (coreIdentity, wire-fold.ts):
+  // the same wire recomputes the same ids — which is exactly what makes a
+  // cross-process checkpoint meaningful. Compression blocks are DERIVED
+  // state: each compress tool call lives in the stream itself, so the block
+  // ledger is rebuilt by replaying the calls — no host ids, no cross-view
+  // alignment. Retry/rewind/compaction shrink or rewrite the stream; the
+  // fold detects a mutated prefix and re-folds from scratch, so state always
+  // equals fold(stream).
+  // EXCEPTION (issue #130): at restart the wire payload is not available
+  // until the first provider request, so primeFold mirrors the fold from the
+  // session VIEW — but the view→wire projection is host-owned (pi-ai
+  // transformMessages + convertMessages: cross-model thinking demotion,
+  // developer→user remap, empty-message drops) and the mirror lands in a
+  // different fingerprint space; every replay then failed the span guard
+  // (observed live: 1988 mirror pieces vs 1692 live, 0/14 anchors). The
+  // live fold slot is therefore checkpointed to disk (fold-persist.ts) and
+  // restored at session_start before any mirror runs. The first live fold
+  // still re-validates the restored slot via LCP; a stale checkpoint
+  // degrades to the normal re-fold, never worse.
   function foldStreamCore(ctx: ExtensionContext, stream: BiliMessage[]): CoreFoldResult {
     const sid = sidOf(ctx);
     let slot = coreSlotFor(sid);
@@ -292,6 +331,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     slot.identities = ids;
     slot.foldedLen = ids.length;
     slot.coreMessages = coreMessages;
+    if (!slot.preview) {
+      slot.live = true;
+      scheduleFoldSnapshotById(sid);
+    }
 
     return { state: slot.state, coreMessages, streamLen: stream.length };
   }
@@ -379,6 +422,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   function commitFoldState(ctx: ExtensionContext, state: CompressionState, toolCallId?: string): void {
     const slot = slotForMode(ctx, sidOf(ctx));
     slot.state = state;
+    // A compress commit is live truth even if it lands before any wire fold
+    // this process (read-path placeholder must not suppress restore).
+    slot.live = true;
     if (toolCallId) slot.appliedCallIds.add(toolCallId);
   }
 
@@ -386,6 +432,73 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     const slot = slotForMode(ctx, sidOf(ctx));
     slot.rejectStreak = ok ? 0 : slot.rejectStreak + 1;
     return slot.rejectStreak;
+  }
+  /** Restore the fold slot from the previous process's checkpoint (issue
+   *  #130). An existing in-memory slot (session switch back to a live
+   *  session) is live truth and never clobbered. Returns false when nothing
+   *  was restored so the caller can fall back to the primeFold mirror.
+   *  A checkpoint with zero blocks is NOT a restore: it carries nothing the
+   *  fresh slot lacks (freshSlot is 0 blocks too, and LCP over empty
+   *  identities is lcp=0 either way), but claiming it WOULD suppress the
+   *  mirror — which can still replay compress calls from the transcript.
+   *  Observed live in tests: an early debounce flush (500ms) writes a
+   *  pre-compress 0-block snapshot; restoring it made session_switch's
+   *  skip-live path pin the 0-block slot and the panel showed "0" (the
+   *  exact issue #130 symptom from the wrong direction). */
+  function restoreFold(ctx: ExtensionContext): boolean {
+    const sid = sidOf(ctx);
+    const existing = coreSlots.get(sid);
+    if (existing?.live) {
+      logInfo("fold", { sid, event: "fold-restore-skip-live", blocks: existing.state.blocks.length });
+      return true;
+    }
+    if (!foldPersist.enabled) return false;
+    const envelope = foldStore.loadSync(sid);
+    if (!envelope) return false;
+    const r = restoreFoldSnapshot(envelope.payload);
+    if (r.state.blocks.length === 0) {
+      logInfo("fold", { sid, event: "fold-restore-empty" });
+      return false;
+    }
+    coreSlots.set(sid, {
+      identities: r.identities,
+      foldedLen: r.foldedLen,
+      preview: false,
+      live: true,
+      state: r.state,
+      coreMessages: r.coreMessages,
+      appliedCallIds: r.appliedCallIds,
+      rejectStreak: r.rejectStreak,
+    });
+    logInfo("fold", { sid, event: "fold-restore", blocks: r.state.blocks.length, foldedLen: r.foldedLen });
+    return true;
+  }
+
+  function snapshotOf(slot: FoldSlot): FoldSnapshot {
+    return {
+      identities: slot.identities,
+      foldedLen: slot.foldedLen,
+      state: slot.state,
+      coreMessages: slot.coreMessages,
+      appliedCallIds: [...slot.appliedCallIds],
+      rejectStreak: slot.rejectStreak,
+    };
+  }
+
+  function scheduleFoldSnapshotById(sid: string): void {
+    const slot = coreSlots.get(sid);
+    if (!slot || slot.state.blocks.length === 0) return;
+    foldStore.scheduleSave(sid, () => snapshotOf(slot));
+  }
+
+  function scheduleFoldSnapshot(ctx: ExtensionContext): void {
+    scheduleFoldSnapshotById(sidOf(ctx));
+  }
+
+  function flushFoldSync(sid: string): boolean {
+    const slot = coreSlots.get(sid);
+    if (!slot) return false;
+    return foldStore.flushSync(sid, () => snapshotOf(slot));
   }
 
   function rejectStreakFor(ctx: ExtensionContext): number {
@@ -404,6 +517,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     stateFor,
     commitFoldState,
     noteCompressOutcome,
+    restoreFold,
+    scheduleFoldSnapshot,
+    flushFoldSync,
     rejectStreakFor,
     forgetSession,
     primeFold,
