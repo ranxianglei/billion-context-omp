@@ -172,14 +172,14 @@ test("provider transform: reasoning_details survive an active compression replay
   assert.ok(await fire(messages), "base request transformed");
 
   const compress = api.tools.find((t) => t.name === "compress")!;
-  const r1 = await compress.execute!("call_c1", { content: [{ startId: "m00002", endId: "m00009", summary: SUMMARY }] }, undefined, undefined, ctx);
+  const r1 = await compress.execute!("call_c1", { content: [{ startId: "m00001", endId: "m00008", summary: SUMMARY }] }, undefined, undefined, ctx);
   assert.match(text(r1), /1 block/, `compress ok: ${text(r1).slice(0, 200)}`);
 
   messages.push({
     role: "assistant",
     content: "",
     reasoning_details: [{ type: "reasoning.encrypted", id: "call_c1", data: "opaque-compress" }],
-    tool_calls: [{ id: "call_c1", type: "function", function: { name: "compress", arguments: JSON.stringify({ content: [{ startId: "m00002", endId: "m00009", summary: SUMMARY }] }) } }],
+    tool_calls: [{ id: "call_c1", type: "function", function: { name: "compress", arguments: JSON.stringify({ content: [{ startId: "m00001", endId: "m00008", summary: SUMMARY }] }) } }],
   });
   messages.push({ role: "tool", tool_call_id: "call_c1", content: text(r1) });
   messages.push({ role: "user", content: "next turn" });

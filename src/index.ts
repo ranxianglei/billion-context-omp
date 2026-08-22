@@ -14,7 +14,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { providerDeliveryWarning, hostMeetsMinimum, MIN_HOST_VERSION, type ProviderDeliveryWarning } from "./transform-mode.js";
 import { VERSION } from "@oh-my-pi/pi-utils";
-import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, responsesProjection, responsesRebuild, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
+import { applyWireTagContract, coreToPayloadMessages, detectProviderWireFormat, payloadRepresentable, payloadToCore, responsesProjection, responsesRebuild, restoreOpenaiSystemPrefix, restoreOpenaiWireFidelity, type ProviderWireFormat } from "./wire-fold.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { buildAcpSystemPrompt } from "./system-prompt.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -243,12 +243,16 @@ function wireProviderTransform(pi: ExtensionAPI, runtime: AcpRuntime, warnDelive
         rebuilt = responsesRebuild(projection!, result.coreOut);
       } else {
         const inMessages = (payload as { messages?: unknown[] }).messages ?? [];
-        // Openai rebuilds restore the host's wire contract first (issue #105):
+        // Openai rebuilds restore the host's wire contract (issue #105):
         // content "" on assistant tool-call messages and reasoning_details
         // replay — the codec drops/flips both and strict backends trip.
+        // The kernel hoists the leading system/developer prefix out of the
+        // fold space (acp-kernel 0.0.37), so it must be re-attached from the
+        // original wire — otherwise a compression covering the old system
+        // piece removed the model's system prompt from every later request.
         rebuilt =
           fmt === "openai"
-            ? restoreOpenaiWireFidelity(inMessages, coreToPayloadMessages(result.coreOut, fmt, cacheControls))
+            ? restoreOpenaiSystemPrefix(inMessages, restoreOpenaiWireFidelity(inMessages, coreToPayloadMessages(result.coreOut, fmt, cacheControls)))
             : coreToPayloadMessages(result.coreOut, fmt, cacheControls);
       }
       const outMsgs = Array.isArray(rebuilt) ? rebuilt.length : 1;
