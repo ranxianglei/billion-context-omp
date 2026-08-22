@@ -373,6 +373,38 @@ test("viewToCoreStream mirrors thinking blocks as reasoning pieces (issue #103)"
   assert.ok(!core.some((m) => m.contentType === "reasoning" && !(m.text ?? "").trim()), "whitespace-only thinking dropped");
 });
 
+// Demoted-inline hosts (glm/qwen3/deepseek/kimi via openai-completions)
+// replace thinking blocks with `<think>…</think>` text INSIDE the content
+// string: tag + "\n" glue when another block follows + text parts joined
+// with no separator, each keeping its own leading whitespace. The default
+// reasoning_content mirror diverges every post-thinking fingerprint there,
+// so restart replay fails until the demoted mirror refolds (issue #64,
+// demoted variant). Byte rules verified against live glm-5.3 request dumps.
+test("viewToCoreStream demoteThinking mirrors inline <think> serialization byte-exactly", () => {
+  const view = [
+    { role: "user", content: [{ type: "text", text: "q" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "each." },
+        { type: "text", text: "\n\n两个 PR：" },
+      ],
+    },
+    { role: "assistant", content: [{ type: "thinking", thinking: "only think" }] },
+    { role: "assistant", content: [{ type: "text", text: "   " }] },
+  ] as unknown as Parameters<typeof viewToCoreStream>[0];
+  const core = viewToCoreStream(view, "base system", { demoteThinking: true });
+  const texts = core.filter((m) => m.role === "assistant" && m.contentType === "text").map((m) => m.text);
+  assert.deepEqual(texts, [
+    "<think>\neach.\n</think>\n\n\n两个 PR：",
+    "<think>\nonly think\n</think>",
+  ], "tag + glue \\n + text's own leading whitespace; no separator between blocks");
+  assert.ok(!core.some((m) => m.contentType === "reasoning"), "no reasoning pieces in demoted mode");
+  // Default variant unchanged: same view still yields reasoning_content pieces.
+  const def = viewToCoreStream(view, "base system");
+  assert.equal(def.filter((m) => m.contentType === "reasoning").length, 2, "default mirror keeps reasoning pieces");
+});
+
 test("viewToAnthropicCore mirrors thinking blocks as reasoning pieces (issue #103)", () => {
   const view = [
     { role: "user", content: [{ type: "text", text: "q" }] },
