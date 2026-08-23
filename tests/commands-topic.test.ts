@@ -112,3 +112,67 @@ test("/acp panel session-only uses the estimation scale, never cross-scale (issu
   assert.ok(line, `Session-only line missing:\n${text}`);
   assert.doesNotMatch(line!, /406k/, "cross-scale subtraction must not appear");
 });
+
+test("/acp panel renders prompt cache hit rate from session entries", async () => {
+  const runtime = {
+    configFor: () => ({ modelContextLimit: 1_000_000, nudge: {}, compress: {} }),
+    stateFor: async () => ({
+      state: { blocks: [], stats: { tokensCompressed: 0 }, messageRefs: { byRaw: {}, byRef: {} } },
+      coreMessages: [],
+    }),
+    core: { processTurn: () => ({ messages: [], state: { blocks: [], stats: { tokensCompressed: 0 } }, nudge: { shouldInject: false, reason: "idle", contextBreakdown: { system: 0, tool: 20_000, text: 4_000, code: 0, summaries: 0, growth: 0 } } }) },
+  } as unknown as AcpRuntime;
+
+  const entries = [
+    { type: "message", message: { role: "user", content: [{ type: "text", text: "hi" }] } },
+    // request 1: 1k fresh + 99k cache-served → 99% of 100k billed
+    { type: "message", message: { role: "assistant", content: [], usage: { input: 1_000, output: 50, cacheRead: 99_000, cacheWrite: 0, totalTokens: 100_050 } } },
+    // no cache signal (cache-less provider) → excluded
+    { type: "message", message: { role: "assistant", content: [], usage: { input: 5_000, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 5_010 } } },
+    // request 2 (last): 180k served + 20k written → 90% of 200k billed
+    { type: "message", message: { role: "assistant", content: [], usage: { input: 0, output: 80, cacheRead: 180_000, cacheWrite: 20_000, totalTokens: 200_080 } } },
+  ];
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (text: string) => notified.push(text) },
+    getContextUsage: () => ({ tokens: 430_000 }),
+    model: { contextWindow: 1_000_000 },
+    sessionManager: { getSessionId: () => "t5", getSessionFile: () => "/tmp/t5.json", getEntries: () => entries },
+  } as unknown as ExtensionCommandContext;
+
+  const acp = makeCommands(runtime).find((c) => c.name === "acp")!;
+  await acp.options.handler!("", ctx);
+
+  const text = notified[0] ?? "";
+  // session = (99k + 180k) / (100k + 200k) = 93.0%; last = 180k/200k = 90.0%
+  assert.match(text, /Prompt cache \(provider-reported\): 90\.0% last · 93\.0% session avg — 279k of 300k billed prompt tokens served from cache \(2 req\)/, text);
+});
+
+test("/acp panel omits the prompt cache section without cache-reported requests", async () => {
+  const runtime = {
+    configFor: () => ({ modelContextLimit: 1_000_000, nudge: {}, compress: {} }),
+    stateFor: async () => ({
+      state: { blocks: [], stats: { tokensCompressed: 0 }, messageRefs: { byRaw: {}, byRef: {} } },
+      coreMessages: [],
+    }),
+    core: { processTurn: () => ({ messages: [], state: { blocks: [], stats: { tokensCompressed: 0 } }, nudge: { shouldInject: false, reason: "idle", contextBreakdown: { system: 0, tool: 20_000, text: 4_000, code: 0, summaries: 0, growth: 0 } } }) },
+  } as unknown as AcpRuntime;
+
+  const entries = [
+    { type: "message", message: { role: "assistant", content: [], usage: { input: 5_000, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 5_010 } } },
+  ];
+  const notified: string[] = [];
+  const ctx = {
+    ui: { notify: (text: string) => notified.push(text) },
+    getContextUsage: () => ({ tokens: 430_000 }),
+    model: { contextWindow: 1_000_000 },
+    sessionManager: { getSessionId: () => "t6", getSessionFile: () => "/tmp/t6.json", getEntries: () => entries },
+  } as unknown as ExtensionCommandContext;
+
+  const acp = makeCommands(runtime).find((c) => c.name === "acp")!;
+  await acp.options.handler!("", ctx);
+
+  const text = notified[0] ?? "";
+  assert.ok(text, "panel rendered");
+  assert.doesNotMatch(text, /Prompt cache/, `cache section must be omitted without cache-reported requests:\n${text}`);
+});

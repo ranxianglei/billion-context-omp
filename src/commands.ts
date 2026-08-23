@@ -6,6 +6,20 @@ import { collectCoveredMessageIds, estimateTokens } from "./tokens.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { logThrow } from "./log.js";
 
+/** Extract per-request prompt-cache usage from assistant messages' provider
+ *  reported usage. Requests without cache reporting stay 0/0 —
+ *  cacheHitStats excludes them from the average. */
+function cacheUsageSamples(entries: ReadonlyArray<{ type: string; message?: { role?: string; usage?: { input?: number; cacheRead?: number; cacheWrite?: number } } }>): Array<{ input: number; cacheRead: number; cacheWrite: number }> {
+  const out: Array<{ input: number; cacheRead: number; cacheWrite: number }> = [];
+  for (const e of entries) {
+    if (e.type !== "message" || !e.message) continue;
+    const m = e.message;
+    if (m.role !== "assistant" || !m.usage) continue;
+    out.push({ input: m.usage.input ?? 0, cacheRead: m.usage.cacheRead ?? 0, cacheWrite: m.usage.cacheWrite ?? 0 });
+  }
+  return out;
+}
+
 declare const CURRENT_VERSION: string;
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
@@ -120,5 +134,6 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     nudge: turn.nudge,
     modelContextLimit: config.modelContextLimit,
     unprunedTokens: coreMessages.reduce((sum, m) => sum + defaultCountTokens(m.text ?? ""), 0),
+    cacheUsages: ctx.sessionManager?.getEntries ? cacheUsageSamples(ctx.sessionManager.getEntries()) : undefined,
   });
 }
