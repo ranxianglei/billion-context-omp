@@ -9,6 +9,10 @@ import {
   autoInstallLatest,
   setRunNpmForTest,
   setRunNodeForTest,
+  setInstalledSpecForTest,
+  isVersionNewer,
+  specUpdateTag,
+  isAutoUpdatableSpec,
 } from "../src/update.js";
 import type { NpmRunner, NodeRunner } from "../src/update.js";
 
@@ -53,6 +57,103 @@ test("findNpmRoot locates the package root when nested under node_modules", () =
 
 test("findNpmRoot terminates when no node_modules ancestor exists (no Windows infinite loop)", { timeout: 2000 }, () => {
   assert.equal(findNpmRoot(homedir()), undefined);
+});
+
+test("isVersionNewer compares numeric segments", () => {
+  assert.equal(isVersionNewer("0.1.43", "0.1.41"), true);
+  assert.equal(isVersionNewer("0.1.41", "0.1.43"), false);
+  assert.equal(isVersionNewer("0.1.41", "0.1.41"), false);
+  assert.equal(isVersionNewer("0.2.0", "0.10.0"), false);
+  assert.equal(isVersionNewer("1.0.0", "0.9.9"), true);
+  assert.equal(isVersionNewer("v1.2.3", "1.2.2"), true);
+});
+
+test("isVersionNewer handles prerelease ordering (pre < release, numeric pre parts)", () => {
+  assert.equal(isVersionNewer("0.1.46", "0.1.46-pr.202.1"), true);
+  assert.equal(isVersionNewer("0.1.46-pr.202.1", "0.1.46"), false);
+  assert.equal(isVersionNewer("0.1.46-pr.203.1", "0.1.46-pr.202.1"), true);
+  assert.equal(isVersionNewer("0.1.47", "0.1.46-pr.999.1"), true);
+});
+
+test("specUpdateTag maps a spec to the dist-tag channel to track", () => {
+  assert.equal(specUpdateTag("stable"), "stable");
+  assert.equal(specUpdateTag("dev"), "dev");
+  assert.equal(specUpdateTag("pr-327"), "pr-327");
+  assert.equal(specUpdateTag("latest"), "latest");
+  assert.equal(specUpdateTag("^1.2.3"), "latest");
+  assert.equal(specUpdateTag("~0.1.0"), "latest");
+  assert.equal(specUpdateTag(">=1.0.0"), "latest");
+  assert.equal(specUpdateTag("*"), "latest");
+  assert.equal(specUpdateTag("1.2.3"), undefined);
+  assert.equal(specUpdateTag("file:../local/x.tgz"), undefined);
+  assert.equal(specUpdateTag("git+https://github.com/x/y.git"), undefined);
+  assert.equal(specUpdateTag(""), undefined);
+});
+
+test("isAutoUpdatableSpec classifies specs", () => {
+  assert.equal(isAutoUpdatableSpec("latest"), true);
+  assert.equal(isAutoUpdatableSpec("*"), true);
+  assert.equal(isAutoUpdatableSpec("^1.2.3"), true);
+  assert.equal(isAutoUpdatableSpec("stable"), true);
+  assert.equal(isAutoUpdatableSpec("pr-327"), true);
+  assert.equal(isAutoUpdatableSpec("1.2.3"), false);
+  assert.equal(isAutoUpdatableSpec("file:../x.tgz"), false);
+  assert.equal(isAutoUpdatableSpec(""), false);
+});
+
+test("checkForUpdate follows the installed channel: @stable → fetch /stable (not /latest)", async () => {
+  const os = await import("node:os");
+  const fs = await import("node:fs");
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), "acp-channel-"));
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = tmp;
+  process.env.USERPROFILE = tmp;
+  delete process.env.ACP_AUTO_UPDATE;
+  const urls: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown) => {
+    urls.push(String(input));
+    return { ok: true, json: async () => ({ version: "0.0.1" }) } as Response;
+  }) as unknown as typeof fetch;
+  setInstalledSpecForTest("stable");
+  try {
+    await checkForUpdate(true);
+    assert.equal(urls.length, 1);
+    assert.match(urls[0], /registry\.npmjs\.org\/billion-context-omp\/stable$/);
+  } finally {
+    globalThis.fetch = original;
+    process.env.HOME = saved.HOME;
+    process.env.USERPROFILE = saved.USERPROFILE;
+    setInstalledSpecForTest(null);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("checkForUpdate skips the fetch entirely for an exact-pin spec (never auto-updates)", async () => {
+  const os = await import("node:os");
+  const fs = await import("node:fs");
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), "acp-pinned-"));
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = tmp;
+  process.env.USERPROFILE = tmp;
+  delete process.env.ACP_AUTO_UPDATE;
+  let fetchCalled = false;
+  const original = globalThis.fetch;
+  globalThis.fetch = (() => {
+    fetchCalled = true;
+    throw new Error("fetch must not be called for a pinned spec");
+  }) as unknown as typeof fetch;
+  setInstalledSpecForTest("1.2.3");
+  try {
+    await checkForUpdate(true);
+    assert.equal(fetchCalled, false, "pinned spec → no fetch");
+  } finally {
+    globalThis.fetch = original;
+    process.env.HOME = saved.HOME;
+    process.env.USERPROFILE = saved.USERPROFILE;
+    setInstalledSpecForTest(null);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("a failed registry fetch does not burn the throttle window (issue #14 Minor3)", async () => {
