@@ -1,12 +1,17 @@
+# billion-context-omp — 已废弃
+
+> [!WARNING]
+> **本包已废弃。** omp (oh-my-pi) 的上下文压缩请改用
+> [billion-context](https://github.com/ranxianglei/billion-context) 代理版本，现已直接支持 omp：
+>
+> ```bash
+> npm i -g billion-context && bili setup omp
+> ```
+>
+> 代理在 HTTP 层运行同一压缩引擎（[acp-kernel](https://github.com/ranxianglei/acp-kernel)），
+> 适配 omp 的全部模型/供应商（不依赖插件扩展 API），后续开发都在那边进行。本插件仓库仅保留维护。
+
 [English](./README.md) | [中文](./README.zh-CN.md)
-
-# billion-context-omp
-
-<p align="center">
-面向 <a href="https://github.com/can1357/oh-my-pi">omp (oh-my-pi)</a> 的 <strong>Billion-Context</strong>
-<br />
-由模型决定<em>何时</em>压缩、<em>压缩什么</em> —— 而不是硬截断。
-</p>
 
 ---
 
