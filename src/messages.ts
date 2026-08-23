@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent";
-import { SUMMARY_HEADER, type CoreMessage } from "acp-kernel";
+import { SUMMARY_HEADER, parseCompressArgs, type CoreMessage } from "acp-kernel";
 import { debug } from "./log.js";
 type AgentMessage = SessionMessageEntry["message"];
 export type { AgentMessage };
@@ -67,25 +67,8 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
   const out: StreamCompressCall[] = [];
   for (const call of allToolCalls((message as AnyMessage).content)) {
     if (!call.id) continue;
-    const args = compressToolArgs(call);
-    if (!args) continue;
-    const content = args.content;
-    if (!Array.isArray(content)) continue;
-    const ranges: StreamCompressCall["ranges"] = [];
-    const callTopic = typeof args.topic === "string" ? args.topic : undefined;
-    for (const item of content) {
-      const r = item as { startId?: unknown; endId?: unknown; summary?: unknown; topic?: unknown };
-      if (typeof r.startId !== "string" || typeof r.endId !== "string" || typeof r.summary !== "string" || r.summary.length === 0) continue;
-      ranges.push({
-        startRef: r.startId,
-        endRef: r.endId,
-        summary: r.summary,
-        topic: typeof r.topic === "string" ? r.topic : callTopic,
-        summaryMaxChars: typeof args.summaryMaxChars === "number" ? args.summaryMaxChars : undefined,
-        compressCallId: call.id,
-      });
-    }
-    if (ranges.length > 0) out.push({ id: call.id, ranges });
+    const { ranges } = parseCompressArgs(call.arguments, { callId: call.id });
+    if (ranges.length > 0) out.push({ id: call.id, ranges: ranges.map((r) => ({ ...r, compressCallId: call.id })) });
   }
   return out;
 }
