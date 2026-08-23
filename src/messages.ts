@@ -67,7 +67,9 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
   const out: StreamCompressCall[] = [];
   for (const call of allToolCalls((message as AnyMessage).content)) {
     if (!call.id) continue;
-    const { ranges } = parseCompressArgs(call.arguments, { callId: call.id });
+    const args = compressToolArgs(call);
+    if (!args) continue;
+    const { ranges } = parseCompressArgs(args, { callId: call.id });
     if (ranges.length > 0) out.push({ id: call.id, ranges: ranges.map((r) => ({ ...r, compressCallId: call.id })) });
   }
   return out;
