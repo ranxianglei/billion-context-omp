@@ -11,8 +11,7 @@
         "@oh-my-pi/pi-coding-agent": "17.3.8",
         "@oh-my-pi/pi-utils": "17.3.8",
         "@types/node": "^26.1.2",
-        "acp-kernel": "0.0.31",
-        "billion-context-kit": "0.2.0",
+        "acp-kernel": "0.0.42",
         "bun-types": "^1.3.14",
         "tsup": "^8.5.1",
         "tsx": "^4.23.1",
@@ -347,7 +346,7 @@
 
     "acorn": ["acorn@8.18.0", "", { "bin": "bin/acorn" }, "sha512-lGq+9yr1/GuAWaVYIHRjvvySG5/4VfKIvC8EWxStPdcDh/Ka7FG3twP6v4d5BkravUilhIAsG4Qj83t02LWUPQ=="],
 
-    "acp-kernel": ["acp-kernel@0.0.31", "", {}, "sha512-XVL/8RryOhc4mvqa+5JJTv7P4s2TJvmBHL6l0/3rCrixPfMcAADuHC5wXHlhRdsu8qsb26MFDT27rN8lJ2qCQA=="],
+    "acp-kernel": ["acp-kernel@0.0.42", "", {}, "sha512-6jNeOL3NmDYB0d0X15TJqPv1RJr1kvg+qXnBeuEdgXdksqSxzEsNJixmnppwg9lHVln9ws1RCityDXLtQwrDXA=="],
 
     "adm-zip": ["adm-zip@0.5.18", "", {}, "sha512-ufJnssQGbxzLNS1Ho9bCtX4rQKCCvoVuDLHoJyc3F9dOGDB4BkWs2Ci0kv53lqocAEQ/Cbi+I2XCsNYGqVYqng=="],
 
@@ -356,8 +355,6 @@
     "ansi-styles": ["ansi-styles@6.2.3", "", {}, "sha512-4Dj6M28JB+oAH8kFkTLUo+a2jwOFkuqb3yucU0CANcRRUbxS0cP0nZYCGjcc3BNXwRIsUVmDGgzawme7zvJHvg=="],
 
     "any-promise": ["any-promise@1.3.0", "", {}, "sha512-7UvmKalWRt1wgjL1RrGxoSJW/0QZFIegpeGvZG9kjp8vrRu55XTHbwnqq2GpXm9uLbcuhxm3IqX9OB4MZR1b2A=="],
-
-    "billion-context-kit": ["billion-context-kit@0.2.0", "", { "dependencies": { "acp-kernel": "0.0.23" } }, "sha512-KBO8MYaOBNcdp3cU5h2Z0f3OsJrGf0+OBqbeJHt5yKXPU7cngRhlUInMbWC7cw6AdIcvurs7u8U1esMijizhdQ=="],
 
     "boolean": ["boolean@3.2.0", "", {}, "sha512-d0II/GO9uf9lfUHH2BQsjxzRJZBdsjgsBiW4BvhWk/3qoKwQFjIDVN19PfX8F2D/r9PCMTtLWjYVCFrpeYUzsw=="],
 
@@ -640,8 +637,6 @@
     "@opentelemetry/sdk-trace-base/@opentelemetry/sdk-trace": ["@opentelemetry/sdk-trace@2.10.0", "", { "dependencies": { "@opentelemetry/core": "2.10.0", "@opentelemetry/resources": "2.10.0", "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <1.10.0" } }, "sha512-MfQGq3GRmTh5fM/y+OjaO0vj6+luCB1XO2gfXCalKCfgKw0eHL++sm75DNweC6ohlp+aFvACqeE0fYayqdRaoQ=="],
 
     "@opentelemetry/sdk-trace-node/@opentelemetry/core": ["@opentelemetry/core@2.10.0", "", { "dependencies": { "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.0.0 <1.10.0" } }, "sha512-/wNZ8twnEQQA4HoHu22+vcsdru6pWPWxW+7w+FlxT6Id7PE/WIbZmVKkte+PF72e0F2dnImFeHD2syyE1Mw6MQ=="],
-
-    "billion-context-kit/acp-kernel": ["acp-kernel@0.0.23", "", {}, "sha512-bG28aYfBda8z34fsaoNc4QBix4gRtQDQznR6G4XBaz9z1xgxdmdYtazQQMBjxnfEL9yCrDb9CTpkl7IXWiuviA=="],
 
     "cliui/string-width": ["string-width@7.2.0", "", { "dependencies": { "emoji-regex": "^10.3.0", "get-east-asian-width": "^1.0.0", "strip-ansi": "^7.1.0" } }, "sha512-tsaTIkKW9b4N+AEj+SVA+WhJzV7/zMhcSu78mLKWSk7cXMOSHsBKFWUs0fWwq8QyK3MgJBQRX6Gbi4kYbdvGkQ=="],
 
