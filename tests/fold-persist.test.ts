@@ -1,6 +1,6 @@
 import { test, afterAll } from "bun:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createAcpExtension } from "../src/index.js";
@@ -362,6 +362,70 @@ test("fold persistence: restored slot survives a mid-session restart with EXTEND
   assert.ok(out, "provider transform active");
   const st = await statusText(host2);
   assert.equal(activeBlocks(st), "1", "extended tail keeps the restored block:\n" + st);
+});
+
+test("fold persistence: multi-restart checkpoint — block-id generations collide and kill fresh compressions (8/23 incident)", async () => {
+  withFoldDir();
+  const sid = "fp-id-collision";
+  const session = fillerSession();
+
+  // Generation 1: live fold + compress (creates b1) + flush.
+  const host1 = makeHost(session, sid);
+  createAcpExtension({ autoUpdate: false })(host1.api as ExtensionAPI);
+  await livePhase(host1, session);
+  await host1.handlers.get("session_shutdown")![0]!({ type: "session_shutdown" }, host1.ctx);
+
+  // Generation 2: restart restores b1, conversation continues, compress the
+  // tail (allocates b2 which CONSUMES b1 via directBlockIds) + flush.
+  const host2 = makeHost(session, sid);
+  createAcpExtension({ autoUpdate: false })(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+  session.push(userMsg("gen2 more filler " + FILLER));
+  session.push(botMsg("gen2 answer " + FILLER));
+  await llmCall(host2, host2.wire(session));
+  const args2 = { content: [{ startId: "m00002", endId: "m00015", summary: "GEN2 SUMMARY " + SUMMARY }] };
+  const res2: AgentToolResult<unknown> = await host2.tools.get("compress")!.execute("call_g2", args2, undefined, undefined, host2.ctx);
+  session.push(toolCallMsg("call_g2", "compress", args2));
+  session.push(toolResultMsg("call_g2", "compress", (res2.content as Array<{ text?: string }>).map((b) => b.text ?? "").join("\n")));
+  await llmCall(host2, host2.wire(session));
+  await host2.handlers.get("session_shutdown")![0]!({ type: "session_shutdown" }, host2.ctx);
+
+  // The incident shape: a STALE on-disk checkpoint from an EARLIER generation
+  // (fewer blocks, lower nextBlockId, old directBlockIds naming ids that the
+  // ledger will hand out again). Simulate by hand-crafting the poison: the
+  // gen-1 ledger only ever saw b1, but its state claims nextBlockId=2 while
+  // a hostile "old b2" records directBlockIds ['b2'] — then generation 3
+  // restores the FULL gen-2 checkpoint whose nextBlockId ALSO allocates b2.
+  // Simpler true-to-incident reproduction: tamper the flushed checkpoint so
+  // nextBlockId points BELOW an existing id (exactly what mixed-generation
+  // restores produced live), then compress in gen 3 and demand the new block
+  // survives.
+  const cp = path.join(process.env.ACP_OMP_FOLD_DIR!, flatFileNameFor(sid));
+  const poisoned = JSON.parse(readFileSync(cp, "utf8")) as { payload: { state: { blocks: Array<{ blockId: string }>; nextBlockId: number } } };
+  const maxNum = poisoned.payload.state.blocks.reduce((m, b) => Math.max(m, Number.parseInt(b.blockId.slice(1), 10) || 0), 0);
+  poisoned.payload.state.nextBlockId = Math.max(1, maxNum - 1); // force id reuse
+  writeFileSync(cp, JSON.stringify(poisoned));
+
+  // Generation 3: restore + fresh compress → allocates a REUSED id. The
+  // fix (restoreFold generation hygiene) must have raised nextBlockId above
+  // every ledger id, so no reuse happens and the new block stays active.
+  const host3 = makeHost(session, sid);
+  createAcpExtension({ autoUpdate: false })(host3.api as ExtensionAPI);
+  await host3.handlers.get("session_start")![0]!({ type: "session_start" }, host3.ctx);
+  session.push(userMsg("gen3 question " + FILLER));
+  session.push(botMsg("gen3 answer " + FILLER));
+  await llmCall(host3, host3.wire(session));
+  const args3 = { content: [{ startId: "m00001", endId: "m00016", summary: "GEN3 SUMMARY " + SUMMARY }] };
+  const res3: AgentToolResult<unknown> = await host3.tools.get("compress")!.execute("call_g3", args3, undefined, undefined, host3.ctx);
+  session.push(toolCallMsg("call_g3", "compress", args3));
+  session.push(toolResultMsg("call_g3", "compress", (res3.content as Array<{ text?: string }>).map((b) => b.text ?? "").join("\n")));
+
+  const out = await llmCall(host3, host3.wire(session));
+  assert.ok(out, "provider transform active");
+  const flat = JSON.stringify(out);
+  assert.ok(flat.includes("GEN3 SUMMARY"), "gen3 block's summary rides the wire");
+  const st = await statusText(host3);
+  assert.ok(Number(activeBlocks(st)) >= 1, "gen3 block stays ACTIVE after the compress (no id-collision deactivation):\n" + st);
 });
 
 afterAll(() => {

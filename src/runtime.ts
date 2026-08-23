@@ -254,6 +254,24 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       coreSlots.set(sid, slot);
       lcp = 0;
     }
+    // Restored-block revalidation (issue #130 follow-up): blocks carried from
+    // a checkpoint must still reference THIS stream. A restored slot whose
+    // LCP collapsed to 0 keeps stale blocks whose blockIds the next
+    // allocateBlockId WILL reuse (nextBlockId resets on the fresh fold), so
+    // syncBlocks' consumed-set later deactivates the NEW blocks by collision
+    // — observed live: 54 blocks / 5 active, sent tokens never dropped after
+    // compressing 351k. Purge blocks whose effective ids no longer resolve
+    // in this stream before any replay can run.
+    if (lcp === 0 && slot.state.blocks.length > 0) {
+      const presentIds = new Set(ids);
+      // identity-based check: pieces are content-hashed, so a block is live
+      // in this space only if at least one covered piece is present verbatim.
+      const surviving = slot.state.blocks.filter((b) => b.active === false || b.effectiveMessageIds.some((id) => presentIds.has(id)));
+      if (surviving.length < slot.state.blocks.length) {
+        debug.event("fold-purge-stale-blocks", { sid, before: slot.state.blocks.length, after: surviving.length });
+        slot.state = { ...slot.state, blocks: surviving };
+      }
+    }
 
     const coreMessages = stream;
     const config = configFor(ctx);
@@ -460,17 +478,43 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       logInfo("fold", { sid, event: "fold-restore-empty" });
       return false;
     }
+    // Generation hygiene (live incident 8/23: 54 blocks / 5 active, three
+    // post-restart compressions totalling ~570k tokens deactivated). Checkpoints
+    // written across MANY restarts accumulate block copies from different
+    // processes whose `nextBlockId` counters disagree, so fresh
+    // allocateBlockId reuses ids (b1 x7, b2 x4 observed). syncBlocks keys the
+    // consumed-set by blockId STRING, so an old block's directBlockIds
+    // ("b12" from ITS generation) deactivates the new b12 of a LATER
+    // generation — the compression lands, then silently dies.
+    // 1) Keep only the newest generation per blockId (largest createdAt; the
+    //    live block is always the latest allocation).
+    // 2) Raise nextBlockId above every surviving id so no future allocation
+    //    can collide with any block already in the ledger.
+    const byId = new Map<string, typeof r.state.blocks[number]>();
+    for (const b of r.state.blocks) {
+      const prev = byId.get(b.blockId);
+      if (!prev || b.createdAt > prev.createdAt) byId.set(b.blockId, b);
+    }
+    const blocks = [...byId.values()];
+    if (blocks.length < r.state.blocks.length) {
+      logInfo("fold", { sid, event: "fold-restore-dedup", before: r.state.blocks.length, after: blocks.length });
+    }
+    const maxId = blocks.reduce((m, b) => {
+      const n = /^b(\d+)$/i.exec(b.blockId);
+      return n ? Math.max(m, Number.parseInt(n[1]!, 10)) : m;
+    }, 0);
+    const state = { ...r.state, blocks, nextBlockId: Math.max(r.state.nextBlockId ?? 1, maxId + 1) };
     coreSlots.set(sid, {
       identities: r.identities,
       foldedLen: r.foldedLen,
       preview: false,
       live: true,
-      state: r.state,
+      state,
       coreMessages: r.coreMessages,
       appliedCallIds: r.appliedCallIds,
       rejectStreak: r.rejectStreak,
     });
-    logInfo("fold", { sid, event: "fold-restore", blocks: r.state.blocks.length, foldedLen: r.foldedLen });
+    logInfo("fold", { sid, event: "fold-restore", blocks: state.blocks.length, foldedLen: r.foldedLen, nextBlockId: state.nextBlockId });
     return true;
   }
 
