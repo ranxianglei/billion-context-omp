@@ -428,6 +428,64 @@ test("fold persistence: multi-restart checkpoint — block-id generations collid
   assert.ok(Number(activeBlocks(st)) >= 1, "gen3 block stays ACTIVE after the compress (no id-collision deactivation):\n" + st);
 });
 
+test("fold persistence: view flip keeps block ids — preserveCompressedSlot must carry nextBlockId (8/23 incident, path 2)", async () => {
+  withFoldDir();
+  const sid = "fp-flip-id-collision";
+  const session = fillerSession();
+
+  // Generation 1: live fold + compress (mints b1, nextBlockId=2) + flush.
+  const host1 = makeHost(session, sid);
+  createAcpExtension({ autoUpdate: false })(host1.api as ExtensionAPI);
+  await livePhase(host1, session);
+  await host1.handlers.get("session_shutdown")![0]!({ type: "session_shutdown" }, host1.ctx);
+
+  // Generation 2: restore (nextBlockId=2, blocks=[b1]). A VIEW FLIP refold
+  // (same history re-fed through omp's recap/variant pipeline — LCP stays
+  // high, isViewFlip=true) must keep b1 AND the allocation counter. The
+  // incident: preserveCompressedSlot spread blocks/refs/stats off freshSlot's
+  // createInitialState (nextBlockId=1), so the next compression minted a
+  // second b1 — duplicate ledger entries, consumed-set collision, fresh
+  // blocks deactivated on sight, sent tokens never dropped.
+  const host2 = makeHost(session, sid);
+  createAcpExtension({ autoUpdate: false })(host2.api as ExtensionAPI);
+  await host2.handlers.get("session_start")![0]!({ type: "session_start" }, host2.ctx);
+  // Extend the tail, then feed the SAME history through a different
+  // projection: insert one variant-only message mid-stream (drops LCP below
+  // foldedLen but keeps it >= half — a flip, like omp's recap pipeline).
+  const variantSession = [...session];
+  variantSession.splice(Math.floor(variantSession.length / 2), 0, userMsg("variant recap marker " + FILLER));
+  await llmCall(host2, host2.wire(variantSession));
+  // Compress content OUTSIDE b1's span (b1 covers the original m00001..m00014
+  // ids — content-hash ids are position-free, so a variant stream re-feeds the
+  // same ids; a second block over m00002..m00015 would be a genuine
+  // already-compressed rejection, which is correct behavior, not a bug).
+  // The post-flip compress must mint a NON-colliding id (b2+: before the
+  // nextBlockId fix it minted a duplicate b1) and both blocks stay ACTIVE.
+  for (let i = 0; i < 4; i++) {
+    variantSession.push(userMsg(`tail q${i} ` + FILLER));
+    variantSession.push(botMsg(`tail a${i} ` + FILLER));
+  }
+  const lastIdx = 2 * (variantSession.length - 1);
+  const args2 = { content: [{ startId: "m00016", endId: `m${String(lastIdx).padStart(5, "0")}`, summary: "FLIP GEN2 SUMMARY " + SUMMARY }] };
+  const res2: AgentToolResult<unknown> = await host2.tools.get("compress")!.execute("call_g2b", args2, undefined, undefined, host2.ctx);
+  const res2Text = (res2.content as Array<{ text?: string }>).map((b) => b.text ?? "").join("\n");
+  variantSession.push(toolCallMsg("call_g2b", "compress", args2));
+  variantSession.push(toolResultMsg("call_g2b", "compress", res2Text));
+
+  const out = await llmCall(host2, host2.wire(variantSession));
+  assert.ok(out, "provider transform active");
+  // Either the compress applied (summary rides) or it legitimately rejected
+  // (range overlap) — both prove no crash; the hard invariants are below.
+  const st = await statusText(host2);
+  assert.ok(Number(activeBlocks(st)) >= 1, "restored b1 survives the view-flip purge:\n" + st);
+  assert.ok(!st.includes("COMPRESSED BLOCKS — 0 active"), "blocks did not evaporate on flip");
+  await host2.handlers.get("session_shutdown")![0]!({ type: "session_shutdown" }, host2.ctx);
+  const cp = JSON.parse(readFileSync(path.join(process.env.ACP_OMP_FOLD_DIR!, flatFileNameFor(sid)), "utf8")) as { payload: { state: { blocks: Array<{ blockId: string }>; nextBlockId: number } } };
+  const ids = cp.payload.state.blocks.map((b) => b.blockId);
+  assert.equal(new Set(ids).size, ids.length, `no duplicate block ids in ledger: ${ids.join(",")}`);
+  assert.ok(cp.payload.state.nextBlockId > Math.max(...ids.map((i) => Number.parseInt(i.slice(1), 10))), `nextBlockId(${cp.payload.state.nextBlockId}) above max id — future allocations cannot collide`);
+});
+
 afterAll(() => {
   // A direct `bun test tests/fold-persist.test.ts` must not leak the env to
   // other files in the same process (scripts/test.ts isolates per file, but
