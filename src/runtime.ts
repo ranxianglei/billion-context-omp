@@ -159,7 +159,7 @@ function isViewFlip(foldedLen: number, lcp: number): boolean {
  *  try to re-run them against this view's projection. */
 function preserveCompressedSlot(prev: FoldSlot): FoldSlot {
   const slot = freshSlot(prev);
-  slot.state = { ...slot.state, blocks: prev.state.blocks, messageRefs: prev.state.messageRefs, stats: prev.state.stats };
+  slot.state = { ...slot.state, blocks: prev.state.blocks, messageRefs: prev.state.messageRefs, stats: prev.state.stats, nextBlockId: prev.state.nextBlockId, nextRunId: prev.state.nextRunId };
   slot.appliedCallIds = new Set(prev.appliedCallIds);
   return slot;
 }
@@ -263,9 +263,14 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     // compressing 351k. Purge blocks whose effective ids no longer resolve
     // in this stream before any replay can run.
     if (lcp === 0 && slot.state.blocks.length > 0) {
-      const presentIds = new Set(ids);
-      // identity-based check: pieces are content-hashed, so a block is live
-      // in this space only if at least one covered piece is present verbatim.
+      // Compare in the SAME id space the blocks were minted in: block
+      // effectiveMessageIds are h_ content-hash ids (deriveMessageId), not
+      // the coreIdentity JSON strings used for LCP. Comparing across spaces
+      // made every refold purge ALL carried blocks — a view flip (which
+      // resets lcp to 0 after preserveCompressedSlot) lost the preserved
+      // blocks immediately, and a fresh compression then had no blocks to
+      // build directBlockIds on.
+      const presentIds = new Set(stream.map((m) => m.id));
       const surviving = slot.state.blocks.filter((b) => b.active === false || b.effectiveMessageIds.some((id) => presentIds.has(id)));
       if (surviving.length < slot.state.blocks.length) {
         debug.event("fold-purge-stale-blocks", { sid, before: slot.state.blocks.length, after: surviving.length });
