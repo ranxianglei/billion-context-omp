@@ -60,10 +60,8 @@ export function toolResultTexts(stream: AgentMessage[]): Map<string, string> {
   return results;
 }
 
-export interface StreamCompressCall {
-  id: string;
-  ranges: { startRef: string; endRef: string; summary: string; topic?: string; summaryMaxChars?: number; compressCallId: string }[];
-}
+export type { StreamCompressCall } from "acp-kernel/wire";
+import type { StreamCompressCall } from "acp-kernel/wire";
 
 export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
   const out: StreamCompressCall[] = [];
@@ -92,38 +90,8 @@ export function findCompressCalls(message: AgentMessage): StreamCompressCall[] {
   return out;
 }
 
-/** Extract a compress tool's arguments from a stream toolCall. Two call
- *  shapes exist: (1) top-level — our tools are registered with
- *  loadMode:"essential" so omp's tools.xdev does NOT mount them as xd://
- *  devices; the stream shows name:"compress" directly. (2) legacy xd:// —
- *  sessions recorded before that change (or hosts with tools.xdev forcing
- *  discoverable mounting) invoked compress through the write tool with path
- *  "xd://compress" and the tool args JSON-encoded in the content field. Both
- *  shapes must replay from the stream. Returns normalized compress args
- *  (content array
- *  plus optional topic / summaryMaxChars from wherever they live). */
-export function compressToolArgs(call: { name: string; arguments?: unknown }): { content: unknown[]; topic?: unknown; summaryMaxChars?: unknown } | null {
-  let args = call.arguments;
-  if (typeof args === "string") {
-    try { args = JSON.parse(args); } catch { return null; }
-  }
-  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
-  const a = args as Record<string, unknown>;
-  if (call.name === "compress") {
-    return Array.isArray(a.content) ? { content: a.content, topic: a.topic, summaryMaxChars: a.summaryMaxChars } : null;
-  }
-  if (call.name !== "write") return null;
-  const path = typeof a.path === "string" ? a.path.split("?")[0]!.replace(/\/+$/, "") : "";
-  if (path !== "xd://compress") return null;
-  let inner: unknown = a.content;
-  if (typeof inner === "string") {
-    try { inner = JSON.parse(inner); } catch { return null; }
-  }
-  if (!inner || typeof inner !== "object") return null;
-  if (Array.isArray(inner)) return { content: inner };
-  const ia = inner as Record<string, unknown>;
-  return Array.isArray(ia.content) ? { content: ia.content, topic: ia.topic, summaryMaxChars: ia.summaryMaxChars } : { content: [ia] };
-}
+import { compressToolArgs } from "acp-kernel/wire";
+export { compressToolArgs };
 
 function projectMessage(message: AgentMessage, id: string): CoreMessage[] {
   const msg = message as AnyMessage;
