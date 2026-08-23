@@ -3,6 +3,7 @@ import type {
   ExtensionContext,
   ExtensionFactory,
 } from "@oh-my-pi/pi-coding-agent";
+import { settings } from "@oh-my-pi/pi-coding-agent";
 import type { NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig } from "./config.js";
@@ -28,8 +29,22 @@ import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 
 declare const CURRENT_VERSION: string;
 
+function disableHostCompaction(): void {
+  // This plugin owns context compression; the host's auto-compaction is
+  // redundant. Disable at load via a runtime override (not persisted — reverts
+  // on uninstall); the host reads it live (autoCompactionEnabled getter).
+  // Guard: the settings proxy throws before Settings.init() (test envs).
+  try {
+    settings.override("compaction.enabled", false);
+    settings.override("compaction.strategy", "off");
+  } catch {
+    // Settings not initialized; skip.
+  }
+}
+
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
+    disableHostCompaction();
     const runtime = createRuntime(adapter);
     const warnDelivery = makeDeliveryWarner();
     wireSessionLifecycle(pi, runtime);
