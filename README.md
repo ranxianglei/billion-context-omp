@@ -1,6 +1,21 @@
-# billion-context-omp
+# billion-context-omp — DEPRECATED
+
+> [!WARNING]
+> **This package is deprecated.** For omp (oh-my-pi) context compression, use the
+> [billion-context](https://github.com/ranxianglei/billion-context) proxy, which now
+> supports omp directly:
+>
+> ```bash
+> npm i -g billion-context && bili setup omp
+> ```
+>
+> The proxy runs the same compression engine ([acp-kernel](https://github.com/ranxianglei/acp-kernel))
+> at the HTTP layer, works with every omp model/provider (no extension API dependency),
+> and is where all active development happens. This plugin repository is maintenance-only.
 
 [English](./README.md) | [中文](./README.zh-CN.md)
+
+---
 
 <p align="center">
 <strong>Billion-Context</strong> for <a href="https://github.com/can1357/oh-my-pi">omp (oh-my-pi)</a>
@@ -9,12 +24,6 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 </p>
 
 ---
-
-<p align="center">
-<a href="https://www.npmjs.com/package/billion-context-omp"><img src="https://img.shields.io/npm/v/billion-context-omp.svg?style=flat-square" alt="npm"></a>
-<a href="https://github.com/ranxianglei/billion-context-omp/blob/master/LICENSE"><img src="https://img.shields.io/npm/l/billion-context-omp.svg?style=flat-square" alt="license"></a>
-<a href="https://github.com/ranxianglei/billion-context-omp"><img src="https://img.shields.io/badge/GitHub-ranxianglei%2Fbillion--context--omp-181717?style=flat-square&logo=github" alt="GitHub"></a>
-</p>
 
 <p align="center">
 <code>omp install billion-context-omp</code>
