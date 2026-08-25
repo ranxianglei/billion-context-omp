@@ -432,7 +432,8 @@ async function transformStreamCore(
           turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
           const rendered = renderNudgeText(turn.nudge, runtime.prompts);
           const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
-          const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
+          // Tier >= 2 nudges already embed a block-ID example in the kernel text; a second raw-range example would conflict with it.
+          const example = top && (turn.nudge.tier ?? 1) < 2 ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
           if (emergency) {
             logWarn("nudge", { sid, event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
           }
